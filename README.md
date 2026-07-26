@@ -4,17 +4,12 @@
 
 <img src="./apps/workspace/design/icons/mediago-drama/png-light/icon-light-128.png" alt="MediaGo Drama" width="96" />
 
-**AI 漫剧创作 Agent 工作台**
-
-让 Agent 持续推进从小说解析、剧本改写到角色、场景、分镜和视频生成的漫剧生产流程。
-
-创作过程以本地文档保存在同一个项目中，让 Agent 能够持续理解上下文、复用创作资产，并把已经确认的内容继续用于图片和视频生成。
+**开源漫剧 Agent · 一键产出爆款**
 
 [![Release](https://img.shields.io/github/v/release/mediago-dev/mediago-drama?include_prereleases&label=release)](https://github.com/mediago-dev/mediago-drama/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
-[![Status](https://img.shields.io/badge/status-active%20development-orange.svg)](#项目状态与路线图)
 
-[官方网站](https://mediago.torchstellar.com/) · [界面与演示](#界面与演示) · [创作流程](#创作流程) · [核心能力](#核心能力) · [快速开始](#快速开始)
+[官网](https://mediago.torchstellar.com/) · [下载](https://torchstellar.feishu.cn/wiki/WCfMwNnrTiMZHik8wKTcSRHtnJc) · [教程](https://www.bilibili.com/video/BV1AZg46yEFr)
 
 QQ 交流群：**1075312237**
 
@@ -22,19 +17,13 @@ QQ 交流群：**1075312237**
 
 ---
 
-## 目录
+## 下载
 
-- [项目简介](#项目简介)
-- [界面与演示](#界面与演示)
-- [创作流程](#创作流程)
-- [核心能力](#核心能力)
-- [快速开始](#快速开始)
-- [开发指南](#开发指南)
-- [项目状态与路线图](#项目状态与路线图)
-- [常见问题](#常见问题)
-- [参与贡献](#参与贡献)
-- [开源与商业边界](#开源与商业边界)
-- [许可证](#许可证)
+- [下载 MediaGo Drama](https://torchstellar.feishu.cn/wiki/WCfMwNnrTiMZHik8wKTcSRHtnJc)
+
+## 教程
+- [观看使用教程](https://www.bilibili.com/video/BV1AZg46yEFr)
+
 
 ## 项目简介
 
