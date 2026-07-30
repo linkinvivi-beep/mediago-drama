@@ -17,14 +17,6 @@ QQ 交流群：**1075312237**
 
 ---
 
-## 下载
-
-- [下载 MediaGo Drama](https://torchstellar.feishu.cn/wiki/WCfMwNnrTiMZHik8wKTcSRHtnJc)
-
-## 教程
-- [观看使用教程](https://www.bilibili.com/video/BV1AZg46yEFr)
-
-
 ## 项目简介
 
 ### MediaGo Drama 是什么
