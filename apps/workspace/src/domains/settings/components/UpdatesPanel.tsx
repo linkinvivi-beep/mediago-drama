@@ -64,6 +64,10 @@ export const UpdatesPanel: React.FC = () => {
 	}, []);
 
 	const supportsAutoUpdate = state.capability?.supportsAutoUpdate === true;
+	const capabilityReason =
+		state.capability?.reason === "releaseFeedNotConfigured"
+			? "当前版本暂未配置更新源。"
+			: (state.capability?.reason ?? "当前运行环境不支持应用内更新。");
 	const status = state.status;
 	const busy = state.checking || state.downloading || state.installing;
 	const canDownload = supportsAutoUpdate && status?.phase === "available";
@@ -227,9 +231,7 @@ export const UpdatesPanel: React.FC = () => {
 								<span>前往下载页</span>
 							</Button>
 						) : null}
-						<p className="text-xs text-muted-foreground">
-							{state.capability?.reason ?? "当前运行环境不支持应用内更新，请前往下载页升级。"}
-						</p>
+						<p className="text-xs text-muted-foreground">{capabilityReason}</p>
 					</div>
 				)}
 			</section>

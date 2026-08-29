@@ -184,7 +184,8 @@ describe("UpdatesPanel", () => {
 		});
 		render(<UpdatesPanel />);
 
-		await screen.findByText("releaseFeedNotConfigured");
+		await screen.findByText("当前版本暂未配置更新源。");
+		expect(screen.queryByText("releaseFeedNotConfigured")).not.toBeInTheDocument();
 		expect(screen.queryByRole("button", { name: /前往下载页/ })).not.toBeInTheDocument();
 		expect(openExternalUrl).not.toHaveBeenCalled();
 	});

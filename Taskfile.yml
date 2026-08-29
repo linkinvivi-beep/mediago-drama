@@ -34,72 +34,29 @@ tasks:
       - task: workspace:test
 
   build:
-    env:
-      MEDIAGO_AGENT_ID: "{{.AGENT}}"
-      MEDIAGO_MODEL_PLATFORM: "{{.MODEL_PLATFORM}}"
-      MEDIAGO_MODEL_PLATFORM_MEDIAGO_BASE_URL: "{{.MEDIAGO_MODEL_PLATFORM_MEDIAGO_BASE_URL}}"
-      MEDIAGO_GENERATION_CLIS: "{{.GENERATION_CLIS}}"
-      MEDIAGO_SERVER_PORT: "{{.SERVER_PORT}}"
-      VITE_MEDIAGO_SERVER_PORT: "{{.SERVER_PORT}}"
     cmds:
-      - task: prepare-agent
+      - task: build:electron:target
         vars:
-          AGENT: "{{.AGENT}}"
-      - task: prepare-media-tools
-      - task: prepare-generation-clis
-        vars:
-          GENERATION_CLIS: "{{.GENERATION_CLIS}}"
-      - task: workspace:build
-      - task: sync:workspace-dist
-      - task: build:server
-      - task: stage-electron
-        vars:
-          AGENT: "{{.AGENT}}"
-          GENERATION_CLIS: "{{.GENERATION_CLIS}}"
-          MODEL_PLATFORM: "{{.MODEL_PLATFORM}}"
-          MEDIAGO_MODEL_PLATFORM_MEDIAGO_BASE_URL: "{{.MEDIAGO_MODEL_PLATFORM_MEDIAGO_BASE_URL}}"
-      - pnpm -C apps/workspace electron:build
+          PLATFORM: "darwin-arm64"
 
   build:desktop:
     desc: Build the Electron desktop app
     cmds:
-      - task: build:electron
+      - task: build:electron:target
+        vars:
+          PLATFORM: "darwin-arm64"
 
   build:electron:
     desc: Build the Electron desktop app
-    vars:
-      ELECTRON_SCRIPT: '{{.ELECTRON_SCRIPT | default "electron:build"}}'
-    env:
-      MEDIAGO_AGENT_ID: "{{.AGENT}}"
-      MEDIAGO_MODEL_PLATFORM: "{{.MODEL_PLATFORM}}"
-      MEDIAGO_MODEL_PLATFORM_MEDIAGO_BASE_URL: "{{.MEDIAGO_MODEL_PLATFORM_MEDIAGO_BASE_URL}}"
-      MEDIAGO_GENERATION_CLIS: "{{.GENERATION_CLIS}}"
-      MEDIAGO_SERVER_PORT: "{{.SERVER_PORT}}"
-      VITE_MEDIAGO_SERVER_PORT: "{{.SERVER_PORT}}"
     cmds:
-      - task: prepare-agent
+      - task: build:electron:target
         vars:
-          AGENT: "{{.AGENT}}"
-      - task: prepare-media-tools
-      - task: prepare-generation-clis
-        vars:
-          GENERATION_CLIS: "{{.GENERATION_CLIS}}"
-      - task: workspace:build
-      - task: sync:workspace-dist
-      - task: build:server
-      - task: stage-electron
-        vars:
-          AGENT: "{{.AGENT}}"
-          GENERATION_CLIS: "{{.GENERATION_CLIS}}"
-          MODEL_PLATFORM: "{{.MODEL_PLATFORM}}"
-          MEDIAGO_MODEL_PLATFORM_MEDIAGO_BASE_URL: "{{.MEDIAGO_MODEL_PLATFORM_MEDIAGO_BASE_URL}}"
-      - pnpm -C apps/workspace {{.ELECTRON_SCRIPT}}
+          PLATFORM: "darwin-arm64"
 
   build:electron:target:
     desc: Build the Electron desktop app for one target platform
     vars:
       PLATFORM: '{{.PLATFORM | default ""}}'
-      ELECTRON_SCRIPT: '{{.ELECTRON_SCRIPT | default (printf "electron:build:%s" .PLATFORM)}}'
     preconditions:
       - sh: 'case "{{.PLATFORM}}" in darwin-arm64) ;; *) exit 1 ;; esac'
         msg: "PLATFORM must be darwin-arm64"
@@ -134,7 +91,7 @@ tasks:
           GENERATION_CLIS: "{{.GENERATION_CLIS}}"
           MODEL_PLATFORM: "{{.MODEL_PLATFORM}}"
           MEDIAGO_MODEL_PLATFORM_MEDIAGO_BASE_URL: "{{.MEDIAGO_MODEL_PLATFORM_MEDIAGO_BASE_URL}}"
-      - pnpm -C apps/workspace {{.ELECTRON_SCRIPT}}
+      - pnpm -C apps/workspace electron:build:darwin-arm64
 
   prepare-agent:
     vars:
