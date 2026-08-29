@@ -78,7 +78,7 @@ func Start(parent context.Context, binPath string) (*Session, error) {
 func (session *Session) initialize(ctx context.Context) error {
 	var ignored map[string]any
 	if err := session.Call(ctx, "initialize", map[string]any{
-		"clientInfo": map[string]string{"name": "mediago-drama", "title": "MediaGo Drama", "version": "1"},
+		"clientInfo": map[string]string{"name": "medialink", "title": "MediaLink", "version": "1"},
 	}, &ignored); err != nil {
 		return fmt.Errorf("initializing app-server: %w", err)
 	}

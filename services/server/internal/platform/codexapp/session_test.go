@@ -69,6 +69,22 @@ done
 	}
 }
 
+func TestSessionUsesMediaLinkClientInfo(t *testing.T) {
+	binPath := writeFakeAppServer(t, `#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*'"name":"medialink"'*'"title":"MediaLink"'*) echo '{"id":1,"result":{}}' ;;
+    *'"method":"initialize"'*) echo '{"id":1,"error":{"code":-32602,"message":"wrong client info"}}' ;;
+  esac
+done
+`)
+	session, err := Start(context.Background(), binPath)
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	session.Close()
+}
+
 func writeFakeAppServer(t *testing.T, script string) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
