@@ -60,10 +60,6 @@ func filterCatalogRoutes(source coregeneration.ModelCatalog, allowed map[string]
 	return result
 }
 
-func (workflow *GenerationService) mediaLinkCatalogActive() bool {
-	return workflow != nil && workflow.mediaLinkReadiness != nil
-}
-
 func (providers mediaLinkRouteProviders) providerForRoute(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 	switch route.ID {
 	case coregeneration.RouteCodexImage:

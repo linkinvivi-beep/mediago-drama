@@ -40,6 +40,46 @@ func TestMediaLinkCatalogVisibleListing(t *testing.T) {
 	if got := mediagoRequests.Load(); got != 0 {
 		t.Fatalf("MediaGo catalog requests = %d, want 0", got)
 	}
+	assertMediaLinkCatalogShape(t, catalog)
+	if !catalog.Routes[0].Configured || catalog.Routes[1].Configured {
+		t.Fatalf(
+			"route configured values = [%t %t], want readiness-derived [true false]",
+			catalog.Routes[0].Configured,
+			catalog.Routes[1].Configured,
+		)
+	}
+}
+
+func TestMediaLinkCatalogVisibleWithoutInjectedReadiness(t *testing.T) {
+	var mediagoRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		mediagoRequests.Add(1)
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`{"data":[{"id":"gpt-image-2"}]}`))
+	}))
+	defer server.Close()
+
+	settingsService := settings.NewSettings(&generationTestAPIKeyStore{
+		values: map[string]string{coregeneration.ProviderMediago: "mgak-test"},
+	})
+	workflow := NewGenerationService(settingsService, nil, nil)
+	workflow.SetMediagoBaseURL(server.URL)
+
+	catalog := workflow.ListGenerationModels()
+
+	if got := mediagoRequests.Load(); got != 0 {
+		t.Fatalf("MediaGo catalog requests = %d, want 0 without injected readiness", got)
+	}
+	assertMediaLinkCatalogShape(t, catalog)
+	for _, route := range catalog.Routes {
+		if route.Configured {
+			t.Fatalf("route %q configured = true, want false without injected readiness", route.ID)
+		}
+	}
+}
+
+func assertMediaLinkCatalogShape(t *testing.T, catalog GenerationModelsResponse) {
+	t.Helper()
 	if got, want := mediaLinkRouteIDs(catalog.Routes), []string{
 		coregeneration.RouteCodexImage,
 		coregeneration.RouteAutoDLH3,
@@ -72,13 +112,6 @@ func TestMediaLinkCatalogVisibleListing(t *testing.T) {
 	}
 	if len(catalog.Models) != 0 {
 		t.Fatalf("legacy models = %v, want empty", catalog.Models)
-	}
-	if !catalog.Routes[0].Configured || catalog.Routes[1].Configured {
-		t.Fatalf(
-			"route configured values = [%t %t], want readiness-derived [true false]",
-			catalog.Routes[0].Configured,
-			catalog.Routes[1].Configured,
-		)
 	}
 	for _, family := range catalog.Families {
 		if family.Kind != coregeneration.KindImage && family.Kind != coregeneration.KindVideo {

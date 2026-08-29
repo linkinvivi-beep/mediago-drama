@@ -1,6 +1,7 @@
 package generation
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,7 +13,7 @@ import (
 	"github.com/mediago-dev/mediago-drama/services/server/internal/service/settings"
 )
 
-func TestListGenerationModelsFiltersMediagoRoutesByUserCatalog(t *testing.T) {
+func TestLegacyCatalogFiltersMediagoRoutesByUserCatalog(t *testing.T) {
 	var requests int32
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		atomic.AddInt32(&requests, 1)
@@ -46,7 +47,7 @@ func TestListGenerationModelsFiltersMediagoRoutesByUserCatalog(t *testing.T) {
 	workflow := NewGenerationService(settingsSvc, nil, nil)
 	workflow.SetMediagoBaseURL(server.URL)
 
-	catalog := workflow.ListGenerationModels()
+	catalog := legacyGenerationModelsForTest(workflow)
 
 	if !generationRouteConfiguredInCatalog(catalog, coregeneration.RouteMediagoGPTImage2) {
 		t.Fatalf("route %q should be configured when present in MediaGo user catalog", coregeneration.RouteMediagoGPTImage2)
@@ -74,7 +75,7 @@ func TestListGenerationModelsFiltersMediagoRoutesByUserCatalog(t *testing.T) {
 		t.Fatalf("MediaGo model catalog requests = %d, want 1 cached request", got)
 	}
 
-	catalog = workflow.ListGenerationModels()
+	catalog = legacyGenerationModelsForTest(workflow)
 	if !generationRouteConfiguredInCatalog(catalog, coregeneration.RouteMediagoGPTImage2) {
 		t.Fatalf("route %q should stay configured on a cached catalog", coregeneration.RouteMediagoGPTImage2)
 	}
@@ -83,7 +84,7 @@ func TestListGenerationModelsFiltersMediagoRoutesByUserCatalog(t *testing.T) {
 	}
 }
 
-func TestListGenerationModelsHonorsBuildPlatformAllowlistWithExistingKeys(t *testing.T) {
+func TestLegacyCatalogHonorsBuildPlatformAllowlistWithExistingKeys(t *testing.T) {
 	settingsSvc := settings.NewSettings(&generationTestAPIKeyStore{
 		values: map[string]string{
 			coregeneration.ProviderMediago:    "mgak-existing",
@@ -94,7 +95,7 @@ func TestListGenerationModelsHonorsBuildPlatformAllowlistWithExistingKeys(t *tes
 	settingsSvc.SetModelPlatforms([]string{settings.ModelPlatformOpenRouter})
 	workflow := NewGenerationService(settingsSvc, nil, nil)
 
-	catalog := workflow.ListGenerationModels()
+	catalog := legacyGenerationModelsForTest(workflow)
 	if !generationRouteConfiguredInCatalog(catalog, coregeneration.RouteOpenRouterGPT41MiniText) {
 		t.Fatalf("route %q should be configured when OpenRouter is packaged and keyed", coregeneration.RouteOpenRouterGPT41MiniText)
 	}
@@ -115,7 +116,7 @@ func TestListGenerationModelsHonorsBuildPlatformAllowlistWithExistingKeys(t *tes
 	}
 }
 
-func TestListGenerationModelsRequiresBothMediagoHappyHorseModes(t *testing.T) {
+func TestLegacyCatalogRequiresBothMediagoHappyHorseModes(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.Header().Set("Content-Type", "application/json")
 		_, _ = response.Write([]byte(`{"data":[{"id":"happyhorse-1.1-t2v"}]}`))
@@ -128,7 +129,7 @@ func TestListGenerationModelsRequiresBothMediagoHappyHorseModes(t *testing.T) {
 	workflow := NewGenerationService(settingsSvc, nil, nil)
 	workflow.SetMediagoBaseURL(server.URL)
 
-	if generationRouteConfiguredInCatalog(workflow.ListGenerationModels(), coregeneration.RouteMediagoHappyHorse11) {
+	if generationRouteConfiguredInCatalog(legacyGenerationModelsForTest(workflow), coregeneration.RouteMediagoHappyHorse11) {
 		t.Fatal("MediaGo HappyHorse route should stay hidden until t2v and r2v are both available")
 	}
 	route, ok := coregeneration.FindRoute(coregeneration.RouteMediagoHappyHorse11)
@@ -141,7 +142,7 @@ func TestListGenerationModelsRequiresBothMediagoHappyHorseModes(t *testing.T) {
 	}
 }
 
-func TestListGenerationModelsHidesMediagoRoutesWhenUserCatalogUnavailable(t *testing.T) {
+func TestLegacyCatalogHidesMediagoRoutesWhenUserCatalogUnavailable(t *testing.T) {
 	var requests int32
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		atomic.AddInt32(&requests, 1)
@@ -155,7 +156,7 @@ func TestListGenerationModelsHidesMediagoRoutesWhenUserCatalogUnavailable(t *tes
 	workflow := NewGenerationService(settingsSvc, nil, nil)
 	workflow.SetMediagoBaseURL(server.URL)
 
-	catalog := workflow.ListGenerationModels()
+	catalog := legacyGenerationModelsForTest(workflow)
 
 	if generationRouteConfiguredInCatalog(catalog, coregeneration.RouteMediagoGPTImage2) {
 		t.Fatalf("route %q should be hidden when MediaGo user catalog is unavailable", coregeneration.RouteMediagoGPTImage2)
@@ -165,7 +166,7 @@ func TestListGenerationModelsHidesMediagoRoutesWhenUserCatalogUnavailable(t *tes
 	}
 }
 
-func TestListGenerationModelsHidesDisabledMediagoUserCatalogItems(t *testing.T) {
+func TestLegacyCatalogHidesDisabledMediagoUserCatalogItems(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.Header().Set("Content-Type", "application/json")
 		_, _ = response.Write([]byte(`{
@@ -185,7 +186,7 @@ func TestListGenerationModelsHidesDisabledMediagoUserCatalogItems(t *testing.T) 
 	workflow := NewGenerationService(settingsSvc, nil, nil)
 	workflow.SetMediagoBaseURL(server.URL)
 
-	catalog := workflow.ListGenerationModels()
+	catalog := legacyGenerationModelsForTest(workflow)
 
 	if !generationRouteConfiguredInCatalog(catalog, coregeneration.RouteMediagoGPTImage2) {
 		t.Fatalf("route %q should be configured when enabled in MediaGo user catalog", coregeneration.RouteMediagoGPTImage2)
@@ -201,7 +202,7 @@ func TestListGenerationModelsHidesDisabledMediagoUserCatalogItems(t *testing.T) 
 	}
 }
 
-func TestListGenerationModelsServesStaleMediagoCatalogWhenRefreshFails(t *testing.T) {
+func TestLegacyCatalogServesStaleMediagoCatalogWhenRefreshFails(t *testing.T) {
 	var requests int32
 	var fail atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -221,7 +222,7 @@ func TestListGenerationModelsServesStaleMediagoCatalogWhenRefreshFails(t *testin
 	workflow := NewGenerationService(settingsSvc, nil, nil)
 	workflow.SetMediagoBaseURL(server.URL)
 
-	catalog := workflow.ListGenerationModels()
+	catalog := legacyGenerationModelsForTest(workflow)
 	if !generationRouteConfiguredInCatalog(catalog, coregeneration.RouteMediagoGPTImage2) {
 		t.Fatalf("route %q should be configured while the catalog fetch succeeds", coregeneration.RouteMediagoGPTImage2)
 	}
@@ -229,7 +230,7 @@ func TestListGenerationModelsServesStaleMediagoCatalogWhenRefreshFails(t *testin
 	fail.Store(true)
 	workflow.mediagoModelCatalog.fetchedAt = time.Now().Add(-2 * mediagoModelCatalogCacheTTL)
 
-	catalog = workflow.ListGenerationModels()
+	catalog = legacyGenerationModelsForTest(workflow)
 	if !generationRouteConfiguredInCatalog(catalog, coregeneration.RouteMediagoGPTImage2) {
 		t.Fatalf("route %q should stay configured on the stale catalog when the refresh fails", coregeneration.RouteMediagoGPTImage2)
 	}
@@ -287,6 +288,27 @@ func TestMediagoRouteUnavailableReportsInactiveModel(t *testing.T) {
 	_, err := workflow.newGenerationProvider(route)
 	if err == nil || !strings.Contains(err.Error(), "MediaGo 聚合平台当前未启用模型 gemini-2.5-flash-image") {
 		t.Fatalf("newGenerationProvider() error = %v, want inactive MediaGo model", err)
+	}
+}
+
+// legacyGenerationModelsForTest exercises the hidden legacy route configuration
+// path without treating it as the product-facing MediaLink catalog.
+func legacyGenerationModelsForTest(workflow *GenerationService) GenerationModelsResponse {
+	catalog := coregeneration.Catalog()
+	mediagoModels, hasMediagoCatalog := workflow.mediagoAvailableModelsForCatalog(context.Background())
+	for index := range catalog.Routes {
+		catalog.Routes[index].Configured = workflow.generationRouteConfiguredWithMediagoModels(
+			catalog.Routes[index],
+			mediagoModels,
+			hasMediagoCatalog,
+		)
+	}
+	return GenerationModelsResponse{
+		Families:  catalog.Families,
+		Versions:  catalog.Versions,
+		Routes:    catalog.Routes,
+		Models:    catalog.Models,
+		Providers: catalog.Providers,
 	}
 }
 
