@@ -253,7 +253,7 @@ MediaLink 尚未配置独立的公开发行仓库，当前不把问题反馈或�
 
 本仓库中的源码采用 Apache License 2.0。MediaLink 是独立品牌的衍生作品，不代表 MediaGo 官方发行版。
 
-这些商业组件与服务不属于本仓库开源许可证的授权范围，也不会改变 Apache-2.0 已经授予的权利。详细说明请参阅[《MediaGo 商业功能与服务说明》](./COMMERCIAL_FEATURES.md)。
+上游 MediaGo 的商业组件与服务不随 MediaLink 提供，也不属于本仓库开源许可证的授权范围；这不会改变 Apache-2.0 已经授予的权利。详细说明请参阅[《MediaGo 商业功能与服务说明》](./COMMERCIAL_FEATURES.md)。
 
 ## 许可证
 

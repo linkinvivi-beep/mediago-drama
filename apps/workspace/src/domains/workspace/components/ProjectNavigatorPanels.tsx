@@ -640,7 +640,7 @@ export const SettingsSidebarPanel: React.FC<{
 			<ChevronLeft className="size-4 shrink-0 text-muted-foreground" />
 			<span className="min-w-0 flex-1 truncate">返回</span>
 		</button>
-		<p className="mt-3 px-2 text-sm font-semibold text-foreground">MediaLink 设置</p>
+		<h2 className="mt-3 px-2 text-sm font-semibold text-foreground">MediaLink 设置</h2>
 
 		{isProjectSettings ? (
 			<section className="mt-3 space-y-1">

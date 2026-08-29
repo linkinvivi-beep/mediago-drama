@@ -37,7 +37,7 @@ describe("SettingsSidebarPanel", () => {
 			/>,
 		);
 
-		expect(screen.getByText("MediaLink 设置")).toBeInTheDocument();
+		expect(screen.getByRole("heading", { level: 2, name: "MediaLink 设置" })).toBeInTheDocument();
 		expect(screen.queryByText(/MediaGo Drama/)).not.toBeInTheDocument();
 	});
 
