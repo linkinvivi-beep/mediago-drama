@@ -120,7 +120,7 @@ export type FailureReason =
 	| "authentication"
 	| "timeout";
 
-export type ProviderType = "official" | "aggregator" | "local";
+export type ProviderType = "official" | "aggregator" | "local" | "custom";
 
 export interface ProviderInfo {
 	id: string;

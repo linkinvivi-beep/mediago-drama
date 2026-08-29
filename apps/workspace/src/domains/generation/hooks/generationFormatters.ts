@@ -245,6 +245,8 @@ export const providerTypeLabel = (providerType?: GenerationProviderType) => {
 			return "第三方";
 		case "local":
 			return "本地";
+		case "custom":
+			return "自定义";
 		default:
 			return "未知类型";
 	}
