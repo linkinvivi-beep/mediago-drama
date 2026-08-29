@@ -1,7 +1,9 @@
 # MediaLink：Codex 生图与 AutoDL MiniMax H3 视频设计
 
-日期：2026-08-30  
-状态：设计已确认，等待规格审阅  
+日期：2026-08-30
+
+状态：设计已确认，等待规格审阅
+
 上游基线：`mediago-dev/mediago-drama@f06641a`
 
 ## 1. 目标
