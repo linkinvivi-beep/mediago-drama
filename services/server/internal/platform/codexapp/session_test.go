@@ -2,11 +2,13 @@ package codexapp
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSessionInitializesCallsAndQueuesNotifications(t *testing.T) {
@@ -83,6 +85,115 @@ done
 		t.Fatalf("Start() error = %v", err)
 	}
 	session.Close()
+}
+
+func TestSessionNextCancellationDoesNotDiscardFutureMessages(t *testing.T) {
+	binPath := writeFakeAppServer(t, `#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*) echo '{"id":1,"result":{}}' ;;
+    *'"method":"test/release"'*)
+      echo '{"id":2,"result":{"value":"released"}}'
+      echo '{"method":"test/notification","params":{"value":"after-cancel"}}'
+      ;;
+  esac
+done
+`)
+	session, err := Start(context.Background(), binPath)
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer session.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		_, nextErr := session.Next(ctx)
+		result <- nextErr
+	}()
+	<-started
+	// Give Next a scheduling turn to enter the silent transport read before cancellation.
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+
+	select {
+	case nextErr := <-result:
+		if !errors.Is(nextErr, context.Canceled) {
+			t.Fatalf("Next() error = %v, want context.Canceled", nextErr)
+		}
+	case <-time.After(250 * time.Millisecond):
+		session.Close()
+		t.Fatal("Next() did not return promptly after cancellation")
+	}
+
+	var response struct {
+		Value string `json:"value"`
+	}
+	if err := session.Call(context.Background(), "test/release", struct{}{}, &response); err != nil {
+		t.Fatalf("Call() after canceled Next error = %v", err)
+	}
+	if response.Value != "released" {
+		t.Fatalf("Call() response = %#v", response)
+	}
+	message, err := session.Next(context.Background())
+	if err != nil {
+		t.Fatalf("Next() after cancellation error = %v", err)
+	}
+	if message.Method != "test/notification" || !strings.Contains(string(message.Params), "after-cancel") {
+		t.Fatalf("Next() after cancellation = %#v", message)
+	}
+}
+
+func TestSessionCallCanCompleteWhileNextWaits(t *testing.T) {
+	binPath := writeFakeAppServer(t, `#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*) echo '{"id":1,"result":{}}' ;;
+    *'"method":"test/interrupt"'*) echo '{"id":2,"result":{"accepted":true}}' ;;
+  esac
+done
+`)
+	session, err := Start(context.Background(), binPath)
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer session.Close()
+
+	nextCtx, cancelNext := context.WithCancel(context.Background())
+	nextResult := make(chan error, 1)
+	go func() {
+		_, nextErr := session.Next(nextCtx)
+		nextResult <- nextErr
+	}()
+	time.Sleep(10 * time.Millisecond)
+
+	callResult := make(chan error, 1)
+	go func() {
+		var response struct {
+			Accepted bool `json:"accepted"`
+		}
+		callErr := session.Call(context.Background(), "test/interrupt", struct{}{}, &response)
+		if callErr == nil && !response.Accepted {
+			callErr = errors.New("interrupt response was not accepted")
+		}
+		callResult <- callErr
+	}()
+	select {
+	case callErr := <-callResult:
+		if callErr != nil {
+			t.Fatalf("concurrent Call() error = %v", callErr)
+		}
+	case <-time.After(250 * time.Millisecond):
+		cancelNext()
+		session.Close()
+		t.Fatal("Call() was blocked by a waiting Next()")
+	}
+	cancelNext()
+	if nextErr := <-nextResult; !errors.Is(nextErr, context.Canceled) {
+		t.Fatalf("Next() error = %v, want context.Canceled", nextErr)
+	}
 }
 
 func writeFakeAppServer(t *testing.T, script string) string {

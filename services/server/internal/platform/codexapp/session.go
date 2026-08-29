@@ -36,13 +36,20 @@ type Client interface {
 
 // Session owns one stdio Codex app-server process.
 type Session struct {
-	cancel  context.CancelFunc
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	scan    *bufio.Scanner
-	mu      sync.Mutex
+	cancel context.CancelFunc
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+
+	writeMu sync.Mutex
 	nextID  int
-	pending []Message
+
+	stateMu   sync.Mutex
+	waiters   map[int]chan Message
+	pending   []Message
+	notify    chan struct{}
+	readDone  chan struct{}
+	readErr   error
+	closeOnce sync.Once
 }
 
 // Start launches and initializes a Codex app-server session.
@@ -67,7 +74,15 @@ func Start(parent context.Context, binPath string) (*Session, error) {
 		cancel()
 		return nil, fmt.Errorf("starting app-server: %w", err)
 	}
-	session := &Session{cancel: cancel, cmd: cmd, stdin: stdin, scan: bufio.NewScanner(stdout)}
+	session := &Session{
+		cancel:   cancel,
+		cmd:      cmd,
+		stdin:    stdin,
+		waiters:  make(map[int]chan Message),
+		notify:   make(chan struct{}, 1),
+		readDone: make(chan struct{}),
+	}
+	go session.readLoop(bufio.NewScanner(stdout))
 	if err := session.initialize(ctx); err != nil {
 		session.Close()
 		return nil, err
@@ -87,38 +102,47 @@ func (session *Session) initialize(ctx context.Context) error {
 
 // Call sends one request and waits for its matching response.
 func (session *Session) Call(ctx context.Context, method string, params any, output any) error {
-	session.mu.Lock()
-	defer session.mu.Unlock()
+	session.writeMu.Lock()
 	session.nextID++
 	id := session.nextID
+	response := make(chan Message, 1)
+	session.stateMu.Lock()
+	session.waiters[id] = response
+	session.stateMu.Unlock()
 	request := map[string]any{"id": id, "method": method}
 	if params != nil {
 		request["params"] = params
 	}
-	if err := session.write(request); err != nil {
+	if err := session.writeUnlocked(request); err != nil {
+		session.writeMu.Unlock()
+		session.removeWaiter(id, response)
 		return err
 	}
-	for {
-		message, err := session.read(ctx)
-		if err != nil {
-			return err
+	session.writeMu.Unlock()
+	defer session.removeWaiter(id, response)
+
+	var message Message
+	select {
+	case message = <-response:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-session.readDone:
+		select {
+		case message = <-response:
+		default:
+			return session.readerError()
 		}
-		var responseID int
-		if len(message.ID) == 0 || json.Unmarshal(message.ID, &responseID) != nil || responseID != id {
-			session.pending = append(session.pending, message)
-			continue
-		}
-		if message.Error != nil {
-			return fmt.Errorf("app-server request failed (%d): %s", message.Error.Code, safeRPCMessage(message.Error.Message))
-		}
-		if output == nil || len(message.Result) == 0 {
-			return nil
-		}
-		if err := json.Unmarshal(message.Result, output); err != nil {
-			return fmt.Errorf("decoding app-server response: %w", err)
-		}
+	}
+	if message.Error != nil {
+		return fmt.Errorf("app-server request failed (%d): %s", message.Error.Code, safeRPCMessage(message.Error.Message))
+	}
+	if output == nil || len(message.Result) == 0 {
 		return nil
 	}
+	if err := json.Unmarshal(message.Result, output); err != nil {
+		return fmt.Errorf("decoding app-server response: %w", err)
+	}
+	return nil
 }
 
 func safeRPCMessage(value string) string {
@@ -138,37 +162,47 @@ func safeRPCMessage(value string) string {
 
 // Next returns the next queued or newly received app-server message.
 func (session *Session) Next(ctx context.Context) (Message, error) {
-	session.mu.Lock()
-	defer session.mu.Unlock()
-	if len(session.pending) > 0 {
-		message := session.pending[0]
-		session.pending = session.pending[1:]
-		return message, nil
+	for {
+		if message, ok := session.popPending(); ok {
+			return message, nil
+		}
+		select {
+		case <-ctx.Done():
+			return Message{}, ctx.Err()
+		case <-session.notify:
+			continue
+		case <-session.readDone:
+			if message, ok := session.popPending(); ok {
+				return message, nil
+			}
+			return Message{}, session.readerError()
+		}
 	}
-	return session.read(ctx)
 }
 
-func (session *Session) read(ctx context.Context) (Message, error) {
-	if err := ctx.Err(); err != nil {
-		return Message{}, err
-	}
-	if !session.scan.Scan() {
-		if err := session.scan.Err(); err != nil {
-			return Message{}, fmt.Errorf("reading app-server response: %w", err)
+func (session *Session) readLoop(scanner *bufio.Scanner) {
+	for scanner.Scan() {
+		var message Message
+		if err := json.Unmarshal(scanner.Bytes(), &message); err != nil {
+			session.finishRead(fmt.Errorf("decoding app-server message: %w", err))
+			return
 		}
-		if err := ctx.Err(); err != nil {
-			return Message{}, err
-		}
-		return Message{}, io.EOF
+		session.route(message)
 	}
-	var message Message
-	if err := json.Unmarshal(session.scan.Bytes(), &message); err != nil {
-		return Message{}, fmt.Errorf("decoding app-server message: %w", err)
+	if err := scanner.Err(); err != nil {
+		session.finishRead(fmt.Errorf("reading app-server response: %w", err))
+		return
 	}
-	return message, nil
+	session.finishRead(io.EOF)
 }
 
 func (session *Session) write(value any) error {
+	session.writeMu.Lock()
+	defer session.writeMu.Unlock()
+	return session.writeUnlocked(value)
+}
+
+func (session *Session) writeUnlocked(value any) error {
 	raw, err := json.Marshal(value)
 	if err != nil {
 		return fmt.Errorf("encoding app-server request: %w", err)
@@ -179,17 +213,77 @@ func (session *Session) write(value any) error {
 	return nil
 }
 
+func (session *Session) route(message Message) {
+	var responseID int
+	if len(message.ID) > 0 && json.Unmarshal(message.ID, &responseID) == nil {
+		session.stateMu.Lock()
+		waiter := session.waiters[responseID]
+		session.stateMu.Unlock()
+		if waiter != nil {
+			waiter <- message
+			return
+		}
+	}
+	session.stateMu.Lock()
+	session.pending = append(session.pending, message)
+	session.stateMu.Unlock()
+	select {
+	case session.notify <- struct{}{}:
+	default:
+	}
+}
+
+func (session *Session) popPending() (Message, bool) {
+	session.stateMu.Lock()
+	defer session.stateMu.Unlock()
+	if len(session.pending) == 0 {
+		return Message{}, false
+	}
+	message := session.pending[0]
+	session.pending = session.pending[1:]
+	return message, true
+}
+
+func (session *Session) removeWaiter(id int, waiter chan Message) {
+	session.stateMu.Lock()
+	defer session.stateMu.Unlock()
+	if session.waiters[id] == waiter {
+		delete(session.waiters, id)
+	}
+}
+
+func (session *Session) finishRead(err error) {
+	session.stateMu.Lock()
+	session.readErr = err
+	session.stateMu.Unlock()
+	close(session.readDone)
+}
+
+func (session *Session) readerError() error {
+	session.stateMu.Lock()
+	defer session.stateMu.Unlock()
+	if session.readErr != nil {
+		return session.readErr
+	}
+	return io.EOF
+}
+
 // Close stops the app-server process and releases its pipes.
 func (session *Session) Close() {
 	if session == nil {
 		return
 	}
-	session.cancel()
-	_ = session.stdin.Close()
-	if session.cmd != nil && session.cmd.Process != nil {
-		_ = session.cmd.Process.Kill()
-	}
-	if session.cmd != nil {
-		_ = session.cmd.Wait()
-	}
+	session.closeOnce.Do(func() {
+		session.cancel()
+		session.writeMu.Lock()
+		_ = session.stdin.Close()
+		session.writeMu.Unlock()
+		if session.cmd != nil && session.cmd.Process != nil {
+			_ = session.cmd.Process.Kill()
+		}
+		if session.cmd != nil {
+			_ = session.cmd.Wait()
+		}
+		<-session.readDone
+	})
 }
