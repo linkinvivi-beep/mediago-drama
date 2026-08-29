@@ -10,6 +10,8 @@ const (
 	ProviderTypeAggregator ProviderType = "aggregator"
 	// ProviderTypeLocal marks locally bundled command-line providers.
 	ProviderTypeLocal ProviderType = "local"
+	// ProviderTypeCustom marks providers configured by the user outside API-key credentials.
+	ProviderTypeCustom ProviderType = "custom"
 )
 
 // ProviderInfo describes one generation provider exposed by the catalog.
@@ -35,6 +37,8 @@ func Providers() []ProviderInfo {
 		{ID: ProviderJimeng, Label: labels[ProviderJimeng], ProviderType: ProviderTypeLocal},
 		{ID: ProviderLibTV, Label: labels[ProviderLibTV], ProviderType: ProviderTypeLocal},
 		{ID: ProviderXiaoyunque, Label: labels[ProviderXiaoyunque], ProviderType: ProviderTypeLocal},
+		{ID: ProviderCodex, Label: "Codex", ProviderType: ProviderTypeLocal},
+		{ID: ProviderAutoDL, Label: "AutoDL", ProviderType: ProviderTypeCustom},
 	}
 
 	result := make([]ProviderInfo, len(providers))

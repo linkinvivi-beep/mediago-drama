@@ -855,6 +855,7 @@ func TestVideoCatalogOnlyExposesKnownFamilies(t *testing.T) {
 	videoFamilies := map[string]bool{
 		FamilySeedance:   true,
 		FamilyHappyHorse: true,
+		FamilyMiniMaxH3:  true,
 	}
 	for _, family := range Families() {
 		if family.Kind == KindVideo && !videoFamilies[family.ID] {

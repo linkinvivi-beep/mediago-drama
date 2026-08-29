@@ -74,4 +74,14 @@ var videoParamRegistry = map[ParamID]CanonicalParamSpec{
 		Max:   paramFloat(259200),
 		Help:  "Seconds before a queued or running task expires.",
 	},
+	ParamProfileKind: {
+		ID:    ParamProfileKind,
+		Label: "Workflow profile",
+		Type:  "select",
+		Group: ParamGroupOther,
+		Options: []ParamOption{
+			{Label: "REF2VA", Value: "ref2va"},
+			{Label: "FL2VA", Value: "fl2va"},
+		},
+	},
 }

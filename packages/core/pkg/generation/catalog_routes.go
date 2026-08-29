@@ -1,6 +1,8 @@
 package generation
 
 const (
+	RouteCodexImage                        = "codex.imagegen"
+	RouteAutoDLH3                          = "autodl.minimax-h3"
 	RouteDMXSeedream5Lite                  = "dmx.seedream-5-lite"
 	RouteOfficialMiniMaxSpeech28HD         = "official.minimax-speech-2.8-hd"
 	RouteOfficialMiniMaxSpeech28Turbo      = "official.minimax-speech-2.8-turbo"
