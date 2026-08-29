@@ -61,8 +61,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       app_version: ${{ steps.version.outputs.app_version }}
-      prerelease: ${{ steps.version.outputs.prerelease }}
-      github_release_type: ${{ steps.version.outputs.github_release_type }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -80,28 +78,14 @@ jobs:
         run: node .github/scripts/resolve-electron-release-version.ts
 
   build:
-    name: Build ${{ matrix.label }}
+    name: Build macOS ARM64
     needs:
       - authorize-release
       - release-version
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-14
     environment: official-release
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - label: macOS ARM64 zip
-            runner: macos-14
-            platform: darwin-arm64
-            electron_script: electron:release:darwin-arm64
-            artifact_name: mediago-drama-macos-arm64
-          - label: Windows x64 installer
-            runner: windows-latest
-            platform: windows-x64
-            electron_script: electron:release:windows-x64
-            artifact_name: mediago-drama-windows-x64
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
@@ -125,18 +109,18 @@ jobs:
       - name: Restore vendored binary cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          path: packages/vendor/dist/${{ matrix.platform }}
-          key: vendor-${{ runner.os }}-${{ matrix.platform }}-${{ vars.MEDIAGO_RIGHTS_RELEASE_TAG }}-${{ hashFiles('packages/vendor/agents.json', 'packages/vendor/tools.json') }}
+          path: packages/vendor/dist/darwin-arm64
+          key: vendor-${{ runner.os }}-darwin-arm64-${{ vars.MEDIAGO_RIGHTS_RELEASE_TAG }}-${{ hashFiles('packages/vendor/agents.json', 'packages/vendor/tools.json') }}
           restore-keys: |
-            vendor-${{ runner.os }}-${{ matrix.platform }}-
+            vendor-${{ runner.os }}-darwin-arm64-
 
       - name: Restore electron-builder cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ env.ELECTRON_BUILDER_CACHE }}
-          key: electron-builder-${{ runner.os }}-${{ matrix.platform }}-${{ hashFiles('pnpm-lock.yaml', 'apps/workspace/package.json') }}
+          key: electron-builder-${{ runner.os }}-darwin-arm64-${{ hashFiles('pnpm-lock.yaml', 'apps/workspace/package.json') }}
           restore-keys: |
-            electron-builder-${{ runner.os }}-${{ matrix.platform }}-
+            electron-builder-${{ runner.os }}-darwin-arm64-
 
       - uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2
 
@@ -148,7 +132,7 @@ jobs:
           MEDIAGO_RIGHTS_RELEASE_TAG: ${{ vars.MEDIAGO_RIGHTS_RELEASE_TAG }}
         run: |
           set -euo pipefail
-          task -d packages/vendor prepare:rights PLATFORM="${{ matrix.platform }}"
+          task -d packages/vendor prepare:rights PLATFORM="darwin-arm64"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -159,81 +143,47 @@ jobs:
         run: node .github/scripts/apply-electron-release-version.ts
 
       - name: Validate macOS signing credentials
-        if: matrix.platform == 'darwin-arm64'
         env:
           MEDIAGO_MAC_CSC_KEY_PASSWORD: ${{ secrets.MEDIAGO_MAC_CSC_KEY_PASSWORD }}
           MEDIAGO_MAC_CSC_LINK: ${{ secrets.MEDIAGO_MAC_CSC_LINK }}
         run: node .github/scripts/validate-electron-release-env.ts signing
 
       - name: Validate macOS notarization credentials
-        if: matrix.platform == 'darwin-arm64' && vars.MEDIAGO_MAC_NOTARIZE == '1'
+        if: vars.MEDIAGO_MAC_NOTARIZE == '1'
         env:
           MEDIAGO_APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.MEDIAGO_APPLE_APP_SPECIFIC_PASSWORD }}
           MEDIAGO_APPLE_ID: ${{ secrets.MEDIAGO_APPLE_ID }}
           MEDIAGO_APPLE_TEAM_ID: ${{ secrets.MEDIAGO_APPLE_TEAM_ID }}
         run: node .github/scripts/validate-electron-release-env.ts notarization
 
-      - name: Build ${{ matrix.label }}
+      - name: Build macOS ARM64
         env:
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ matrix.platform == 'darwin-arm64' && vars.MEDIAGO_MAC_NOTARIZE == '1' && secrets.MEDIAGO_APPLE_APP_SPECIFIC_PASSWORD || '' }}
-          APPLE_ID: ${{ matrix.platform == 'darwin-arm64' && vars.MEDIAGO_MAC_NOTARIZE == '1' && secrets.MEDIAGO_APPLE_ID || '' }}
-          APPLE_TEAM_ID: ${{ matrix.platform == 'darwin-arm64' && vars.MEDIAGO_MAC_NOTARIZE == '1' && secrets.MEDIAGO_APPLE_TEAM_ID || '' }}
-          CSC_IDENTITY_AUTO_DISCOVERY: ${{ matrix.platform == 'darwin-arm64' && 'true' || 'false' }}
-          CSC_KEY_PASSWORD: ${{ matrix.platform == 'darwin-arm64' && secrets.MEDIAGO_MAC_CSC_KEY_PASSWORD || '' }}
-          CSC_LINK: ${{ matrix.platform == 'darwin-arm64' && secrets.MEDIAGO_MAC_CSC_LINK || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ vars.MEDIAGO_MAC_NOTARIZE == '1' && secrets.MEDIAGO_APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_ID: ${{ vars.MEDIAGO_MAC_NOTARIZE == '1' && secrets.MEDIAGO_APPLE_ID || '' }}
+          APPLE_TEAM_ID: ${{ vars.MEDIAGO_MAC_NOTARIZE == '1' && secrets.MEDIAGO_APPLE_TEAM_ID || '' }}
+          CSC_IDENTITY_AUTO_DISCOVERY: "true"
+          CSC_KEY_PASSWORD: ${{ secrets.MEDIAGO_MAC_CSC_KEY_PASSWORD }}
+          CSC_LINK: ${{ secrets.MEDIAGO_MAC_CSC_LINK }}
           MEDIAGO_INCLUDE_PROTECTED_PACK_RUNTIME: "1"
-          MEDIAGO_MAC_NOTARIZE: ${{ matrix.platform == 'darwin-arm64' && vars.MEDIAGO_MAC_NOTARIZE == '1' && '1' || '0' }}
-          MEDIAGO_MAC_SIGN: ${{ matrix.platform == 'darwin-arm64' && '1' || '0' }}
+          MEDIAGO_MAC_NOTARIZE: ${{ vars.MEDIAGO_MAC_NOTARIZE == '1' && '1' || '0' }}
+          MEDIAGO_MAC_SIGN: "1"
           MEDIAGO_PROMPT_PACK_POLICY: marketplace
           MEDIAGO_ELECTRON_CHANNEL: ${{ inputs.channel }}
           MEDIAGO_MODEL_PLATFORM_MEDIAGO_BASE_URL: ${{ vars.MEDIAGO_MODEL_PLATFORM_MEDIAGO_BASE_URL }}
-          MEDIAGO_ELECTRON_RELEASE_TYPE: ${{ needs.release-version.outputs.github_release_type }}
           MODEL_PLATFORM: ${{ vars.MODEL_PLATFORM }}
           VITE_MEDIAGO_APIKEY_URL: ${{ vars.VITE_MEDIAGO_APIKEY_URL }}
           VITE_TALKINGDATA_APP_ID: ${{ vars.VITE_TALKINGDATA_APP_ID }}
-        run: task build:electron:target PLATFORM=${{ matrix.platform }} ELECTRON_SCRIPT=${{ matrix.electron_script }}
+        run: task build:electron:target PLATFORM=darwin-arm64
 
       - name: Verify macOS release signature
-        if: matrix.platform == 'darwin-arm64'
         run: node .github/scripts/verify-macos-electron-release.ts
 
-      - name: Upload ${{ matrix.label }} artifact
+      - name: Upload MediaLink macOS ARM64 artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: ${{ matrix.artifact_name }}
+          name: MediaLink-macos-arm64
           path: |
-            apps/workspace/release/*.blockmap
             apps/workspace/release/*.dmg
-            apps/workspace/release/*.exe
-            apps/workspace/release/*.yml
             apps/workspace/release/*.zip
-            !apps/workspace/release/builder-debug.yml
-            !apps/workspace/release/builder-effective-config.yaml
           if-no-files-found: error
           retention-days: 1
-
-  publish-release:
-    name: Publish draft release
-    needs:
-      - release-version
-      - build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
-        with:
-          path: release-artifacts
-
-      - name: Publish GitHub draft release
-        env:
-          APP_VERSION: ${{ needs.release-version.outputs.app_version }}
-          GH_TOKEN: ${{ github.token }}
-          PRERELEASE: ${{ needs.release-version.outputs.prerelease }}
-        run: node .github/scripts/publish-electron-release.ts

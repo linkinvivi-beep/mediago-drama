@@ -101,8 +101,8 @@ tasks:
       PLATFORM: '{{.PLATFORM | default ""}}'
       ELECTRON_SCRIPT: '{{.ELECTRON_SCRIPT | default (printf "electron:build:%s" .PLATFORM)}}'
     preconditions:
-      - sh: 'case "{{.PLATFORM}}" in darwin-arm64|windows-x64) ;; *) exit 1 ;; esac'
-        msg: "PLATFORM must be one of: darwin-arm64, windows-x64"
+      - sh: 'case "{{.PLATFORM}}" in darwin-arm64) ;; *) exit 1 ;; esac'
+        msg: "PLATFORM must be darwin-arm64"
     env:
       MEDIAGO_AGENT_ID: "{{.AGENT}}"
       MEDIAGO_MODEL_PLATFORM: "{{.MODEL_PLATFORM}}"
@@ -135,24 +135,6 @@ tasks:
           MODEL_PLATFORM: "{{.MODEL_PLATFORM}}"
           MEDIAGO_MODEL_PLATFORM_MEDIAGO_BASE_URL: "{{.MEDIAGO_MODEL_PLATFORM_MEDIAGO_BASE_URL}}"
       - pnpm -C apps/workspace {{.ELECTRON_SCRIPT}}
-
-  publish:electron:
-    desc: Build and publish the Electron desktop app with electron-builder
-    cmds:
-      - task: build:electron
-        vars:
-          ELECTRON_SCRIPT: electron:publish
-
-  publish:electron:target:
-    desc: Build and publish the Electron desktop app for one target platform
-    vars:
-      PLATFORM: '{{.PLATFORM | default ""}}'
-      ELECTRON_SCRIPT: '{{.ELECTRON_SCRIPT | default (printf "electron:publish:%s" .PLATFORM)}}'
-    cmds:
-      - task: build:electron:target
-        vars:
-          PLATFORM: "{{.PLATFORM}}"
-          ELECTRON_SCRIPT: "{{.ELECTRON_SCRIPT}}"
 
   prepare-agent:
     vars:
@@ -284,8 +266,8 @@ tasks:
     vars:
       PLATFORM: '{{.PLATFORM | default ""}}'
     preconditions:
-      - sh: 'case "{{.PLATFORM}}" in darwin-arm64|windows-x64) ;; *) exit 1 ;; esac'
-        msg: "PLATFORM must be one of: darwin-arm64, windows-x64"
+      - sh: 'case "{{.PLATFORM}}" in darwin-arm64) ;; *) exit 1 ;; esac'
+        msg: "PLATFORM must be darwin-arm64"
     cmds:
       - node scripts/build-server-target.mjs "{{.PLATFORM}}"
 

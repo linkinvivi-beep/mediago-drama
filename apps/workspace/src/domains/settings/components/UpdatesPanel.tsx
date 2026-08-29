@@ -128,7 +128,7 @@ export const UpdatesPanel: React.FC = () => {
 		<SettingsPanelLayout
 			icon={<RefreshCw />}
 			title="应用更新"
-			description="检查 GitHub Releases 中的桌面端增量更新包。"
+			description="查看当前桌面版本与更新能力。"
 			actions={
 				supportsAutoUpdate ? (
 					<Button
@@ -221,10 +221,12 @@ export const UpdatesPanel: React.FC = () => {
 					</div>
 				) : (
 					<div className="flex flex-wrap items-center gap-2">
-						<Button type="button" variant="default" onClick={() => void openReleasePage()}>
-							<ExternalLink className="size-3.5" />
-							<span>前往下载页</span>
-						</Button>
+						{state.capability?.releasePageUrl ? (
+							<Button type="button" variant="default" onClick={() => void openReleasePage()}>
+								<ExternalLink className="size-3.5" />
+								<span>前往下载页</span>
+							</Button>
+						) : null}
 						<p className="text-xs text-muted-foreground">
 							{state.capability?.reason ?? "当前运行环境不支持应用内更新，请前往下载页升级。"}
 						</p>
