@@ -3,11 +3,145 @@ package generation
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
+	"sync/atomic"
 	"testing"
 
 	coregeneration "github.com/mediago-dev/mediago-drama/packages/core/pkg/generation"
 	"github.com/mediago-dev/mediago-drama/services/server/internal/service/settings"
 )
+
+func TestMediaLinkCatalogVisibleListing(t *testing.T) {
+	var mediagoRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		mediagoRequests.Add(1)
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`{"data":[{"id":"gpt-image-2"}]}`))
+	}))
+	defer server.Close()
+
+	settingsService := settings.NewSettings(&generationTestAPIKeyStore{
+		values: map[string]string{coregeneration.ProviderMediago: "mgak-test"},
+	})
+	workflow := NewGenerationService(settingsService, nil, nil)
+	workflow.SetMediagoBaseURL(server.URL)
+	workflow.SetMediaLinkProviders(
+		&mediaLinkTestProvider{name: "codex-test"},
+		&mediaLinkTestProvider{name: "autodl-h3-test"},
+		func(_ context.Context, routeID string) (bool, string) {
+			return routeID == coregeneration.RouteCodexImage, "not ready"
+		},
+	)
+
+	catalog := workflow.ListGenerationModels()
+
+	if got := mediagoRequests.Load(); got != 0 {
+		t.Fatalf("MediaGo catalog requests = %d, want 0", got)
+	}
+	if got, want := mediaLinkRouteIDs(catalog.Routes), []string{
+		coregeneration.RouteCodexImage,
+		coregeneration.RouteAutoDLH3,
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("route IDs = %v, want %v", got, want)
+	}
+	if got, want := mediaLinkRouteKinds(catalog.Routes), []coregeneration.Kind{
+		coregeneration.KindImage,
+		coregeneration.KindVideo,
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("route kinds = %v, want %v", got, want)
+	}
+	if got, want := mediaLinkFamilyIDs(catalog.Families), []string{
+		coregeneration.FamilyCodexImage,
+		coregeneration.FamilyMiniMaxH3,
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("family IDs = %v, want %v", got, want)
+	}
+	if got, want := mediaLinkVersionIDs(catalog.Versions), []string{
+		coregeneration.VersionCodexImageV1,
+		coregeneration.VersionMiniMaxH3V1,
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("version IDs = %v, want %v", got, want)
+	}
+	if got, want := mediaLinkProviderIDs(catalog.Providers), []string{
+		coregeneration.ProviderCodex,
+		coregeneration.ProviderAutoDL,
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("provider IDs = %v, want %v", got, want)
+	}
+	if len(catalog.Models) != 0 {
+		t.Fatalf("legacy models = %v, want empty", catalog.Models)
+	}
+	if !catalog.Routes[0].Configured || catalog.Routes[1].Configured {
+		t.Fatalf(
+			"route configured values = [%t %t], want readiness-derived [true false]",
+			catalog.Routes[0].Configured,
+			catalog.Routes[1].Configured,
+		)
+	}
+	for _, family := range catalog.Families {
+		if family.Kind != coregeneration.KindImage && family.Kind != coregeneration.KindVideo {
+			t.Fatalf("family %q kind = %q, want image or video", family.ID, family.Kind)
+		}
+	}
+	for _, version := range catalog.Versions {
+		if version.FamilyID != coregeneration.FamilyCodexImage && version.FamilyID != coregeneration.FamilyMiniMaxH3 {
+			t.Fatalf("version %q references hidden family %q", version.ID, version.FamilyID)
+		}
+	}
+	for _, route := range catalog.Routes {
+		if route.FamilyID != coregeneration.FamilyCodexImage && route.FamilyID != coregeneration.FamilyMiniMaxH3 {
+			t.Fatalf("route %q references hidden family %q", route.ID, route.FamilyID)
+		}
+		if route.VersionID != coregeneration.VersionCodexImageV1 && route.VersionID != coregeneration.VersionMiniMaxH3V1 {
+			t.Fatalf("route %q references hidden version %q", route.ID, route.VersionID)
+		}
+		if route.Provider != coregeneration.ProviderCodex && route.Provider != coregeneration.ProviderAutoDL {
+			t.Fatalf("route %q references hidden provider %q", route.ID, route.Provider)
+		}
+	}
+}
+
+func mediaLinkRouteIDs(routes []coregeneration.ModelRoute) []string {
+	ids := make([]string, 0, len(routes))
+	for _, route := range routes {
+		ids = append(ids, route.ID)
+	}
+	return ids
+}
+
+func mediaLinkRouteKinds(routes []coregeneration.ModelRoute) []coregeneration.Kind {
+	kinds := make([]coregeneration.Kind, 0, len(routes))
+	for _, route := range routes {
+		kinds = append(kinds, route.Kind)
+	}
+	return kinds
+}
+
+func mediaLinkFamilyIDs(families []coregeneration.ModelFamily) []string {
+	ids := make([]string, 0, len(families))
+	for _, family := range families {
+		ids = append(ids, family.ID)
+	}
+	return ids
+}
+
+func mediaLinkVersionIDs(versions []coregeneration.ModelVersion) []string {
+	ids := make([]string, 0, len(versions))
+	for _, version := range versions {
+		ids = append(ids, version.ID)
+	}
+	return ids
+}
+
+func mediaLinkProviderIDs(providers []coregeneration.ProviderInfo) []string {
+	ids := make([]string, 0, len(providers))
+	for _, provider := range providers {
+		ids = append(ids, provider.ID)
+	}
+	return ids
+}
 
 func TestMediaLinkRouteProviders(t *testing.T) {
 	codexProvider := &mediaLinkTestProvider{name: "codex-test"}

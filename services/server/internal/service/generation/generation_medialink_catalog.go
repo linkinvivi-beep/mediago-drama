@@ -12,6 +12,58 @@ type mediaLinkRouteProviders struct {
 	autodlH3   coregeneration.Provider
 }
 
+func mediaLinkCatalog(source coregeneration.ModelCatalog) coregeneration.ModelCatalog {
+	allowed := map[string]struct{}{
+		coregeneration.RouteCodexImage: {},
+		coregeneration.RouteAutoDLH3:   {},
+	}
+	return filterCatalogRoutes(source, allowed)
+}
+
+func filterCatalogRoutes(source coregeneration.ModelCatalog, allowed map[string]struct{}) coregeneration.ModelCatalog {
+	result := coregeneration.ModelCatalog{
+		Families:  make([]coregeneration.ModelFamily, 0),
+		Versions:  make([]coregeneration.ModelVersion, 0),
+		Routes:    make([]coregeneration.ModelRoute, 0),
+		Models:    make([]coregeneration.ModelSpec, 0),
+		Providers: make([]coregeneration.ProviderInfo, 0),
+	}
+	referencedFamilies := make(map[string]struct{})
+	referencedVersions := make(map[string]struct{})
+	referencedProviders := make(map[string]struct{})
+
+	for _, route := range source.Routes {
+		if _, ok := allowed[route.ID]; !ok {
+			continue
+		}
+		result.Routes = append(result.Routes, route)
+		referencedFamilies[route.FamilyID] = struct{}{}
+		referencedVersions[route.VersionID] = struct{}{}
+		referencedProviders[route.Provider] = struct{}{}
+	}
+	for _, family := range source.Families {
+		if _, ok := referencedFamilies[family.ID]; ok {
+			result.Families = append(result.Families, family)
+		}
+	}
+	for _, version := range source.Versions {
+		if _, ok := referencedVersions[version.ID]; ok {
+			result.Versions = append(result.Versions, version)
+		}
+	}
+	for _, provider := range source.Providers {
+		if _, ok := referencedProviders[provider.ID]; ok {
+			result.Providers = append(result.Providers, provider)
+		}
+	}
+
+	return result
+}
+
+func (workflow *GenerationService) mediaLinkCatalogActive() bool {
+	return workflow != nil && workflow.mediaLinkReadiness != nil
+}
+
 func (providers mediaLinkRouteProviders) providerForRoute(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 	switch route.ID {
 	case coregeneration.RouteCodexImage:
