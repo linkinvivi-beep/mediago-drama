@@ -40,6 +40,7 @@ ds-bundle/
 !.env.example
 .claude/settings.local.json
 .claude/worktrees/
+.worktrees/
 
 /tmp
 .cache
