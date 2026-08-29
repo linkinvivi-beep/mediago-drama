@@ -472,6 +472,20 @@ describe("Settings Codex skills page", () => {
 	);
 });
 
+describe("Settings product identity", () => {
+	afterEach(() => {
+		cleanup();
+	});
+
+	it("renders the MediaLink settings shell without the upstream product name", async () => {
+		useSettingsNavigationStore.setState({ activeTab: "appearance" });
+		renderSettings();
+
+		expect(await screen.findByText("管理 MediaLink 工作区的基础偏好。")).toBeInTheDocument();
+		expect(screen.queryByText(/MediaGo Drama/)).not.toBeInTheDocument();
+	});
+});
+
 const renderSettings = () =>
 	render(
 		<MemoryRouter>

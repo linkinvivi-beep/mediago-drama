@@ -1,7 +1,9 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { SWRConfig } from "swr";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { capabilitiesKey } from "@/domains/capabilities/api/capabilities";
 import { projectSettingsGeneralTab } from "@/lib/stores/settings";
-import { SettingsSidebarPanel } from "./ProjectNavigatorPanels";
+import { SettingsSidebarPanel, StudioTypesScreen } from "./ProjectNavigatorPanels";
 
 describe("SettingsSidebarPanel", () => {
 	afterEach(() => {
@@ -23,6 +25,40 @@ describe("SettingsSidebarPanel", () => {
 		fireEvent.click(screen.getByRole("button", { name: "快捷键" }));
 
 		expect(onSelectTab).toHaveBeenCalledWith("shortcuts");
+	});
+
+	it("labels the settings shell for MediaLink", () => {
+		render(
+			<SettingsSidebarPanel
+				activeTab="appearance"
+				isProjectSettings={false}
+				onBack={vi.fn()}
+				onSelectTab={vi.fn()}
+			/>,
+		);
+
+		expect(screen.getByText("MediaLink 设置")).toBeInTheDocument();
+		expect(screen.queryByText(/MediaGo Drama/)).not.toBeInTheDocument();
+	});
+
+	it("does not expose the upstream GitHub help button", () => {
+		render(
+			<SWRConfig
+				value={{
+					fallback: { [capabilitiesKey]: { capabilities: [] } },
+					revalidateOnMount: false,
+				}}
+			>
+				<StudioTypesScreen
+					activeCapabilityId={null}
+					activeTab={null}
+					onOpenSettings={vi.fn()}
+					onSelectTab={vi.fn()}
+				/>
+			</SWRConfig>,
+		);
+
+		expect(screen.queryByRole("button", { name: "打开 GitHub 页面" })).not.toBeInTheDocument();
 	});
 
 	it("shows API keys without the retired agent model profile entry", () => {

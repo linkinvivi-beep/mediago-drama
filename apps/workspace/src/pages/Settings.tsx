@@ -1322,7 +1322,7 @@ const AppearancePanel: React.FC<{
 	return (
 		<SettingsPanelLayout
 			title="基础设置"
-			description="管理工作区的基础偏好。"
+			description="管理 MediaLink 工作区的基础偏好。"
 			icon={<SlidersHorizontal className="size-4" />}
 		>
 			<div className="divide-y divide-border">

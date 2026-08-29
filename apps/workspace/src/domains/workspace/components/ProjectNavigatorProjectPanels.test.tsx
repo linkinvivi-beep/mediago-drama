@@ -187,10 +187,12 @@ describe("ProjectSidebarPanel", () => {
 	it("right-aligns footer actions on home and project sidebars", () => {
 		const projectSidebar = renderProjectSidebar(true);
 		expect(footerActionRowClassName()).toContain("justify-end");
+		expect(screen.queryByRole("button", { name: "打开 GitHub 页面" })).not.toBeInTheDocument();
 		projectSidebar.unmount();
 
 		renderProjectsSidebar();
 		expect(footerActionRowClassName()).toContain("justify-end");
+		expect(screen.queryByRole("button", { name: "打开 GitHub 页面" })).not.toBeInTheDocument();
 	});
 
 	it("shows a return action when the selected project does not exist", () => {

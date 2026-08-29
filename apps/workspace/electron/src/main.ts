@@ -53,6 +53,13 @@ let promptPackEditorCloseAllowed = false;
 let pendingPromptPackEditorClose: { action: "close" | "quit"; requestId: string } | null = null;
 let isQuitting = false;
 
+app.setName("MediaLink");
+app.setAboutPanelOptions({
+	applicationName: "MediaLink",
+	applicationVersion: app.getVersion(),
+	copyright: "MediaLink 独立品牌衍生作品。",
+});
+
 const configuredRendererURL = process.env.ELECTRON_RENDERER_URL?.trim();
 const rendererUrl = app.isPackaged
 	? undefined
@@ -262,7 +269,7 @@ const openPromptPackEditorWindow = async (options: PromptPackEditorOpenOptions =
 
 const createWindow = async () => {
 	mainWindow = new BrowserWindow({
-		title: "MediaGo Drama",
+		title: "MediaLink",
 		width: 1280,
 		height: 905,
 		minWidth: 960,
@@ -391,7 +398,7 @@ ipcMain.handle(desktopIpcChannel.savePromptPack, async (event, value: unknown) =
 	const dialogOptions: SaveDialogOptions = {
 		title: "导出技能包",
 		defaultPath: request.filename,
-		filters: [{ name: "MediaGo 技能包", extensions: ["mgpack"] }],
+		filters: [{ name: "MediaLink 技能包", extensions: ["mgpack"] }],
 	};
 	const owner = BrowserWindow.fromWebContents(event.sender);
 	const result = owner
@@ -516,7 +523,7 @@ if (!app.requestSingleInstanceLock()) {
 		.catch((error: unknown) => {
 			console.error("[mediago-electron] failed to start", error);
 			dialog.showErrorBox(
-				"MediaGo Drama 无法安全启动",
+				"MediaLink 无法安全启动",
 				error instanceof Error ? error.message : "本地数据或服务状态无法安全恢复。",
 			);
 			app.quit();

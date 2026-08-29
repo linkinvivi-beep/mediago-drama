@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	userDataDirName = "mediago-drama"
+	userDataDirName = "MediaLink"
 	metadataDirName = ".mediago-drama"
 )
 

@@ -177,7 +177,7 @@ const ProjectSettingsGeneralPanel: React.FC<{
 }) => (
 	<SettingsPanelLayout
 		title="基础设置"
-		description={<>管理“{projectName}”的项目设置。</>}
+		description={<>在 MediaLink 中管理“{projectName}”的项目设置。</>}
 		icon={<SlidersHorizontal className="size-4" />}
 	>
 		{isLoading && !project ? (

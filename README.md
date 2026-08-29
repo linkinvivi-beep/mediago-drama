@@ -1,17 +1,12 @@
-# MediaGo Drama
+# MediaLink
 
 <div align="center">
 
-<img src="./apps/workspace/design/icons/mediago-drama/png-light/icon-light-128.png" alt="MediaGo Drama" width="96" />
+**macOS Apple Silicon 漫剧创作工作台**
 
-**开源漫剧 Agent · 一键产出爆款**
-
-[![Release](https://img.shields.io/github/v/release/mediago-dev/mediago-drama?include_prereleases&label=release)](https://github.com/mediago-dev/mediago-drama/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 
-[官网](https://mediago.torchstellar.com/) · [下载](https://torchstellar.feishu.cn/wiki/WCfMwNnrTiMZHik8wKTcSRHtnJc) · [教程](https://www.bilibili.com/video/BV1AZg46yEFr)
-
-QQ 交流群：**1075312237**
+基于 [MediaGo Drama](https://github.com/mediago-dev/mediago-drama) 的独立品牌衍生版本，不是 MediaGo 官方发行版。
 
 </div>
 
@@ -19,15 +14,15 @@ QQ 交流群：**1075312237**
 
 ## 项目简介
 
-### MediaGo Drama 是什么
+### MediaLink 是什么
 
-MediaGo Drama 是一个面向漫剧生产的本地 Agent 工作台。它把原文、剧本、角色、场景、道具、分镜和生成素材组织成一个持续演进的创作项目，让 Agent 可以在同一份项目上下文中完成分析、改写、整理和生成任务。
+MediaLink 是一个面向漫剧生产的本地 Agent 工作台。它把原文、剧本、角色、场景、道具、分镜和生成素材组织成一个持续演进的创作项目，让 Agent 可以在同一份项目上下文中完成分析、改写、整理和生成任务。
 
 产品围绕“原文 → 剧本 → 设定 → 分镜 → 素材 → 视频”的流程构建。创作者可以在任意阶段查看和编辑文档，也可以继续让 Agent 读取已有内容并推进后续工作。
 
 ### 为什么采用文档驱动
 
-MediaGo Drama 不只保存最终生成的图片和视频，也保存这些结果所依据的创作内容：
+MediaLink 不只保存最终生成的图片和视频，也保存这些结果所依据的创作内容：
 
 - **上下文集中管理**：原文、剧情、角色、场景、道具和分镜共同组成项目事实来源。
 - **创作过程可读可改**：中间产物以可读文档保存，创作者可以直接检查、修改和归档。
@@ -173,7 +168,7 @@ pnpm dev:desktop
 
 ### 创建第一个漫剧项目
 
-1. 启动 MediaGo Drama，新建一个项目。
+1. 启动 MediaLink，新建一个项目。
 2. 导入小说、故事梗概或已有剧本，建立项目原文。
 3. 在 Agent 工作台中选择对应 Skill，生成或整理剧本、角色、场景和道具。
 4. 检查并调整项目文档，再将剧本拆解为分镜。
@@ -216,7 +211,7 @@ task test
 
 ### 当前已经具备的能力
 
-MediaGo Drama 目前处于持续迭代阶段，已经具备本地项目管理、创作文档编辑、Agent 协作、Skills 与提示词模板、素材管理，以及图片、视频和文本生成工作区。
+MediaLink 目前处于持续迭代阶段，已经具备本地项目管理、创作文档编辑、Agent 协作、Skills 与提示词模板、素材管理，以及图片、视频和文本生成工作区。
 
 ### 后续发展方向
 
@@ -244,7 +239,7 @@ Agent 可以围绕项目原文生成或整理剧本、角色、场景、道具�
 
 ### 提交 Issue
 
-如果发现问题或有功能建议，欢迎在 [GitHub Issues](https://github.com/mediago-dev/mediago-drama/issues) 中提交。请尽量附上复现步骤、运行环境和相关截图或日志。
+MediaLink 尚未配置独立的公开发行仓库，当前不把问题反馈或下载入口指向上游项目。
 
 ### 开发与 Pull Request
 
@@ -256,7 +251,7 @@ Agent 可以围绕项目原文生成或整理剧本、角色、场景、道具�
 
 ## 开源与商业边界
 
-本仓库中的自有源码采用 Apache License 2.0。MediaGo 官方发行版可能同时包含本仓库之外的专有组件，并接入账户、商城、托管、支付、授权等独立商业服务。
+本仓库中的源码采用 Apache License 2.0。MediaLink 是独立品牌的衍生作品，不代表 MediaGo 官方发行版。
 
 这些商业组件与服务不属于本仓库开源许可证的授权范围，也不会改变 Apache-2.0 已经授予的权利。详细说明请参阅[《MediaGo 商业功能与服务说明》](./COMMERCIAL_FEATURES.md)。
 

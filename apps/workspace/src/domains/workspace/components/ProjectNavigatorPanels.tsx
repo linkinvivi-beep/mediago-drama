@@ -2,7 +2,6 @@ import {
 	AudioLines,
 	Blocks,
 	ChevronLeft,
-	CircleQuestionMark,
 	Ellipsis,
 	FileText,
 	Film,
@@ -45,7 +44,6 @@ import {
 } from "@/shared/components/ui/tooltip";
 import { useToast } from "@/hooks/useToast";
 import { projectSettingsGeneralTab, type SettingsTabValue } from "@/lib/stores/settings";
-import { openExternalUrl } from "@/shared/desktop/actions";
 import { cn } from "@/shared/lib/utils";
 import { debugTabs, type DebugTabValue } from "@/pages/Debug";
 import { GenerationNotificationButton } from "./GenerationNotificationButton";
@@ -53,8 +51,6 @@ import { openGenerationConversationCreateDialog } from "./GenerationConversation
 import { GlobalToolboxButton } from "./GlobalToolboxDrawer";
 import { AssetLibraryButton } from "./AssetLibraryButton";
 import type { ActiveStudioTab, StudioTab } from "./ProjectNavigatorTypes";
-
-const githubRepositoryURL = "https://github.com/mediago-dev/mediago-drama";
 
 interface StudioToolItem {
 	category: CapabilityRecord["category"];
@@ -126,30 +122,6 @@ export const SettingsButton: React.FC<{
 		</Tooltip>
 	</TooltipProvider>
 );
-
-export const GitHubHelpButton: React.FC = () => {
-	const openGitHub = async () => {
-		await openExternalUrl(githubRepositoryURL);
-	};
-
-	return (
-		<TooltipProvider delayDuration={180}>
-			<Tooltip>
-				<TooltipTrigger asChild>
-					<button
-						type="button"
-						aria-label="打开 GitHub 页面"
-						className="flex size-8 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:bg-ide-list-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-						onClick={() => void openGitHub()}
-					>
-						<CircleQuestionMark className="size-4" />
-					</button>
-				</TooltipTrigger>
-				<TooltipContent side="top">GitHub</TooltipContent>
-			</Tooltip>
-		</TooltipProvider>
-	);
-};
 
 export const StudioConversationsScreen: React.FC<{
 	activeConversationId: string;
@@ -250,7 +222,6 @@ export const StudioSessionsScreen: React.FC<{
 				<div className="mt-auto pt-2">
 					<div className="flex items-center gap-1">
 						<SettingsButton isActive={false} onClick={onOpenSettings} />
-						<GitHubHelpButton />
 						<AssetLibraryButton />
 						<GlobalToolboxButton />
 						{onOpenGenerationNotification ? (
@@ -325,7 +296,6 @@ export const StudioTypesScreen: React.FC<{
 			<div className="mt-auto pt-2">
 				<div className="flex items-center gap-1">
 					<SettingsButton isActive={false} onClick={onOpenSettings} />
-					<GitHubHelpButton />
 					<AssetLibraryButton />
 					<GlobalToolboxButton />
 					{onOpenGenerationNotification ? (
@@ -670,6 +640,7 @@ export const SettingsSidebarPanel: React.FC<{
 			<ChevronLeft className="size-4 shrink-0 text-muted-foreground" />
 			<span className="min-w-0 flex-1 truncate">返回</span>
 		</button>
+		<p className="mt-3 px-2 text-sm font-semibold text-foreground">MediaLink 设置</p>
 
 		{isProjectSettings ? (
 			<section className="mt-3 space-y-1">

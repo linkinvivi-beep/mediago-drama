@@ -221,6 +221,8 @@ describe("Projects", () => {
 
 		fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
 		const dialog = await screen.findByRole("alertdialog");
+		expect(within(dialog).getByText(/MediaLink 中的项目记录/)).toBeInTheDocument();
+		expect(within(dialog).queryByText(/MediaGo Drama/)).not.toBeInTheDocument();
 		fireEvent.click(within(dialog).getByRole("button", { name: "永久删除" }));
 
 		await waitFor(() =>
