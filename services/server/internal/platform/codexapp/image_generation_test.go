@@ -78,8 +78,11 @@ func TestImageGenerationStartsWorkspaceWriteTurnWithOrderedLocalImages(t *testin
 	}
 
 	threadParams := client.calls[0].params.(map[string]any)
-	if client.calls[0].method != "thread/start" || threadParams["cwd"] != jobDir || threadParams["sandbox"] != "workspace-write" || threadParams["approvalPolicy"] != "never" || !reflect.DeepEqual(threadParams["runtimeWorkspaceRoots"], []string{jobDir}) {
+	if client.calls[0].method != "thread/start" || threadParams["cwd"] != jobDir || threadParams["sandbox"] != "workspace-write" || threadParams["approvalPolicy"] != "never" {
 		t.Fatalf("thread/start = %#v", client.calls[0])
+	}
+	if _, exists := threadParams["runtimeWorkspaceRoots"]; exists {
+		t.Fatalf("thread/start includes experimental runtimeWorkspaceRoots: %#v", client.calls[0])
 	}
 	turnParams := client.calls[1].params.(map[string]any)
 	if client.calls[1].method != "turn/start" || turnParams["threadId"] != "thread-1" {

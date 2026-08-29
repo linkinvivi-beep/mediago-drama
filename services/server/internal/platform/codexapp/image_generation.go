@@ -103,10 +103,9 @@ func (session *ImageGenerationSession) GenerateImage(
 		} `json:"thread"`
 	}
 	if err := session.client.Call(ctx, "thread/start", map[string]any{
-		"approvalPolicy":        "never",
-		"cwd":                   jobDir,
-		"runtimeWorkspaceRoots": []string{jobDir},
-		"sandbox":               "workspace-write",
+		"approvalPolicy": "never",
+		"cwd":            jobDir,
+		"sandbox":        "workspace-write",
 	}, &threadResponse); err != nil {
 		return ImageGenerationResult{}, fmt.Errorf("starting Codex image thread: %w", err)
 	}
