@@ -17,10 +17,20 @@ func (workflow *GenerationService) newGenerationProvider(route coregeneration.Mo
 	if err := workflow.requireGenerationRouteConfigured(route); err != nil {
 		return nil, err
 	}
-	if workflow.generationProviderFactory != nil {
+	if isMediaLinkRouteID(route.ID) && workflow.generationProviderFactory != nil {
+		return workflow.generationProviderFactory(route)
+	}
+	// Preserve the package's existing direct factory test seam. Production
+	// MediaLink wiring goes through SetMediaLinkProviders and never sends legacy
+	// routes to that factory.
+	if workflow.generationProviderFactory != nil && !workflow.mediaLinkProvidersInstalled {
 		return workflow.generationProviderFactory(route)
 	}
 
+	return workflow.newLegacyGenerationProvider()
+}
+
+func (workflow *GenerationService) newLegacyGenerationProvider() (coregeneration.Provider, error) {
 	return runtime.NewProvider(runtime.Config{
 		Credentials:                   workflow.generationCredentialResolver(),
 		MultimodalTextProviderFactory: workflow.multimodalTextProviderFactory,
@@ -65,6 +75,13 @@ func (workflow *GenerationService) newGenerationProviderForStoredTask(
 }
 
 func (workflow *GenerationService) requireGenerationRouteConfigured(route coregeneration.ModelRoute) error {
+	if isMediaLinkRouteID(route.ID) {
+		ready, reason := workflow.mediaLinkRouteReady(route.ID)
+		if ready {
+			return nil
+		}
+		return errors.New(reason)
+	}
 	if route.Provider == coregeneration.ProviderMediago &&
 		strings.TrimSpace(workflow.mediagoBaseURL) != "" &&
 		workflow.generationRouteCredentialsConfigured(route) {
@@ -87,6 +104,10 @@ func (workflow *GenerationService) requireGenerationRouteConfigured(route corege
 }
 
 func (workflow *GenerationService) generationRouteConfigured(route coregeneration.ModelRoute) bool {
+	if isMediaLinkRouteID(route.ID) {
+		ready, _ := workflow.mediaLinkRouteReady(route.ID)
+		return ready
+	}
 	return workflow.generationRouteConfiguredWithMediagoModels(route, nil, false)
 }
 
