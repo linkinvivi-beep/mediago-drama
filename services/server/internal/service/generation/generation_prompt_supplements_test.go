@@ -79,7 +79,7 @@ func TestApplyGenerationPromptSupplements(t *testing.T) {
 func TestCreateGenerationMessageAppliesPromptSupplements(t *testing.T) {
 	workflow := newPromptSupplementsTestWorkflow(t)
 	provider := &recordingPromptSupplementsProvider{started: make(chan coregeneration.Request, 1)}
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		if route.ID != coregeneration.RouteDMXGPTImage2 {
 			return nil, fmt.Errorf("unexpected route %q", route.ID)
 		}
@@ -113,7 +113,7 @@ func TestCreatePromptOptimizedGenerationMessageAppliesPromptSupplementsBeforeOpt
 	workflow := newPromptSupplementsTestWorkflow(t)
 	imageProvider := &recordingPromptSupplementsProvider{started: make(chan coregeneration.Request, 1)}
 	var textRequest coregeneration.Request
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		switch route.ID {
 		case coregeneration.RouteDMXGPT41MiniText:
 			return fakeTextStreamProvider{

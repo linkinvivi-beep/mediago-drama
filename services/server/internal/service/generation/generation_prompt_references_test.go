@@ -157,7 +157,7 @@ func TestCreateVideoGenerationKeepsStoredPromptAndRewritesProviderPrompt(t *test
 		response: coregeneration.Response{ID: "dmx.seedance-2.0-fast:cgt-reference", Status: "submitted"},
 	}
 	workflow := NewGenerationService(settingsSvc, store, mediaAssets)
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		return provider, nil
 	}
 

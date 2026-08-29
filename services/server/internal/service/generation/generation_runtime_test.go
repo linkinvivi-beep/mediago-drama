@@ -770,7 +770,7 @@ func TestCreateVideoGenerationSubmitsProviderTaskInBackground(t *testing.T) {
 		response: coregeneration.Response{ID: "dmx.seedance-2.0-fast:cgt-background", Status: "submitted"},
 	}
 	workflow := NewGenerationService(settingsSvc, store, nil)
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		if route.ID != coregeneration.RouteDMXSeedance20Fast {
 			t.Fatalf("route = %q, want seedance video route", route.ID)
 		}
@@ -850,7 +850,7 @@ func TestCreateJimengSeedanceQueuesWhenActiveTaskExists(t *testing.T) {
 		response: coregeneration.Response{ID: coregeneration.RouteJimengSeedance20 + ":video-next", Status: "submitted"},
 	}
 	workflow := NewGenerationService(settingsSvc, store, nil)
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		if route.ID != coregeneration.RouteJimengSeedance20 {
 			t.Fatalf("route = %q, want jimeng seedance 2.0 route", route.ID)
 		}
@@ -918,7 +918,7 @@ func TestCreateJimengSeedanceMiniAndVIPRoutesBypassQueue(t *testing.T) {
 				response: coregeneration.Response{ID: routeID + ":video-direct", Status: "submitted"},
 			}
 			workflow := NewGenerationService(settingsSvc, store, nil)
-			workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+			workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 				if route.ID != routeID {
 					t.Fatalf("route = %q, want %q", route.ID, routeID)
 				}
@@ -971,7 +971,7 @@ func TestCreateImageGenerationRejectsReferenceURLsBeyondRouteLimitBeforeTask(t *
 	})
 	workflow := NewGenerationService(settingsSvc, store, nil)
 	providerFactoryCalled := false
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		providerFactoryCalled = true
 		return &blockingMultiAssetImageGenerateProvider{
 			started: make(chan coregeneration.Request, 1),
@@ -1043,7 +1043,7 @@ func TestPollQueuedJimengSeedanceSubmitsOldestWhenUnblocked(t *testing.T) {
 		response: coregeneration.Response{ID: coregeneration.RouteJimengSeedance20Fast + ":video-queued-1", Status: "submitted"},
 	}
 	workflow := NewGenerationService(settingsSvc, store, nil)
-	workflow.generationProviderFactory = func(coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		return provider, nil
 	}
 
@@ -1114,7 +1114,7 @@ func TestCreateJimengImageGenerationPersistsOneTaskForRequestedCount(t *testing.
 	}
 	mediaAssets := media.NewMediaAssets(dbPath, t.TempDir())
 	workflow := NewGenerationService(settingsSvc, store, mediaAssets)
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		if route.ID != coregeneration.RouteJimengSeedream50 {
 			t.Fatalf("route = %q, want jimeng seedream route", route.ID)
 		}
@@ -1199,7 +1199,7 @@ func TestCreatePromptOptimizedGenerationMessageRecordsOptimizationAndImageTasks(
 	}
 	workflow := NewGenerationService(settingsSvc, store, media.NewMediaAssets(dbPath, t.TempDir()))
 	var textRequest coregeneration.Request
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		switch route.ID {
 		case coregeneration.RouteDMXGPT41MiniText:
 			return fakeTextStreamProvider{
@@ -1329,7 +1329,7 @@ func TestCreatePromptOptimizedGenerationMessageUsesCodexWithoutTextRoute(t *test
 		release: make(chan struct{}),
 	}
 	workflow := NewGenerationService(settingsSvc, store, media.NewMediaAssets(dbPath, t.TempDir()))
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		if route.ID != coregeneration.RouteDMXGPTImage2 {
 			t.Fatalf("route = %q, want image route only", route.ID)
 		}
@@ -1493,7 +1493,7 @@ func TestCreateJimengImageDocumentContextDoesNotUseCurrentSectionImagesAsReferen
 			},
 		},
 	})
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		if route.ID != coregeneration.RouteJimengSeedream50 {
 			t.Fatalf("route = %q, want jimeng seedream route", route.ID)
 		}
@@ -1553,7 +1553,7 @@ func TestCreateJimengImageGenerationPreservesPartialAssetsOnFailure(t *testing.T
 	}
 	mediaAssets := media.NewMediaAssets(dbPath, t.TempDir())
 	workflow := NewGenerationService(settingsSvc, store, mediaAssets)
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		return provider, nil
 	}
 
@@ -1609,7 +1609,7 @@ func TestGetGenerationVideoPollsProviderTaskID(t *testing.T) {
 		},
 	}
 	workflow := NewGenerationService(settingsSvc, store, nil)
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		if route.ID != coregeneration.RouteDMXSeedance20Fast {
 			t.Fatalf("route = %q, want seedance video route", route.ID)
 		}
@@ -1668,7 +1668,7 @@ func TestGetGenerationVideoUsesStoredImageKind(t *testing.T) {
 		},
 	}
 	workflow := NewGenerationService(settingsSvc, store, nil)
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		if route.ID != coregeneration.RouteLibTVGPTImage2 {
 			t.Fatalf("route = %q, want LibTV GPT Image 2", route.ID)
 		}
@@ -1750,7 +1750,7 @@ func TestGetGenerationVideoCachesRemoteAssetWithTaskAssetTitle(t *testing.T) {
 		},
 	}
 	workflow := NewGenerationService(settingsSvc, store, mediaAssets)
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		return provider, nil
 	}
 
@@ -1890,7 +1890,7 @@ func TestStreamGenerationTextPersistsFinalText(t *testing.T) {
 		},
 	})
 	workflow := NewGenerationService(settingsSvc, store, nil)
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		if route.ID != coregeneration.RouteDMXGPT41MiniText {
 			t.Fatalf("route = %q, want text route", route.ID)
 		}
@@ -2017,7 +2017,7 @@ func TestStreamGenerationTextFallsBackToNonStreamingProvider(t *testing.T) {
 		},
 	})
 	workflow := NewGenerationService(settingsSvc, store, nil)
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		if route.ID != coregeneration.RouteDMXGPT41MiniText {
 			t.Fatalf("route = %q, want text route", route.ID)
 		}
@@ -2134,7 +2134,7 @@ func TestCompleteTextUsesConfiguredTextRoute(t *testing.T) {
 	})
 	workflow := NewGenerationService(settingsSvc, nil, nil)
 	var captured coregeneration.Request
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		if route.ID != coregeneration.RouteOfficialGPT55Text {
 			t.Fatalf("route = %q, want official text route", route.ID)
 		}
@@ -2172,7 +2172,7 @@ func TestCompleteTextFallsBackToNonStreamingProvider(t *testing.T) {
 		},
 	})
 	workflow := NewGenerationService(settingsSvc, nil, nil)
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		if route.ID != coregeneration.RouteOfficialGPT55Text {
 			t.Fatalf("route = %q, want official text route", route.ID)
 		}
@@ -2225,7 +2225,7 @@ func TestCompleteTextFallsBackToCodexWhenNoRouteIsConfigured(t *testing.T) {
 func TestCompleteTextDoesNotRetryConfiguredRouteFailureThroughCodex(t *testing.T) {
 	settingsSvc := settings.NewSettings(&generationTestAPIKeyStore{values: map[string]string{"openai": "sk-openai"}})
 	workflow := NewGenerationService(settingsSvc, nil, nil)
-	workflow.generationProviderFactory = func(coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		return nil, fmt.Errorf("route failed")
 	}
 	codexCalls := 0
@@ -2607,7 +2607,7 @@ func TestLibTVImageGenerationHandoffAndPoll(t *testing.T) {
 		},
 	}
 	workflow := NewGenerationService(settingsSvc, store, mediaAssets)
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		if route.ID != coregeneration.RouteLibTVGPTImage2 {
 			t.Fatalf("route = %q, want LibTV GPT Image 2", route.ID)
 		}
@@ -2677,7 +2677,7 @@ func TestPollGenerationTaskCompletesHandedOffImage(t *testing.T) {
 		},
 	}
 	workflow := NewGenerationService(settingsSvc, store, nil)
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		if route.ID != coregeneration.RouteJimengSeedream50 {
 			t.Fatalf("route = %q, want jimeng seedream image route", route.ID)
 		}
@@ -2725,7 +2725,7 @@ func TestPollGenerationTaskTimesOutExpiredHandedOffImage(t *testing.T) {
 		},
 	}
 	workflow := NewGenerationService(settingsSvc, store, nil)
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		return provider, nil
 	}
 
@@ -2783,7 +2783,7 @@ func TestLibTVImagePollErrorTimesOutOnlyExpiredTask(t *testing.T) {
 			})
 			provider := &stubImageProvider{getErr: fmt.Errorf("libtv status unavailable")}
 			workflow := NewGenerationService(settingsSvc, store, nil)
-			workflow.generationProviderFactory = func(coregeneration.ModelRoute) (coregeneration.Provider, error) {
+			workflow.legacyProviderFactory = func(coregeneration.ModelRoute) (coregeneration.Provider, error) {
 				return provider, nil
 			}
 

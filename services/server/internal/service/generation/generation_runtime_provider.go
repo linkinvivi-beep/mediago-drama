@@ -20,17 +20,14 @@ func (workflow *GenerationService) newGenerationProvider(route coregeneration.Mo
 	if isMediaLinkRouteID(route.ID) && workflow.generationProviderFactory != nil {
 		return workflow.generationProviderFactory(route)
 	}
-	// Preserve the package's existing direct factory test seam. Production
-	// MediaLink wiring goes through SetMediaLinkProviders and never sends legacy
-	// routes to that factory.
-	if workflow.generationProviderFactory != nil && !workflow.mediaLinkProvidersInstalled {
-		return workflow.generationProviderFactory(route)
-	}
 
-	return workflow.newLegacyGenerationProvider()
+	return workflow.newLegacyGenerationProvider(route)
 }
 
-func (workflow *GenerationService) newLegacyGenerationProvider() (coregeneration.Provider, error) {
+func (workflow *GenerationService) newLegacyGenerationProvider(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	if workflow.legacyProviderFactory != nil {
+		return workflow.legacyProviderFactory(route)
+	}
 	return runtime.NewProvider(runtime.Config{
 		Credentials:                   workflow.generationCredentialResolver(),
 		MultimodalTextProviderFactory: workflow.multimodalTextProviderFactory,

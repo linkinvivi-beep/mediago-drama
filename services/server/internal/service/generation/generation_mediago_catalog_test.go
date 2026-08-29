@@ -250,7 +250,7 @@ func TestNewGenerationProviderFailsOpenWhenUserCatalogUnavailable(t *testing.T) 
 	workflow := NewGenerationService(settingsSvc, nil, nil)
 	workflow.SetMediagoBaseURL(server.URL)
 	var factoryCalls int32
-	workflow.generationProviderFactory = func(coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		atomic.AddInt32(&factoryCalls, 1)
 		return nil, nil
 	}

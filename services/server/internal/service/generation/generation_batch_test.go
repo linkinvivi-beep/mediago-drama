@@ -182,7 +182,7 @@ func newGenerationBatchTestWorkflow(t *testing.T) (*GenerationService, *Generati
 		values: map[string]string{coregeneration.ProviderDMX: "sk-image"},
 	})
 	workflow := NewGenerationService(settingsSvc, store, nil)
-	workflow.generationProviderFactory = func(coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		return &stubImageProvider{generateResponse: coregeneration.Response{Status: "completed"}}, nil
 	}
 	return workflow, store

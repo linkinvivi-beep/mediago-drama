@@ -27,8 +27,8 @@ type GenerationService struct {
 	mediaAssets                   *media.MediaAssets
 	documents                     GenerationDocumentResolver
 	generationProviderFactory     func(coregeneration.ModelRoute) (coregeneration.Provider, error)
+	legacyProviderFactory         func(coregeneration.ModelRoute) (coregeneration.Provider, error)
 	mediaLinkReadiness            func(context.Context, string) (bool, string)
-	mediaLinkProvidersInstalled   bool
 	multimodalTextProviderFactory runtime.MultimodalTextProviderFactory
 	voicePreviews                 *VoicePreviewStore
 	stylePreviews                 *StylePreviewStore

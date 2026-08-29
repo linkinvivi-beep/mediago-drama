@@ -44,7 +44,6 @@ func (workflow *GenerationService) SetMediaLinkProviders(
 	}
 	workflow.generationProviderFactory = providers.providerForRoute
 	workflow.mediaLinkReadiness = readiness
-	workflow.mediaLinkProvidersInstalled = true
 }
 
 func (workflow *GenerationService) mediaLinkRouteReady(routeID string) (bool, string) {

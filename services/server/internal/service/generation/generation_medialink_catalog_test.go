@@ -83,10 +83,7 @@ func TestMediaLinkRouteProviders(t *testing.T) {
 			values: map[string]string{coregeneration.ProviderOpenRouter: "sk-test"},
 		})
 		workflow := NewGenerationService(settingsService, nil, nil)
-		workflow.SetMediaLinkProviders(codexProvider, h3Provider, func(_ context.Context, routeID string) (bool, string) {
-			t.Fatalf("MediaLink readiness should not be called for hidden legacy route %q", routeID)
-			return false, ""
-		})
+		workflow.generationProviderFactory = providers.providerForRoute
 
 		legacyRoute, _ := coregeneration.FindRoute(coregeneration.RouteOpenRouterGPT41MiniText)
 		got, err := workflow.newGenerationProvider(legacyRoute)
