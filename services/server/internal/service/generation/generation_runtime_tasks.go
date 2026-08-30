@@ -65,6 +65,8 @@ func (workflow *GenerationService) GetGenerationVideo(ctx context.Context, id st
 		return generationMessageResponse{}, http.StatusBadGateway, err
 	}
 	projectID := ""
+	assetClaims := []media.MediaAssetClaim{}
+	createdAssetIDs := []string{}
 	if found {
 		latestTask, latestFound, pollable, latestErr := workflow.currentGenerationTaskForProviderPoll(storedTask.ID)
 		if latestErr != nil {
@@ -78,11 +80,29 @@ func (workflow *GenerationService) GetGenerationVideo(ctx context.Context, id st
 		}
 		storedTask = latestTask
 		projectID = workflow.projectIDForTask(storedTask)
+		storedTask = workflow.taskWithAutoDLResponseRuntime(storedTask, response)
+		if storedTask.ErrorCode == generationRuntimeStateConflictCode {
+			workflow.persistActiveRuntimeStateConflict(storedTask, "poll")
+			return GenerationResponseFromTask(storedTask), http.StatusOK, nil
+		}
 	}
 	if found {
-		response = workflow.cacheGenerationResponseAssetsForTask(ctx, response, storedTask)
+		options := generationMediaSaveOptionsWithTitle(
+			projectID,
+			storedTask.ConversationID,
+			storedTask.SectionID,
+			generationAssetTitleFromTask(storedTask),
+		)
+		if isAutoDLGenerationRouteID(storedTask.RouteID) {
+			response, assetClaims = workflow.cacheGenerationResponseAssetsWithOptionsClaimed(ctx, response, options)
+		} else {
+			response, createdAssetIDs = workflow.cacheGenerationResponseAssetsWithOptionsTracked(ctx, response, options)
+		}
 	} else {
 		response = workflow.cacheGenerationResponseAssetsForScope(ctx, response, projectID, "")
+	}
+	if found && len(response.Assets) > 0 && workflow.generationAssetsCachedHook != nil {
+		workflow.generationAssetsCachedHook(storedTask.ID)
 	}
 
 	responseKind := string(coregeneration.KindVideo)
@@ -93,12 +113,18 @@ func (workflow *GenerationService) GetGenerationVideo(ctx context.Context, id st
 	if found {
 		latestTask, latestFound, pollable, latestErr := workflow.currentGenerationTaskForProviderPoll(storedTask.ID)
 		if latestErr != nil {
+			workflow.finalizeGenerationAssetClaims(assetClaims, false)
+			workflow.cleanupCreatedGenerationAssets(createdAssetIDs)
 			return generationMessageResponse{}, http.StatusInternalServerError, latestErr
 		}
 		if !latestFound {
+			workflow.finalizeGenerationAssetClaims(assetClaims, false)
+			workflow.cleanupCreatedGenerationAssets(createdAssetIDs)
 			return generationMessageResponse{}, http.StatusNotFound, fmt.Errorf("generation task not found")
 		}
 		if !pollable {
+			workflow.finalizeGenerationAssetClaims(assetClaims, false)
+			workflow.cleanupCreatedGenerationAssets(createdAssetIDs)
 			return GenerationResponseFromTask(latestTask), http.StatusOK, nil
 		}
 		storedTask = latestTask
@@ -106,9 +132,13 @@ func (workflow *GenerationService) GetGenerationVideo(ctx context.Context, id st
 		storedTask = GenerationTaskWithMessage(storedTask, messageResponse)
 		storedTask = workflow.taskWithCodexResponseRuntime(storedTask, response)
 		persisted, persistErr := workflow.generationTasks.UpsertExistingActive(storedTask)
+		persistedAssets := persistErr == nil && persisted && storedTask.ErrorCode != generationRuntimeStateConflictCode
+		workflow.finalizeGenerationAssetClaims(assetClaims, persistedAssets)
 		if persistErr != nil {
+			workflow.cleanupCreatedGenerationAssets(createdAssetIDs)
 			messageResponse.Message = AppendStorageWarning(messageResponse.Message, persistErr)
 		} else if !persisted {
+			workflow.cleanupCreatedGenerationAssets(createdAssetIDs)
 			latestTask, latestFound, _, latestErr := workflow.currentGenerationTaskForProviderPoll(storedTask.ID)
 			if latestErr != nil {
 				return generationMessageResponse{}, http.StatusInternalServerError, latestErr
@@ -117,6 +147,12 @@ func (workflow *GenerationService) GetGenerationVideo(ctx context.Context, id st
 				return generationMessageResponse{}, http.StatusNotFound, fmt.Errorf("generation task not found")
 			}
 			return GenerationResponseFromTask(latestTask), http.StatusOK, nil
+		} else if storedTask.ErrorCode == generationRuntimeStateConflictCode {
+			workflow.cleanupCreatedGenerationAssets(createdAssetIDs)
+			workflow.cancelGenerationTask(storedTask.ID)
+			workflow.syncGenerationNotificationTask(storedTask)
+			_ = workflow.generationTasks.RecordAttempt(storedTask.ID, "poll", storedTask.Status, storedTask.Message, errors.New(storedTask.Error))
+			return GenerationResponseFromTask(storedTask), http.StatusOK, nil
 		} else {
 			workflow.syncGenerationNotificationTask(storedTask)
 			_ = workflow.generationTasks.RecordAttempt(storedTask.ID, "poll", messageResponse.Status, messageResponse.Message, nil)
@@ -872,10 +908,29 @@ func (workflow *GenerationService) PollGenerationTask(ctx context.Context, task 
 		return
 	}
 	task = latestTask
-
-	response = workflow.cacheGenerationResponseAssetsForTask(ctx, response, task)
+	task = workflow.taskWithAutoDLResponseRuntime(task, response)
+	if task.ErrorCode == generationRuntimeStateConflictCode {
+		workflow.persistActiveRuntimeStateConflict(task, "poll")
+		return
+	}
+	assetClaims := []media.MediaAssetClaim{}
+	createdAssetIDs := []string{}
+	if isAutoDLGenerationRouteID(task.RouteID) {
+		response, assetClaims = workflow.cacheGenerationResponseAssetsWithOptionsClaimed(ctx, response, generationMediaSaveOptionsWithTitle(
+			workflow.projectIDForTask(task), task.ConversationID, task.SectionID, generationAssetTitleFromTask(task),
+		))
+	} else {
+		response, createdAssetIDs = workflow.cacheGenerationResponseAssetsWithOptionsTracked(ctx, response, generationMediaSaveOptionsWithTitle(
+			workflow.projectIDForTask(task), task.ConversationID, task.SectionID, generationAssetTitleFromTask(task),
+		))
+	}
+	if len(response.Assets) > 0 && workflow.generationAssetsCachedHook != nil {
+		workflow.generationAssetsCachedHook(task.ID)
+	}
 	latestTask, found, pollable, err = workflow.currentGenerationTaskForProviderPoll(task.ID)
 	if err != nil || !found || !pollable {
+		workflow.finalizeGenerationAssetClaims(assetClaims, false)
+		workflow.cleanupCreatedGenerationAssets(createdAssetIDs)
 		return
 	}
 	task = latestTask
@@ -892,12 +947,22 @@ func (workflow *GenerationService) PollGenerationTask(ctx context.Context, task 
 	task = GenerationTaskWithMessage(task, messageResponse)
 	task = workflow.taskWithCodexResponseRuntime(task, response)
 	existed, err := workflow.generationTasks.UpsertExistingActive(task)
+	workflow.finalizeGenerationAssetClaims(assetClaims, err == nil && existed && task.ErrorCode != generationRuntimeStateConflictCode)
 	if err != nil {
+		workflow.cleanupCreatedGenerationAssets(createdAssetIDs)
 		_ = workflow.generationTasks.RecordAttempt(task.ID, "poll", messageResponse.Status, "后台状态检查结果保存失败。", err)
 		return
 	}
 	if !existed {
+		workflow.cleanupCreatedGenerationAssets(createdAssetIDs)
 		// The task was deleted while it was still being polled; do not recreate it.
+		return
+	}
+	if task.ErrorCode == generationRuntimeStateConflictCode {
+		workflow.cleanupCreatedGenerationAssets(createdAssetIDs)
+		workflow.cancelGenerationTask(task.ID)
+		workflow.syncGenerationNotificationTask(task)
+		_ = workflow.generationTasks.RecordAttempt(task.ID, "poll", task.Status, task.Message, errors.New(task.Error))
 		return
 	}
 	workflow.syncGenerationNotificationTask(task)
@@ -914,11 +979,16 @@ func (workflow *GenerationService) submitPendingGeneration(
 	projectID string,
 	conversationID string,
 ) {
+	defer func() {
+		if workflow.generationSubmitFinishedHook != nil {
+			workflow.generationSubmitFinishedHook(task.ID)
+		}
+	}()
 	submittingTask := task
 	submittingTask.Status = "submitting"
 	submittingTask.Message = "视频生成任务正在提交到模型服务，完成提交后会自动检查状态。"
 	submittingTask.Error = ""
-	submitExisted, err := workflow.generationTasks.UpsertExisting(submittingTask)
+	submitExisted, err := workflow.generationTasks.UpsertExistingActive(submittingTask)
 	if err != nil {
 		slog.Error("generation task submit state could not be saved", "task_id", task.ID, "error", err)
 		return
@@ -942,7 +1012,7 @@ func (workflow *GenerationService) submitPendingGeneration(
 	if err != nil {
 		messageResponse := FailedGenerationResponse(task.ID, err)
 		failedTask := GenerationTaskWithMessage(submittingTask, messageResponse)
-		failedExisted, saveErr := workflow.generationTasks.UpsertExisting(failedTask)
+		failedExisted, saveErr := workflow.generationTasks.UpsertExistingActive(failedTask)
 		if saveErr != nil {
 			slog.Error("generation task submission failure could not be saved", "task_id", task.ID, "error", saveErr)
 			return
@@ -958,21 +1028,62 @@ func (workflow *GenerationService) submitPendingGeneration(
 		return
 	}
 
+	latestTask, active, latestErr := workflow.latestActiveGenerationTask(task.ID)
+	if latestErr != nil {
+		slog.Error("generation task submission state could not be loaded", "task_id", task.ID, "error", latestErr)
+		return
+	}
+	if !active {
+		return
+	}
+	submittingTask = latestTask
 	providerTaskID := strings.TrimSpace(response.ID)
+	submittingTask = workflow.taskWithAutoDLResponseRuntime(submittingTask, response)
+	if submittingTask.ErrorCode == generationRuntimeStateConflictCode {
+		workflow.persistActiveRuntimeStateConflict(submittingTask, action)
+		return
+	}
+	if isAutoDLGenerationRouteID(task.RouteID) && IsActiveGenerationStatus(response.Status) {
+		responseState, _ := response.Metadata["runtime_state"].(GenerationTaskRuntimeState)
+		if err := validateAutoDLProviderCheckpoint(responseState, providerTaskID); err != nil {
+			workflow.persistActiveRuntimeStateConflict(generationTaskWithRuntimeStateConflict(submittingTask, err), action)
+			return
+		}
+	}
 	assetTitle := generationAssetTitleFromRequest(request)
-	response = workflow.cacheGenerationResponseAssetsWithOptions(ctx, response, generationMediaSaveOptionsWithTitle(projectID, conversationID, task.SectionID, assetTitle))
+	options := generationMediaSaveOptionsWithTitle(projectID, conversationID, task.SectionID, assetTitle)
+	assetClaims := []media.MediaAssetClaim{}
+	createdAssetIDs := []string{}
+	if isAutoDLGenerationRouteID(task.RouteID) {
+		response, assetClaims = workflow.cacheGenerationResponseAssetsWithOptionsClaimed(ctx, response, options)
+	} else {
+		response, createdAssetIDs = workflow.cacheGenerationResponseAssetsWithOptionsTracked(ctx, response, options)
+	}
+	if len(response.Assets) > 0 && workflow.generationAssetsCachedHook != nil {
+		workflow.generationAssetsCachedHook(task.ID)
+	}
 	messageResponse := generationResponseWithAssetTitle(GenerationResponseFromCore(response, task.Kind), assetTitle)
 	messageResponse.ID = task.ID
 	submittedTask := GenerationTaskWithMessage(submittingTask, messageResponse)
 	if providerTaskID != "" && submittedTask.ErrorCode != generationRuntimeStateConflictCode {
 		submittedTask.ProviderTaskID = providerTaskID
 	}
-	submittedExisted, err := workflow.generationTasks.UpsertExisting(submittedTask)
+	submittedExisted, err := workflow.generationTasks.UpsertExistingActive(submittedTask)
+	workflow.finalizeGenerationAssetClaims(assetClaims, err == nil && submittedExisted && submittedTask.ErrorCode != generationRuntimeStateConflictCode)
 	if err != nil {
+		workflow.cleanupCreatedGenerationAssets(createdAssetIDs)
 		slog.Error("generation task submission could not be saved", "task_id", task.ID, "error", err)
 		return
 	}
 	if !submittedExisted {
+		workflow.cleanupCreatedGenerationAssets(createdAssetIDs)
+		return
+	}
+	if submittedTask.ErrorCode == generationRuntimeStateConflictCode {
+		workflow.cleanupCreatedGenerationAssets(createdAssetIDs)
+		workflow.cancelGenerationTask(task.ID)
+		workflow.syncGenerationNotificationTask(submittedTask)
+		_ = workflow.generationTasks.RecordAttempt(task.ID, action, submittedTask.Status, submittedTask.Message, errors.New(submittedTask.Error))
 		return
 	}
 	workflow.syncGenerationNotificationTask(submittedTask)
@@ -1071,7 +1182,14 @@ func (workflow *GenerationService) completeSubmittedGeneration(
 		return
 	}
 	assetTitle := generationAssetTitleFromRequest(request)
-	response, createdAssetIDs := workflow.cacheGenerationResponseAssetsWithOptionsTracked(ctx, response, generationMediaSaveOptionsWithTitle(projectID, conversationID, task.SectionID, assetTitle))
+	options := generationMediaSaveOptionsWithTitle(projectID, conversationID, task.SectionID, assetTitle)
+	createdAssetIDs := []string{}
+	assetClaims := []media.MediaAssetClaim{}
+	if isAutoDLGenerationRouteID(task.RouteID) {
+		response, assetClaims = workflow.cacheGenerationResponseAssetsWithOptionsClaimed(ctx, response, options)
+	} else {
+		response, createdAssetIDs = workflow.cacheGenerationResponseAssetsWithOptionsTracked(ctx, response, options)
+	}
 	if len(response.Assets) > 0 && workflow.generationAssetsCachedHook != nil {
 		workflow.generationAssetsCachedHook(task.ID)
 	}
@@ -1080,6 +1198,7 @@ func (workflow *GenerationService) completeSubmittedGeneration(
 	completedTask := GenerationTaskWithMessage(runningTask, messageResponse)
 	completedTask = workflow.taskWithCodexResponseRuntime(completedTask, response)
 	completedExisted, err := workflow.generationTasks.UpsertExistingActive(completedTask)
+	workflow.finalizeGenerationAssetClaims(assetClaims, err == nil && completedExisted && completedTask.ErrorCode != generationRuntimeStateConflictCode)
 	if err != nil {
 		workflow.cleanupCreatedGenerationAssets(createdAssetIDs)
 		slog.Error("generation task completion could not be saved", "task_id", task.ID, "error", err)
@@ -1191,7 +1310,7 @@ func (workflow *GenerationService) handOffPendingGeneration(
 	messageResponse.ID = task.ID
 	pendingTask := runningTask
 	if isAutoDLGenerationRouteID(task.RouteID) {
-		if err := validateCompleteAutoDLPromptCheckpoint(messageResponse.RuntimeState); err != nil {
+		if err := validateAutoDLProviderCheckpoint(messageResponse.RuntimeState, providerTaskID); err != nil {
 			pendingTask = generationTaskWithRuntimeStateConflict(pendingTask, err)
 		} else {
 			pendingTask = GenerationTaskWithMessage(pendingTask, messageResponse)
@@ -1239,6 +1358,18 @@ func validateCompleteAutoDLPromptCheckpoint(state GenerationTaskRuntimeState) er
 		return fmt.Errorf("AutoDL generation handoff is missing its complete prompt checkpoint")
 	}
 	return validateAutoDLAttemptIdentityMerge(GenerationTaskRuntimeState{}, state)
+}
+
+func validateAutoDLProviderCheckpoint(state GenerationTaskRuntimeState, providerTaskID string) error {
+	if err := validateCompleteAutoDLPromptCheckpoint(state); err != nil {
+		return err
+	}
+	promptID := strings.TrimSpace(state.ComfyPromptID)
+	providerTaskID = strings.TrimSpace(providerTaskID)
+	if providerTaskID == "" || !strings.HasSuffix(providerTaskID, ":"+promptID) {
+		return fmt.Errorf("AutoDL generation provider task ID does not match its prompt checkpoint")
+	}
+	return nil
 }
 
 func backgroundImageGenerationTimeoutError() error {
@@ -1306,8 +1437,14 @@ func (workflow *GenerationService) persistGenerationProgress(
 		return
 	}
 	createdAssetIDs := []string{}
+	assetClaims := []media.MediaAssetClaim{}
 	if len(response.Assets) > 0 {
-		response, createdAssetIDs = workflow.cacheGenerationResponseAssetsWithOptionsTracked(ctx, response, generationMediaSaveOptionsWithTitle(projectID, conversationID, task.SectionID, assetTitle))
+		options := generationMediaSaveOptionsWithTitle(projectID, conversationID, task.SectionID, assetTitle)
+		if isAutoDLGenerationRouteID(task.RouteID) {
+			response, assetClaims = workflow.cacheGenerationResponseAssetsWithOptionsClaimed(ctx, response, options)
+		} else {
+			response, createdAssetIDs = workflow.cacheGenerationResponseAssetsWithOptionsTracked(ctx, response, options)
+		}
 		if workflow.generationAssetsCachedHook != nil {
 			workflow.generationAssetsCachedHook(task.ID)
 		}
@@ -1332,6 +1469,7 @@ func (workflow *GenerationService) persistGenerationProgress(
 		progressTask.ProviderTaskID = providerTaskID
 	}
 	existed, err := workflow.generationTasks.UpsertExistingActive(progressTask)
+	workflow.finalizeGenerationAssetClaims(assetClaims, err == nil && existed && progressTask.ErrorCode != generationRuntimeStateConflictCode)
 	if err != nil {
 		workflow.cleanupCreatedGenerationAssets(createdAssetIDs)
 		slog.Warn("generation task progress could not be saved", "task_id", task.ID, "error", err)

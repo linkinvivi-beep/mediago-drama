@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"io/fs"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/mediago-dev/mediago-drama/services/server/internal/domain"
@@ -200,6 +202,49 @@ func TestSaveBase64WithOptionsTrackedDistinguishesCreatedFromReused(t *testing.T
 	}
 	if !firstCreated || secondCreated || first.ID != second.ID {
 		t.Fatalf("tracked saves = first %q created %v, second %q created %v", first.ID, firstCreated, second.ID, secondCreated)
+	}
+}
+
+func TestDeleteIfUnreferencedReportsAndRetriesStagedFileRemovalFailure(t *testing.T) {
+	mediaDir := t.TempDir()
+	store := NewMediaAssets(filepath.Join(t.TempDir(), "settings.db"), mediaDir)
+	asset, err := store.SaveBase64WithOptions(
+		MediaKindImage,
+		"image/png",
+		base64.StdEncoding.EncodeToString([]byte("delete-failure-image")),
+		"",
+		MediaAssetSaveOptions{Source: MediaSourceGeneration},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	removeCalls := 0
+	store.removeFile = func(string) error {
+		removeCalls++
+		return fs.ErrPermission
+	}
+	deleted, err := store.DeleteIfUnreferenced(asset.ID)
+	if !deleted || err == nil || !strings.Contains(err.Error(), "removing staged media asset") {
+		t.Fatalf("DeleteIfUnreferenced() = deleted %v err %v", deleted, err)
+	}
+	if removeCalls == 0 {
+		t.Fatal("injected file removal was not called")
+	}
+	if _, found, getErr := store.Get(asset.ID); getErr != nil || found {
+		t.Fatalf("deleted DB row = found %v err %v", found, getErr)
+	}
+	tombstones, err := filepath.Glob(filepath.Join(mediaDir, ".trash", asset.ID+"-*"))
+	if err != nil || len(tombstones) == 0 {
+		t.Fatalf("recoverable tombstones = %v err %v", tombstones, err)
+	}
+	store.removeFile = os.Remove
+	deleted, err = store.DeleteIfUnreferenced(asset.ID)
+	if deleted || err != nil {
+		t.Fatalf("DeleteIfUnreferenced(retry) = deleted %v err %v", deleted, err)
+	}
+	tombstones, err = filepath.Glob(filepath.Join(mediaDir, ".trash", asset.ID+"-*"))
+	if err != nil || len(tombstones) != 0 {
+		t.Fatalf("tombstones after retry = %v err %v", tombstones, err)
 	}
 }
 

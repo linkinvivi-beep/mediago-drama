@@ -44,6 +44,8 @@ var mediaAssetHTTPClient = &http.Client{Timeout: 2 * time.Minute}
 
 type MediaAssets struct {
 	mu                       sync.RWMutex
+	generationClaimMu        sync.Mutex
+	generationClaims         map[string]mediaAssetClaimState
 	repo                     *repository.MediaAssetRepository
 	workspaceRepo            *repository.WorkspaceRepository
 	dir                      string
@@ -51,6 +53,8 @@ type MediaAssets struct {
 	ffmpegPath               string
 	ffmpegBinDir             string
 	metadataBackfillAttempts map[string]struct{}
+	renameFile               func(string, string) error
+	removeFile               func(string) error
 	initErr                  error
 }
 
@@ -101,6 +105,18 @@ type MediaAssetSaveOptions struct {
 	Filename       string
 }
 
+// MediaAssetClaim keeps a cached generated asset staged until its task update
+// either commits the relation or loses active ownership.
+type MediaAssetClaim struct {
+	AssetID string
+	Created bool
+}
+
+type mediaAssetClaimState struct {
+	count  int
+	staged bool
+}
+
 type mediaAssetModel = domain.AssetModel
 
 func NewMediaAssets(dbPath string, mediaDir string) *MediaAssets {
@@ -111,7 +127,7 @@ func NewMediaAssets(dbPath string, mediaDir string) *MediaAssets {
 		mediaDir = defaultMediaDir()
 	}
 
-	store := &MediaAssets{dir: mediaDir}
+	store := &MediaAssets{dir: mediaDir, renameFile: os.Rename, removeFile: os.Remove}
 	if err := os.MkdirAll(mediaDir, 0o700); err != nil {
 		store.initErr = fmt.Errorf("creating media asset directory: %w", err)
 		return store
@@ -143,6 +159,8 @@ func NewMediaAssetsFromRepository(repo *repository.MediaAssetRepository, mediaDi
 		workspaceRepo: workspaceRepo,
 		dir:           mediaDir,
 		workspaceRoot: strings.TrimSpace(workspaceRoot),
+		renameFile:    os.Rename,
+		removeFile:    os.Remove,
 		initErr:       initErr,
 	}
 	if store.initErr != nil {
@@ -413,6 +431,14 @@ func (store *MediaAssets) SaveBase64WithOptionsTracked(kind string, mimeType str
 	return store.saveBase64WithOptionsTracked(kind, mimeType, value, sourceURL, options)
 }
 
+// SaveBase64WithOptionsClaimed stores a generated asset under a temporary
+// in-process claim that the generation task writer must commit or compensate.
+func (store *MediaAssets) SaveBase64WithOptionsClaimed(kind string, mimeType string, value string, sourceURL string, options MediaAssetSaveOptions) (MediaAsset, MediaAssetClaim, error) {
+	return store.claimSavedGenerationAsset(func() (MediaAsset, bool, error) {
+		return store.saveBase64WithOptionsTracked(kind, mimeType, value, sourceURL, options)
+	})
+}
+
 // SaveTextWithOptions stores a text asset using explicit placement metadata.
 func (store *MediaAssets) SaveTextWithOptions(content string, filename string, sourceURL string, options MediaAssetSaveOptions) (MediaAsset, error) {
 	filename = strings.TrimSpace(filename)
@@ -490,6 +516,87 @@ func (store *MediaAssets) SaveRemoteAssetWithOptions(ctx context.Context, kind s
 // SaveRemoteAssetWithOptionsTracked downloads an asset and reports whether this call created it.
 func (store *MediaAssets) SaveRemoteAssetWithOptionsTracked(ctx context.Context, kind string, remoteURL string, options MediaAssetSaveOptions) (MediaAsset, bool, error) {
 	return store.saveRemoteAssetWithOptionsTracked(ctx, kind, remoteURL, options)
+}
+
+// SaveRemoteAssetWithOptionsClaimed stores a generated remote asset under a
+// temporary claim that the generation task writer must commit or compensate.
+func (store *MediaAssets) SaveRemoteAssetWithOptionsClaimed(ctx context.Context, kind string, remoteURL string, options MediaAssetSaveOptions) (MediaAsset, MediaAssetClaim, error) {
+	return store.claimSavedGenerationAsset(func() (MediaAsset, bool, error) {
+		return store.saveRemoteAssetWithOptionsTracked(ctx, kind, remoteURL, options)
+	})
+}
+
+func (store *MediaAssets) claimSavedGenerationAsset(save func() (MediaAsset, bool, error)) (MediaAsset, MediaAssetClaim, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		asset, created, err := save()
+		if err != nil || asset.ID == "" {
+			return asset, MediaAssetClaim{}, err
+		}
+		store.generationClaimMu.Lock()
+		store.mu.RLock()
+		_, existsErr := store.repo.GetMediaAsset(asset.ID)
+		store.mu.RUnlock()
+		if existsErr == nil {
+			if store.generationClaims == nil {
+				store.generationClaims = map[string]mediaAssetClaimState{}
+			}
+			state := store.generationClaims[asset.ID]
+			state.count++
+			state.staged = state.staged || created
+			store.generationClaims[asset.ID] = state
+			store.generationClaimMu.Unlock()
+			return asset, MediaAssetClaim{AssetID: asset.ID, Created: created}, nil
+		}
+		store.generationClaimMu.Unlock()
+		if !repository.IsRecordNotFound(existsErr) {
+			return MediaAsset{}, MediaAssetClaim{}, existsErr
+		}
+	}
+	return MediaAsset{}, MediaAssetClaim{}, fmt.Errorf("claiming generated media asset: asset disappeared before it could be staged")
+}
+
+// CommitGenerationAssetClaims makes task-associated generated assets durable.
+func (store *MediaAssets) CommitGenerationAssetClaims(claims []MediaAssetClaim) {
+	store.finishGenerationAssetClaims(claims, true)
+}
+
+// CompensateGenerationAssetClaims releases failed task writes and removes only
+// staged assets that remain unreferenced after every concurrent claim ends.
+func (store *MediaAssets) CompensateGenerationAssetClaims(claims []MediaAssetClaim) []error {
+	return store.finishGenerationAssetClaims(claims, false)
+}
+
+func (store *MediaAssets) finishGenerationAssetClaims(claims []MediaAssetClaim, committed bool) []error {
+	if store == nil || len(claims) == 0 {
+		return nil
+	}
+	store.generationClaimMu.Lock()
+	defer store.generationClaimMu.Unlock()
+	errorsFound := []error{}
+	for _, claim := range claims {
+		assetID := strings.TrimSpace(claim.AssetID)
+		state, ok := store.generationClaims[assetID]
+		if !ok {
+			continue
+		}
+		if committed {
+			state.staged = false
+		}
+		if state.count > 0 {
+			state.count--
+		}
+		if state.count > 0 {
+			store.generationClaims[assetID] = state
+			continue
+		}
+		delete(store.generationClaims, assetID)
+		if !committed && state.staged {
+			if _, err := store.DeleteIfUnreferenced(assetID); err != nil {
+				errorsFound = append(errorsFound, err)
+			}
+		}
+	}
+	return errorsFound
 }
 
 // SaveRemoteAssetForStudioSession is a legacy wrapper for toolbox conversation assets.
@@ -878,6 +985,127 @@ func (store *MediaAssets) Delete(id string) (bool, error) {
 	}
 
 	return deleted, nil
+}
+
+type stagedMediaAssetFile struct {
+	original string
+	staged   string
+}
+
+// DeleteIfUnreferenced removes an uncommitted generated asset without
+// cascading through an asset relation established by another task.
+func (store *MediaAssets) DeleteIfUnreferenced(id string) (bool, error) {
+	if store.initErr != nil {
+		return false, store.initErr
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false, nil
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	model, err := store.repo.GetMediaAsset(id)
+	if repository.IsRecordNotFound(err) {
+		return false, store.removeStagedMediaAssetFilesLocked(id)
+	}
+	if err != nil {
+		return false, err
+	}
+	asset := store.mediaAssetRecordFromModel(model)
+	staged, err := store.stageMediaAssetFilesLocked(asset)
+	if err != nil {
+		return false, err
+	}
+	deleted, deleteErr := store.repo.DeleteMediaAssetIfUnreferenced(id)
+	if deleteErr != nil || !deleted {
+		restoreErr := store.restoreStagedMediaAssetFilesLocked(staged)
+		if deleteErr != nil {
+			if restoreErr != nil {
+				return false, fmt.Errorf("%v; restoring staged media asset: %w", deleteErr, restoreErr)
+			}
+			return false, deleteErr
+		}
+		if restoreErr != nil {
+			return false, fmt.Errorf("restoring referenced media asset: %w", restoreErr)
+		}
+		return false, nil
+	}
+	if err := store.removeStagedFilesLocked(staged); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func (store *MediaAssets) stageMediaAssetFilesLocked(asset MediaAsset) ([]stagedMediaAssetFile, error) {
+	trashDir := filepath.Join(store.dir, ".trash")
+	if err := os.MkdirAll(trashDir, 0o700); err != nil {
+		return nil, fmt.Errorf("creating media asset trash: %w", err)
+	}
+	files := []struct {
+		path string
+		role string
+	}{{path: asset.FilePath, role: "file"}, {path: asset.PosterPath, role: "poster"}}
+	staged := make([]stagedMediaAssetFile, 0, len(files))
+	for _, file := range files {
+		if strings.TrimSpace(file.path) == "" {
+			continue
+		}
+		ext := filepath.Ext(file.path)
+		target := filepath.Join(trashDir, asset.ID+"-"+file.role+ext)
+		if err := store.renameMediaAssetFile(file.path, target); err != nil {
+			_ = store.restoreStagedMediaAssetFilesLocked(staged)
+			return nil, err
+		}
+		staged = append(staged, stagedMediaAssetFile{original: file.path, staged: target})
+	}
+	return staged, nil
+}
+
+func (store *MediaAssets) renameMediaAssetFile(source string, target string) error {
+	renameFile := store.renameFile
+	if renameFile == nil {
+		renameFile = os.Rename
+	}
+	if err := renameFile(source, target); err != nil {
+		return fmt.Errorf("staging media asset file %q: %w", filepath.Base(source), err)
+	}
+	return nil
+}
+
+func (store *MediaAssets) restoreStagedMediaAssetFilesLocked(files []stagedMediaAssetFile) error {
+	for index := len(files) - 1; index >= 0; index-- {
+		if err := store.renameMediaAssetFile(files[index].staged, files[index].original); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (store *MediaAssets) removeStagedFilesLocked(files []stagedMediaAssetFile) error {
+	removeFile := store.removeFile
+	if removeFile == nil {
+		removeFile = os.Remove
+	}
+	var removeErr error
+	for _, file := range files {
+		if err := removeFile(file.staged); err != nil && !errors.Is(err, os.ErrNotExist) && removeErr == nil {
+			removeErr = fmt.Errorf("removing staged media asset file %q: %w", filepath.Base(file.staged), err)
+		}
+	}
+	return removeErr
+}
+
+func (store *MediaAssets) removeStagedMediaAssetFilesLocked(id string) error {
+	paths, err := filepath.Glob(filepath.Join(store.dir, ".trash", strings.TrimSpace(id)+"-*"))
+	if err != nil {
+		return fmt.Errorf("finding staged media asset files: %w", err)
+	}
+	files := make([]stagedMediaAssetFile, 0, len(paths))
+	for _, path := range paths {
+		files = append(files, stagedMediaAssetFile{staged: path})
+	}
+	return store.removeStagedFilesLocked(files)
 }
 
 func (store *MediaAssets) UpdateFilename(id string, filename string) (MediaAsset, bool, error) {

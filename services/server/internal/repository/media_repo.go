@@ -139,6 +139,25 @@ func (repo *MediaAssetRepository) DeleteMediaAsset(id string) (bool, error) {
 	return result.RowsAffected > 0, nil
 }
 
+// DeleteMediaAssetIfUnreferenced atomically removes one asset row only when no
+// workspace relation currently points at it.
+func (repo *MediaAssetRepository) DeleteMediaAssetIfUnreferenced(id string) (bool, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false, nil
+	}
+	result := repo.db.Exec(`DELETE FROM assets
+		WHERE id = ?
+		  AND NOT EXISTS (SELECT 1 FROM generation_task_assets WHERE asset_id = ?)
+		  AND NOT EXISTS (SELECT 1 FROM generation_task_references WHERE asset_id = ?)
+		  AND NOT EXISTS (SELECT 1 FROM project_selected_assets WHERE asset_id = ?)
+		  AND NOT EXISTS (SELECT 1 FROM project_reference_assets WHERE asset_id = ?)`, id, id, id, id, id)
+	if result.Error != nil {
+		return false, fmt.Errorf("deleting unreferenced media asset: %w", result.Error)
+	}
+	return result.RowsAffected > 0, nil
+}
+
 // UpdateMediaAssetFilename updates the display filename and timestamp.
 func (repo *MediaAssetRepository) UpdateMediaAssetFilename(id string, filename string, updatedAt string) error {
 	err := repo.db.Model(&domain.AssetModel{}).

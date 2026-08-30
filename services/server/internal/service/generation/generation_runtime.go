@@ -57,6 +57,7 @@ type GenerationService struct {
 	generationRetryClaimedHook   func()
 	generationDeleteStartingHook func()
 	generationAssetsCachedHook   func(string)
+	generationSubmitFinishedHook func(string)
 }
 
 type generationTaskCancellation struct {
