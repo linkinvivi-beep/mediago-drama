@@ -48,7 +48,7 @@ type GenerationService struct {
 	generationRootCtx             context.Context
 	generationRootCancel          context.CancelFunc
 	generationCancelMu            sync.Mutex
-	generationCancels             map[string]*generationTaskCancellation
+	generationCancels             map[string]map[*generationTaskCancellation]struct{}
 }
 
 type generationTaskCancellation struct {
@@ -83,7 +83,7 @@ func NewGenerationService(settings *settings.Settings, generationTasks *Generati
 		stylePreviews:                 NewStylePreviewStore(configassets.StylePresets),
 		generationRootCtx:             rootCtx,
 		generationRootCancel:          rootCancel,
-		generationCancels:             map[string]*generationTaskCancellation{},
+		generationCancels:             map[string]map[*generationTaskCancellation]struct{}{},
 	}
 }
 
@@ -102,30 +102,44 @@ func (workflow *GenerationService) SetGenerationRuntimeContext(parent context.Co
 }
 
 func (workflow *GenerationService) launchSubmittedGeneration(task generationTaskRecord, provider coregeneration.Provider, request coregeneration.Request, action string, projectID string, conversationID string) {
-	ctx, done := workflow.generationTaskContext(task.ID)
+	ctx, _, done := workflow.generationTaskContext(task.ID, nil)
+	workflow.launchClaimedSubmittedGeneration(ctx, done, task, provider, request, action, projectID, conversationID)
+}
+
+func (workflow *GenerationService) launchClaimedSubmittedGeneration(ctx context.Context, done func(), task generationTaskRecord, provider coregeneration.Provider, request coregeneration.Request, action string, projectID string, conversationID string) {
 	go func() {
 		defer done()
 		workflow.completeSubmittedGeneration(ctx, task, provider, request, action, projectID, conversationID)
 	}()
 }
 
-func (workflow *GenerationService) generationTaskContext(taskID string) (context.Context, func()) {
+func (workflow *GenerationService) generationTaskContext(taskID string, caller context.Context) (context.Context, func(), func()) {
 	workflow.generationCancelMu.Lock()
 	parent := workflow.generationRootCtx
 	if parent == nil {
 		parent = context.Background()
 	}
 	ctx, cancel := context.WithCancel(parent)
-	entry := &generationTaskCancellation{cancel: cancel}
-	if previous := workflow.generationCancels[taskID]; previous != nil {
-		previous.cancel()
+	stopCaller := func() bool { return false }
+	if caller != nil {
+		stopCaller = context.AfterFunc(caller, cancel)
 	}
-	workflow.generationCancels[taskID] = entry
+	entry := &generationTaskCancellation{cancel: cancel}
+	entries := workflow.generationCancels[taskID]
+	if entries == nil {
+		entries = map[*generationTaskCancellation]struct{}{}
+		workflow.generationCancels[taskID] = entries
+	}
+	entries[entry] = struct{}{}
 	workflow.generationCancelMu.Unlock()
-	return ctx, func() {
+	detachCaller := func() { stopCaller() }
+	return ctx, detachCaller, func() {
+		stopCaller()
 		cancel()
 		workflow.generationCancelMu.Lock()
-		if workflow.generationCancels[taskID] == entry {
+		entries := workflow.generationCancels[taskID]
+		delete(entries, entry)
+		if len(entries) == 0 {
 			delete(workflow.generationCancels, taskID)
 		}
 		workflow.generationCancelMu.Unlock()
@@ -134,8 +148,8 @@ func (workflow *GenerationService) generationTaskContext(taskID string) (context
 
 func (workflow *GenerationService) cancelGenerationTask(taskID string) {
 	workflow.generationCancelMu.Lock()
-	entry := workflow.generationCancels[strings.TrimSpace(taskID)]
-	if entry != nil {
+	entries := workflow.generationCancels[strings.TrimSpace(taskID)]
+	for entry := range entries {
 		entry.cancel()
 	}
 	workflow.generationCancelMu.Unlock()

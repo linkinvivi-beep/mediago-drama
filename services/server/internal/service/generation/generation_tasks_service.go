@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	coregeneration "github.com/mediago-dev/mediago-drama/packages/core/pkg/generation"
 	"github.com/mediago-dev/mediago-drama/services/server/internal/domain"
 	"github.com/mediago-dev/mediago-drama/services/server/internal/platform/timestamp"
 	"github.com/mediago-dev/mediago-drama/services/server/internal/repository"
@@ -834,6 +835,38 @@ func (service *GenerationTaskService) UpsertWithoutCompletionListener(task Gener
 // not resurrected by a late write from the in-flight goroutine.
 func (service *GenerationTaskService) UpsertExisting(task GenerationTaskRecord) (bool, error) {
 	return service.upsertTask(task, true, true)
+}
+
+// ClaimFailedCodexRetry is an existing-row-only compare-and-swap claim. It
+// preserves non-Codex runtime fields and revisedPrompt while clearing stale
+// recovery identity before a new paid turn can launch.
+func (service *GenerationTaskService) ClaimFailedCodexRetry(id string, message string) (GenerationTaskRuntimeState, bool, error) {
+	if service.initErr != nil {
+		return GenerationTaskRuntimeState{}, false, service.initErr
+	}
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	model, err := service.repo.GetGenerationTask(id)
+	if repository.IsRecordNotFound(err) {
+		return GenerationTaskRuntimeState{}, false, nil
+	}
+	if err != nil {
+		return GenerationTaskRuntimeState{}, false, err
+	}
+	state := GenerationTaskRuntimeState{}
+	if err := decodeGenerationTaskRuntimeState(model.RuntimeStateJSON, &state); err != nil {
+		return GenerationTaskRuntimeState{}, false, err
+	}
+	state.CodexThreadID = ""
+	state.CodexTurnID = ""
+	state.CodexItemID = ""
+	state.SavedPath = ""
+	runtimeJSON, err := encodeGenerationTaskRuntimeState(state)
+	if err != nil {
+		return GenerationTaskRuntimeState{}, false, err
+	}
+	claimed, err := service.repo.ClaimFailedGenerationTask(id, coregeneration.RouteCodexImage, runtimeJSON, message, timestamp.NowRFC3339Nano())
+	return state, claimed, err
 }
 
 func (service *GenerationTaskService) upsertTask(task GenerationTaskRecord, requireExisting bool, notifyCompletion bool) (bool, error) {

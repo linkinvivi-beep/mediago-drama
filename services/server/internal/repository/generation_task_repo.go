@@ -741,6 +741,29 @@ func (repo *GenerationTaskRepository) RecordGenerationTaskError(
 	return nil
 }
 
+// ClaimFailedGenerationTask atomically transitions one existing failed row to
+// submitting while clearing provider recovery identity. Concurrent callers can
+// observe at most one successful claim.
+func (repo *GenerationTaskRepository) ClaimFailedGenerationTask(id string, routeID string, runtimeStateJSON string, message string, updatedAt string) (bool, error) {
+	result := repo.db.Model(&domain.GenerationTaskModel{}).
+		Where("id = ? AND route_id = ? AND status = ?", strings.TrimSpace(id), strings.TrimSpace(routeID), "failed").
+		Updates(map[string]any{
+			"status":             "submitting",
+			"message":            strings.TrimSpace(message),
+			"provider_task_id":   "",
+			"runtime_state_json": runtimeStateJSON,
+			"error":              "",
+			"error_code":         "",
+			"error_type":         "",
+			"retryable":          false,
+			"updated_at":         domain.TimeFromString(updatedAt),
+		})
+	if result.Error != nil {
+		return false, fmt.Errorf("claiming failed generation task: %w", result.Error)
+	}
+	return result.RowsAffected == 1, nil
+}
+
 // CreateGenerationTaskAttempt inserts a generation task attempt.
 func (repo *GenerationTaskRepository) CreateGenerationTaskAttempt(model domain.GenerationTaskAttemptModel) error {
 	model.Status = normalizeGenerationTaskStatus(model.Status)
