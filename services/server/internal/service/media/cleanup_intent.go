@@ -39,6 +39,31 @@ type managedCleanupFS struct {
 	unlinkat func(int, string, int) error
 }
 
+type openedCleanupFile struct {
+	rootFD    int
+	rootKind  string
+	relPath   string
+	tombstone string
+	rootDev   int64
+	rootIno   uint64
+	fileDev   int64
+	fileIno   uint64
+}
+
+type openedCleanupIntent struct {
+	cleanup *managedCleanupFS
+	files   []openedCleanupFile
+}
+
+func (opened *openedCleanupIntent) Close() {
+	for index := range opened.files {
+		if opened.files[index].rootFD >= 0 {
+			_ = unix.Close(opened.files[index].rootFD)
+			opened.files[index].rootFD = -1
+		}
+	}
+}
+
 type mediaCleanupWakeTimer interface {
 	Stop() bool
 }
@@ -193,30 +218,46 @@ func regularIdentityAt(rootFD int, relPath string) (int64, uint64, error) {
 	return int64(stat.Dev), uint64(stat.Ino), nil
 }
 
-func syncRegularAt(dirFD int, name string) error {
-	fd, err := unix.Openat(dirFD, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+func requireIdentityAt(rootFD int, relPath string, expectedDev int64, expectedIno uint64) error {
+	dev, ino, err := regularIdentityAt(rootFD, relPath)
 	if err != nil {
 		return err
 	}
-	defer unix.Close(fd)
-	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); err != nil {
-		return err
+	if dev != expectedDev || ino != expectedIno {
+		return errors.New("managed media file identity changed")
 	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
-		return errors.New("managed media entry is not a regular file")
-	}
-	return unix.Fsync(fd)
+	return nil
 }
 
-func (cleanup *managedCleanupFS) stage(rootFD int, relPath, tombstone string) error {
+func syncIdentityAt(rootFD int, relPath string, expectedDev int64, expectedIno uint64) error {
 	parentFD, base, err := openRelativeParent(rootFD, relPath)
 	if err != nil {
 		return err
 	}
 	defer unix.Close(parentFD)
-	sourceErr := syncRegularAt(parentFD, base)
-	tombstoneErr := requireRegularAt(cleanup.trashFD, tombstone)
+	fd, err := unix.Openat(parentFD, base, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(fd)
+	dev, ino, err := identityForFD(fd)
+	if err != nil {
+		return err
+	}
+	if dev != expectedDev || ino != expectedIno {
+		return errors.New("managed media file identity changed")
+	}
+	return unix.Fsync(fd)
+}
+
+func (cleanup *managedCleanupFS) stage(rootFD int, relPath, tombstone string, expectedDev int64, expectedIno uint64) error {
+	parentFD, base, err := openRelativeParent(rootFD, relPath)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(parentFD)
+	sourceErr := syncIdentityAt(parentFD, base, expectedDev, expectedIno)
+	tombstoneErr := requireIdentityAt(cleanup.trashFD, tombstone, expectedDev, expectedIno)
 	if sourceErr == nil && tombstoneErr == nil {
 		return errors.New("live and staged media files both exist")
 	}
@@ -224,7 +265,7 @@ func (cleanup *managedCleanupFS) stage(rootFD int, relPath, tombstone string) er
 		return nil
 	}
 	if errors.Is(sourceErr, unix.ENOENT) && errors.Is(tombstoneErr, unix.ENOENT) {
-		return nil
+		return unix.ENOENT
 	}
 	if sourceErr != nil {
 		return sourceErr
@@ -235,16 +276,19 @@ func (cleanup *managedCleanupFS) stage(rootFD int, relPath, tombstone string) er
 	if err := cleanup.renameat(parentFD, base, cleanup.trashFD, tombstone, unix.RENAME_EXCL); err != nil {
 		return err
 	}
+	if err := requireIdentityAt(cleanup.trashFD, tombstone, expectedDev, expectedIno); err != nil {
+		return err
+	}
 	return errors.Join(unix.Fsync(parentFD), unix.Fsync(cleanup.trashFD))
 }
 
-func (cleanup *managedCleanupFS) restore(rootFD int, relPath, tombstone string) error {
+func (cleanup *managedCleanupFS) restore(rootFD int, relPath, tombstone string, expectedDev int64, expectedIno uint64) error {
 	parentFD, base, err := openRelativeParent(rootFD, relPath)
 	if err != nil {
 		return err
 	}
 	defer unix.Close(parentFD)
-	if err := requireRegularAt(cleanup.trashFD, tombstone); errors.Is(err, unix.ENOENT) {
+	if err := requireIdentityAt(cleanup.trashFD, tombstone, expectedDev, expectedIno); errors.Is(err, unix.ENOENT) {
 		return nil
 	} else if err != nil {
 		return err
@@ -257,11 +301,14 @@ func (cleanup *managedCleanupFS) restore(rootFD int, relPath, tombstone string) 
 	if err := cleanup.renameat(cleanup.trashFD, tombstone, parentFD, base, unix.RENAME_EXCL); err != nil {
 		return err
 	}
+	if err := requireIdentityAt(parentFD, base, expectedDev, expectedIno); err != nil {
+		return err
+	}
 	return errors.Join(unix.Fsync(parentFD), unix.Fsync(cleanup.trashFD))
 }
 
-func (cleanup *managedCleanupFS) remove(tombstone string) error {
-	if err := requireRegularAt(cleanup.trashFD, tombstone); errors.Is(err, unix.ENOENT) {
+func (cleanup *managedCleanupFS) remove(tombstone string, expectedDev int64, expectedIno uint64) error {
+	if err := requireIdentityAt(cleanup.trashFD, tombstone, expectedDev, expectedIno); errors.Is(err, unix.ENOENT) {
 		return nil
 	} else if err != nil {
 		return err
@@ -282,7 +329,7 @@ func (store *MediaAssets) initializeMediaAssetCleanup() {
 		return time.AfterFunc(delay, fire)
 	}
 	store.openCleanupFS = func() (*managedCleanupFS, error) { return newManagedCleanupFS(store.dir) }
-	store.prepareCleanupIntent = store.repo.PrepareMediaAssetCleanupIntent
+	store.createCleanupCandidate = store.repo.CreateMediaAssetWithCleanupIntent
 	store.deleteCleanupAsset = func(id string) (bool, bool, error) {
 		return store.repo.DeleteMediaAssetForCleanup(id, store.cleanupNow())
 	}
@@ -410,32 +457,9 @@ func (store *MediaAssets) runMediaAssetCleanupPass(ctx context.Context, includeD
 	if err != nil {
 		return 0, err
 	}
-	pendingLimit := mediaAssetCleanupBatchSize - len(intents)
-	if pendingLimit < 0 {
-		pendingLimit = 0
-	}
-	pending, err := store.repo.ListMediaAssetsPendingCleanupWithoutIntent(pendingLimit)
-	if err != nil {
-		return 0, err
-	}
 	var batchErr error
 	processed := 0
 	started := time.Now()
-	for _, model := range pending {
-		if processed > 0 && time.Since(started) >= mediaAssetCleanupPassBudget {
-			return processed, batchErr
-		}
-		if err := ctx.Err(); err != nil {
-			return processed, errors.Join(batchErr, err)
-		}
-		if store.cleanupBeforeAttempt != nil {
-			store.cleanupBeforeAttempt(ctx, model.ID)
-		}
-		if err := store.prepareAndProcessCleanup(model); err != nil {
-			batchErr = errors.Join(batchErr, err)
-		}
-		processed++
-	}
 	for _, intent := range intents {
 		if processed > 0 && time.Since(started) >= mediaAssetCleanupPassBudget {
 			return processed, batchErr
@@ -452,29 +476,6 @@ func (store *MediaAssets) runMediaAssetCleanupPass(ctx context.Context, includeD
 		processed++
 	}
 	return processed, batchErr
-}
-
-func (store *MediaAssets) prepareAndProcessCleanup(model domain.AssetModel) error {
-	store.generationClaimMu.Lock()
-	defer store.generationClaimMu.Unlock()
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	if state := store.generationClaims[model.ID]; state.count > 0 {
-		return store.repo.CancelMediaAssetCleanup(model.ID)
-	}
-	intent, err := store.cleanupIntentForModel(model)
-	if err != nil {
-		return err
-	}
-	prepared, err := store.prepareCleanupIntent(intent)
-	if err != nil || !prepared {
-		return err
-	}
-	persisted, err := store.repo.GetMediaAssetCleanupIntent(intent.AssetID)
-	if err != nil {
-		return err
-	}
-	return store.processCleanupIntentLocked(persisted)
 }
 
 func (store *MediaAssets) processCleanupIntent(intent domain.MediaAssetCleanupIntentModel) error {
@@ -500,17 +501,22 @@ func (store *MediaAssets) processCleanupIntentLocked(intent domain.MediaAssetCle
 	if store.cleanupAfterOpen != nil {
 		store.cleanupAfterOpen()
 	}
-	if err := store.verifyCleanupIntentIdentity(cleanup, intent); err != nil {
+	opened, err := store.openCleanupIntent(cleanup, intent)
+	if err != nil {
+		return store.recordCleanupFailure(intent, err)
+	}
+	defer opened.Close()
+	if state := store.generationClaims[intent.AssetID]; state.count > 0 {
+		return store.deferCleanupIntent(intent)
+	}
+	if store.cleanupBeforeMutation != nil {
+		store.cleanupBeforeMutation()
+	}
+	if err := store.verifyOpenedCleanupIntent(opened, intent); err != nil {
 		return store.quarantineCleanupIntent(intent, err)
 	}
-	if state := store.generationClaims[intent.AssetID]; state.count > 0 {
-		if err := store.restoreCleanupIntentFiles(cleanup, intent); err != nil {
-			return store.recordCleanupFailure(intent, err)
-		}
-		return store.repo.CancelMediaAssetCleanup(intent.AssetID)
-	}
 	if intent.Stage == cleanupStagePlanned {
-		if err := store.stageCleanupIntentFiles(cleanup, intent); err != nil {
+		if err := store.stageCleanupIntentFiles(opened); err != nil {
 			return store.recordCleanupFailure(intent, err)
 		}
 		if err := store.repo.UpdateMediaAssetCleanupIntentStage(intent.AssetID, cleanupStageStaged, store.cleanupNow()); err != nil {
@@ -519,12 +525,18 @@ func (store *MediaAssets) processCleanupIntentLocked(intent domain.MediaAssetCle
 		intent.Stage = cleanupStageStaged
 	}
 	if intent.Stage == cleanupStageStaged {
+		if store.cleanupBeforeDelete != nil {
+			store.cleanupBeforeDelete()
+		}
+		if err := store.verifyOpenedCleanupIntent(opened, intent); err != nil {
+			return store.quarantineCleanupIntent(intent, err)
+		}
 		deleted, referenced, err := store.deleteCleanupAsset(intent.AssetID)
 		if err != nil {
 			return store.recordCleanupFailure(intent, err)
 		}
 		if referenced {
-			if err := store.restoreCleanupIntentFiles(cleanup, intent); err != nil {
+			if err := store.restoreCleanupIntentFiles(opened); err != nil {
 				return store.recordCleanupFailure(intent, err)
 			}
 			return store.repo.CancelMediaAssetCleanup(intent.AssetID)
@@ -535,7 +547,13 @@ func (store *MediaAssets) processCleanupIntentLocked(intent domain.MediaAssetCle
 		intent.Stage = cleanupStageDBDeleted
 	}
 	if intent.Stage == cleanupStageDBDeleted {
-		if err := store.removeCleanupIntentFiles(cleanup, intent); err != nil {
+		if store.cleanupBeforeRemove != nil {
+			store.cleanupBeforeRemove()
+		}
+		if err := store.verifyOpenedCleanupIntent(opened, intent); err != nil {
+			return store.quarantineCleanupIntent(intent, err)
+		}
+		if err := store.removeCleanupIntentFiles(opened); err != nil {
 			return store.recordCleanupFailure(intent, err)
 		}
 		if err := store.repo.CompleteMediaAssetCleanup(intent.AssetID); err != nil {
@@ -576,6 +594,9 @@ func (store *MediaAssets) recordCleanupFailure(intent domain.MediaAssetCleanupIn
 		return errors.Join(cause, errors.New("invalid media cleanup attempts"))
 	}
 	attempts := min(intent.Attempts+1, maxMediaAssetCleanupAttempts)
+	if attempts >= maxMediaAssetCleanupAttempts {
+		return errors.Join(cause, store.repo.QuarantineMediaAssetCleanupIntent(intent.AssetID, store.cleanupNow()))
+	}
 	shift := min(max(attempts-1, 0), 6)
 	delay := time.Second << uint(shift)
 	now := store.cleanupNow()
@@ -583,6 +604,11 @@ func (store *MediaAssets) recordCleanupFailure(intent domain.MediaAssetCleanupIn
 		return errors.Join(cause, err)
 	}
 	return cause
+}
+
+func (store *MediaAssets) deferCleanupIntent(intent domain.MediaAssetCleanupIntentModel) error {
+	now := store.cleanupNow()
+	return store.repo.DeferMediaAssetCleanupIntent(intent.AssetID, now.Add(time.Second), now)
 }
 
 func (store *MediaAssets) cleanupIntentForModel(model domain.AssetModel) (domain.MediaAssetCleanupIntentModel, error) {
@@ -741,6 +767,14 @@ func (store *MediaAssets) cleanupRootFD(cleanup *managedCleanupFS, kind, project
 	return openManagedRoot(rootPath)
 }
 
+func (store *MediaAssets) cleanupCurrentRootFD(kind, projectID string) (int, error) {
+	rootPath, err := store.cleanupRootPath(kind, projectID)
+	if err != nil {
+		return -1, err
+	}
+	return openManagedRoot(rootPath)
+}
+
 func (store *MediaAssets) populateCleanupIntentIdentity(cleanup *managedCleanupFS, intent *domain.MediaAssetCleanupIntentModel) error {
 	trashDev, trashIno, err := identityForFD(cleanup.trashFD)
 	if err != nil {
@@ -776,11 +810,12 @@ func (store *MediaAssets) populateCleanupIntentIdentity(cleanup *managedCleanupF
 	return nil
 }
 
-func (store *MediaAssets) verifyCleanupIntentIdentity(cleanup *managedCleanupFS, intent domain.MediaAssetCleanupIntentModel) error {
+func (store *MediaAssets) openCleanupIntent(cleanup *managedCleanupFS, intent domain.MediaAssetCleanupIntentModel) (*openedCleanupIntent, error) {
 	trashDev, trashIno, err := identityForFD(cleanup.trashFD)
 	if err != nil || trashDev != intent.TrashDev || trashIno != intent.TrashIno {
-		return errors.New("media cleanup trash identity changed")
+		return nil, errors.New("media cleanup trash identity changed")
 	}
+	opened := &openedCleanupIntent{cleanup: cleanup}
 	for _, file := range []struct {
 		root, rel, tombstone string
 		rootDev              int64
@@ -796,61 +831,88 @@ func (store *MediaAssets) verifyCleanupIntentIdentity(cleanup *managedCleanupFS,
 		}
 		rootFD, openErr := store.cleanupRootFD(cleanup, file.root, intent.ProjectID)
 		if openErr != nil {
-			return openErr
+			opened.Close()
+			return nil, openErr
 		}
 		rootDev, rootIno, statErr := identityForFD(rootFD)
 		if statErr != nil || rootDev != file.rootDev || rootIno != file.rootIno {
 			_ = unix.Close(rootFD)
+			opened.Close()
+			return nil, errors.New("media cleanup root identity changed")
+		}
+		opened.files = append(opened.files, openedCleanupFile{
+			rootFD: rootFD, rootKind: file.root, relPath: filepath.FromSlash(file.rel), tombstone: file.tombstone,
+			rootDev: file.rootDev, rootIno: file.rootIno, fileDev: file.fileDev, fileIno: file.fileIno,
+		})
+	}
+	if err := store.verifyOpenedCleanupIntent(opened, intent); err != nil {
+		opened.Close()
+		return nil, err
+	}
+	return opened, nil
+}
+
+func (store *MediaAssets) verifyOpenedCleanupIntent(opened *openedCleanupIntent, intent domain.MediaAssetCleanupIntentModel) error {
+	trashDev, trashIno, err := identityForFD(opened.cleanup.trashFD)
+	if err != nil || trashDev != intent.TrashDev || trashIno != intent.TrashIno {
+		return errors.New("media cleanup trash identity changed")
+	}
+	for _, file := range opened.files {
+		rootDev, rootIno, err := identityForFD(file.rootFD)
+		if err != nil || rootDev != file.rootDev || rootIno != file.rootIno {
 			return errors.New("media cleanup root identity changed")
 		}
-		dev, ino, sourceErr := regularIdentityAt(rootFD, filepath.FromSlash(file.rel))
-		_ = unix.Close(rootFD)
-		if sourceErr != nil {
-			dev, ino, sourceErr = regularIdentityAt(cleanup.trashFD, file.tombstone)
-		}
-		if sourceErr != nil || dev != file.fileDev || ino != file.fileIno {
-			return errors.New("media cleanup file identity changed")
-		}
-	}
-	return nil
-}
-
-func (store *MediaAssets) withCleanupFiles(cleanup *managedCleanupFS, intent domain.MediaAssetCleanupIntentModel, operation func(int, string, string) error) error {
-	files := []struct{ root, rel, tombstone string }{
-		{intent.FileRoot, intent.FileRelPath, intent.FileTombstone},
-		{intent.PosterRoot, intent.PosterRelPath, intent.PosterTombstone},
-	}
-	for _, file := range files {
-		if file.rel == "" {
-			continue
-		}
-		rootFD, err := store.cleanupRootFD(cleanup, file.root, intent.ProjectID)
+		currentRootFD, err := store.cleanupCurrentRootFD(file.rootKind, intent.ProjectID)
 		if err != nil {
 			return err
 		}
-		err = operation(rootFD, filepath.FromSlash(file.rel), file.tombstone)
-		_ = unix.Close(rootFD)
-		if err != nil {
-			return err
+		currentDev, currentIno, currentErr := identityForFD(currentRootFD)
+		_ = unix.Close(currentRootFD)
+		if currentErr != nil || currentDev != file.rootDev || currentIno != file.rootIno {
+			return errors.New("media cleanup root identity changed")
 		}
-	}
-	return nil
-}
-
-func (store *MediaAssets) stageCleanupIntentFiles(cleanup *managedCleanupFS, intent domain.MediaAssetCleanupIntentModel) error {
-	return store.withCleanupFiles(cleanup, intent, cleanup.stage)
-}
-
-func (store *MediaAssets) restoreCleanupIntentFiles(cleanup *managedCleanupFS, intent domain.MediaAssetCleanupIntentModel) error {
-	return store.withCleanupFiles(cleanup, intent, cleanup.restore)
-}
-
-func (store *MediaAssets) removeCleanupIntentFiles(cleanup *managedCleanupFS, intent domain.MediaAssetCleanupIntentModel) error {
-	for _, tombstone := range []string{intent.FileTombstone, intent.PosterTombstone} {
-		if tombstone != "" {
-			if err := cleanup.remove(tombstone); err != nil {
-				return err
+		sourceErr := requireIdentityAt(file.rootFD, file.relPath, file.fileDev, file.fileIno)
+		tombErr := requireIdentityAt(opened.cleanup.trashFD, file.tombstone, file.fileDev, file.fileIno)
+		switch intent.Stage {
+		case cleanupStagePlanned:
+			if sourceErr != nil && tombErr != nil {
+				return errors.New("media cleanup file identity changed")
 			}
+		case cleanupStageStaged:
+			if tombErr != nil {
+				return errors.New("staged media cleanup file identity changed")
+			}
+		case cleanupStageDBDeleted:
+			if tombErr != nil && !(errors.Is(sourceErr, unix.ENOENT) && errors.Is(tombErr, unix.ENOENT)) {
+				return errors.New("deleted media cleanup file identity changed")
+			}
+		}
+	}
+	return nil
+}
+
+func (store *MediaAssets) stageCleanupIntentFiles(opened *openedCleanupIntent) error {
+	for _, file := range opened.files {
+		if err := opened.cleanup.stage(file.rootFD, file.relPath, file.tombstone, file.fileDev, file.fileIno); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (store *MediaAssets) restoreCleanupIntentFiles(opened *openedCleanupIntent) error {
+	for _, file := range opened.files {
+		if err := opened.cleanup.restore(file.rootFD, file.relPath, file.tombstone, file.fileDev, file.fileIno); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (store *MediaAssets) removeCleanupIntentFiles(opened *openedCleanupIntent) error {
+	for _, file := range opened.files {
+		if err := opened.cleanup.remove(file.tombstone, file.fileDev, file.fileIno); err != nil {
+			return err
 		}
 	}
 	return nil

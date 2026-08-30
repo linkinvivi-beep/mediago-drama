@@ -61,7 +61,11 @@ type MediaAssets struct {
 	cleanupScheduleWake      func(time.Duration, func()) mediaCleanupWakeTimer
 	openCleanupFS            func() (*managedCleanupFS, error)
 	cleanupAfterOpen         func()
-	prepareCleanupIntent     func(domain.MediaAssetCleanupIntentModel) (bool, error)
+	cleanupBeforeMutation    func()
+	cleanupBeforeDelete      func()
+	cleanupBeforeRemove      func()
+	generationClaimAfterSave func(MediaAsset)
+	createCleanupCandidate   func(domain.AssetModel, domain.MediaAssetCleanupIntentModel) error
 	deleteCleanupAsset       func(string) (bool, bool, error)
 	cleanupBeforeAttempt     func(context.Context, string)
 	cleanupNow               func() time.Time
@@ -453,7 +457,7 @@ func (store *MediaAssets) SaveBase64WithOptionsTracked(kind string, mimeType str
 // in-process claim that the generation task writer must commit or compensate.
 func (store *MediaAssets) SaveBase64WithOptionsClaimed(kind string, mimeType string, value string, sourceURL string, options MediaAssetSaveOptions) (MediaAsset, MediaAssetClaim, error) {
 	return store.claimSavedGenerationAsset(func() (MediaAsset, bool, error) {
-		return store.saveBase64WithOptionsTracked(kind, mimeType, value, sourceURL, options)
+		return store.saveBase64WithOptionsTrackedMode(kind, mimeType, value, sourceURL, options, true)
 	})
 }
 
@@ -488,6 +492,10 @@ func (store *MediaAssets) saveBase64WithOptions(kind string, mimeType string, va
 }
 
 func (store *MediaAssets) saveBase64WithOptionsTracked(kind string, mimeType string, value string, sourceURL string, options MediaAssetSaveOptions) (MediaAsset, bool, error) {
+	return store.saveBase64WithOptionsTrackedMode(kind, mimeType, value, sourceURL, options, false)
+}
+
+func (store *MediaAssets) saveBase64WithOptionsTrackedMode(kind string, mimeType string, value string, sourceURL string, options MediaAssetSaveOptions, cleanupCandidate bool) (MediaAsset, bool, error) {
 	if store.initErr != nil {
 		return MediaAsset{}, false, store.initErr
 	}
@@ -515,7 +523,7 @@ func (store *MediaAssets) saveBase64WithOptionsTracked(kind string, mimeType str
 		filename = defaultAssetFilename(kind, mimeType)
 	}
 
-	return store.saveBytesWithKindTracked(data, kind, filename, mimeType, sourceURL, options)
+	return store.saveBytesWithKindTrackedMode(data, kind, filename, mimeType, sourceURL, options, cleanupCandidate)
 }
 
 func (store *MediaAssets) SaveRemoteAsset(ctx context.Context, kind string, remoteURL string, projectID string) (MediaAsset, error) {
@@ -540,24 +548,31 @@ func (store *MediaAssets) SaveRemoteAssetWithOptionsTracked(ctx context.Context,
 // temporary claim that the generation task writer must commit or compensate.
 func (store *MediaAssets) SaveRemoteAssetWithOptionsClaimed(ctx context.Context, kind string, remoteURL string, options MediaAssetSaveOptions) (MediaAsset, MediaAssetClaim, error) {
 	return store.claimSavedGenerationAsset(func() (MediaAsset, bool, error) {
-		return store.saveRemoteAssetWithOptionsTracked(ctx, kind, remoteURL, options)
+		return store.saveRemoteAssetWithOptionsTrackedMode(ctx, kind, remoteURL, options, true)
 	})
 }
 
 func (store *MediaAssets) claimSavedGenerationAsset(save func() (MediaAsset, bool, error)) (MediaAsset, MediaAssetClaim, error) {
 	for attempt := 0; attempt < 2; attempt++ {
+		store.generationClaimMu.Lock()
 		asset, created, err := save()
 		if err != nil || asset.ID == "" {
+			store.generationClaimMu.Unlock()
 			return asset, MediaAssetClaim{}, err
 		}
-		store.generationClaimMu.Lock()
+		if store.generationClaimAfterSave != nil {
+			store.generationClaimAfterSave(asset)
+		}
 		store.mu.RLock()
 		model, existsErr := store.repo.GetMediaAsset(asset.ID)
 		store.mu.RUnlock()
 		if existsErr == nil {
-			if model.CleanupPending {
+			if model.CleanupPending != created {
 				store.generationClaimMu.Unlock()
-				return MediaAsset{}, MediaAssetClaim{}, ErrMediaAssetCleanupPending
+				if model.CleanupPending {
+					return MediaAsset{}, MediaAssetClaim{}, ErrMediaAssetCleanupPending
+				}
+				return MediaAsset{}, MediaAssetClaim{}, errors.New("new generation asset is missing cleanup ownership")
 			}
 			if store.generationClaims == nil {
 				store.generationClaims = map[string]mediaAssetClaimState{}
@@ -604,7 +619,7 @@ func (store *MediaAssets) finishGenerationAssetClaims(claims []MediaAssetClaim, 
 		if committed {
 			store.mu.Lock()
 			model, err := store.repo.GetMediaAsset(assetID)
-			if err == nil && model.CleanupPending {
+			if err == nil && model.CleanupPending && !state.staged {
 				errorsFound = append(errorsFound, ErrMediaAssetCleanupPending)
 				wakeCleanup = true
 			} else if err != nil && !repository.IsRecordNotFound(err) {
@@ -627,31 +642,11 @@ func (store *MediaAssets) finishGenerationAssetClaims(claims []MediaAssetClaim, 
 		if !committed && state.staged {
 			store.generationClaims[assetID] = state
 			store.mu.Lock()
-			model, err := store.repo.GetMediaAsset(assetID)
+			intent, err := store.repo.GetMediaAssetCleanupIntent(assetID)
 			if err == nil {
-				intent, intentErr := store.cleanupIntentForModel(model)
-				if intentErr == nil {
-					prepared, prepareErr := store.prepareCleanupIntent(intent)
-					if prepareErr == nil && prepared {
-						persisted, getErr := store.repo.GetMediaAssetCleanupIntent(assetID)
-						if getErr != nil {
-							prepareErr = getErr
-						} else {
-							prepareErr = store.processCleanupIntentLocked(persisted)
-						}
-					} else if prepareErr == nil {
-						prepareErr = store.repo.CancelMediaAssetCleanup(assetID)
-						if prepareErr == nil {
-							delete(store.generationClaims, assetID)
-						}
-					}
-					intentErr = prepareErr
-				}
-				if intentErr != nil {
-					errorsFound = append(errorsFound, intentErr)
-					wakeCleanup = true
-				}
-			} else if !repository.IsRecordNotFound(err) {
+				err = store.processCleanupIntentLocked(intent)
+			}
+			if err != nil {
 				errorsFound = append(errorsFound, err)
 				wakeCleanup = true
 			}
@@ -691,6 +686,10 @@ func (store *MediaAssets) saveRemoteAssetWithOptions(ctx context.Context, kind s
 }
 
 func (store *MediaAssets) saveRemoteAssetWithOptionsTracked(ctx context.Context, kind string, remoteURL string, options MediaAssetSaveOptions) (MediaAsset, bool, error) {
+	return store.saveRemoteAssetWithOptionsTrackedMode(ctx, kind, remoteURL, options, false)
+}
+
+func (store *MediaAssets) saveRemoteAssetWithOptionsTrackedMode(ctx context.Context, kind string, remoteURL string, options MediaAssetSaveOptions, cleanupCandidate bool) (MediaAsset, bool, error) {
 	if store.initErr != nil {
 		return MediaAsset{}, false, store.initErr
 	}
@@ -743,7 +742,7 @@ func (store *MediaAssets) saveRemoteAssetWithOptionsTracked(ctx context.Context,
 		filename = defaultAssetFilename(kind, mimeType)
 	}
 
-	return store.saveBytesWithKindTracked(data, kind, filename, mimeType, remoteURL, options)
+	return store.saveBytesWithKindTrackedMode(data, kind, filename, mimeType, remoteURL, options, cleanupCandidate)
 }
 
 // SaveLinkedAssetWithOptions stores metadata for an already-served asset URL.
@@ -883,6 +882,10 @@ func (store *MediaAssets) saveBytesWithKind(data []byte, kind string, filename s
 }
 
 func (store *MediaAssets) saveBytesWithKindTracked(data []byte, kind string, filename string, mimeType string, sourceURL string, options MediaAssetSaveOptions) (MediaAsset, bool, error) {
+	return store.saveBytesWithKindTrackedMode(data, kind, filename, mimeType, sourceURL, options, false)
+}
+
+func (store *MediaAssets) saveBytesWithKindTrackedMode(data []byte, kind string, filename string, mimeType string, sourceURL string, options MediaAssetSaveOptions, cleanupCandidate bool) (MediaAsset, bool, error) {
 	if store.initErr != nil {
 		return MediaAsset{}, false, store.initErr
 	}
@@ -969,9 +972,7 @@ func (store *MediaAssets) saveBytesWithKindTracked(data []byte, kind string, fil
 		asset = store.enrichVideoMetadata(asset, now)
 	}
 
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	if err := store.repo.CreateMediaAsset(mediaAssetModel{
+	model := mediaAssetModel{
 		ID:              asset.ID,
 		Kind:            asset.Kind,
 		Filename:        asset.Filename,
@@ -992,7 +993,27 @@ func (store *MediaAssets) saveBytesWithKindTracked(data []byte, kind string, fil
 		StorageStatus:   asset.StorageStatus,
 		CreatedAt:       domain.TimeFromString(asset.CreatedAt),
 		UpdatedAt:       domain.TimeFromString(asset.UpdatedAt),
-	}); err != nil {
+	}
+	var intent domain.MediaAssetCleanupIntentModel
+	if cleanupCandidate {
+		intent, err = store.cleanupIntentForModel(model)
+		if err != nil {
+			_ = os.Remove(filePath)
+			if asset.PosterPath != "" {
+				_ = os.Remove(asset.PosterPath)
+			}
+			return MediaAsset{}, false, err
+		}
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if cleanupCandidate {
+		err = store.createCleanupCandidate(model, intent)
+	} else {
+		err = store.repo.CreateMediaAsset(model)
+	}
+	if err != nil {
 		_ = os.Remove(filePath)
 		if asset.PosterPath != "" {
 			_ = os.Remove(asset.PosterPath)

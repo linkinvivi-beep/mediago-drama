@@ -33,6 +33,7 @@ type Request struct {
 	VersionID         string
 	Provider          string
 	InstanceProfileID string
+	WorkflowProfileID string
 	ProjectID         string
 	ProjectName       string
 	ModelID           string

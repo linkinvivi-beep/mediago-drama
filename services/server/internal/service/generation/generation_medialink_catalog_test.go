@@ -125,7 +125,7 @@ func assertMediaLinkCatalogShape(t *testing.T, catalog GenerationModelsResponse)
 	t.Helper()
 	if got, want := mediaLinkRouteIDs(catalog.Routes), []string{
 		coregeneration.RouteCodexImage,
-		coregeneration.RouteAutoDLZImage,
+		coregeneration.RouteAutoDLImage,
 		coregeneration.RouteAutoDLH3,
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("route IDs = %v, want %v", got, want)
@@ -228,9 +228,9 @@ func TestMediaLinkRouteProviders(t *testing.T) {
 	zImageProvider := &mediaLinkTestProvider{name: "autodl-zimage-test"}
 	h3Provider := &mediaLinkTestProvider{name: "autodl-h3-test"}
 	providers := mediaLinkRouteProviders{
-		codexImage:   codexProvider,
-		autodlZImage: zImageProvider,
-		autodlH3:     h3Provider,
+		codexImage:  codexProvider,
+		autodlImage: zImageProvider,
+		autodlH3:    h3Provider,
 	}
 
 	t.Run("selects the provider for each MediaLink route", func(t *testing.T) {
@@ -239,7 +239,7 @@ func TestMediaLinkRouteProviders(t *testing.T) {
 			want    coregeneration.Provider
 		}{
 			{routeID: coregeneration.RouteCodexImage, want: codexProvider},
-			{routeID: coregeneration.RouteAutoDLZImage, want: zImageProvider},
+			{routeID: coregeneration.RouteAutoDLImage, want: zImageProvider},
 			{routeID: coregeneration.RouteAutoDLH3, want: h3Provider},
 		} {
 			route, ok := coregeneration.FindRoute(test.routeID)
@@ -259,7 +259,7 @@ func TestMediaLinkRouteProviders(t *testing.T) {
 	t.Run("rejects known MediaLink routes whose provider is not injected", func(t *testing.T) {
 		for _, routeID := range []string{
 			coregeneration.RouteCodexImage,
-			coregeneration.RouteAutoDLZImage,
+			coregeneration.RouteAutoDLImage,
 			coregeneration.RouteAutoDLH3,
 		} {
 			route, ok := coregeneration.FindRoute(routeID)
@@ -276,8 +276,8 @@ func TestMediaLinkRouteProviders(t *testing.T) {
 
 	t.Run("rejects a typed nil provider", func(t *testing.T) {
 		var typedNil *mediaLinkTestProvider
-		route, _ := coregeneration.FindRoute(coregeneration.RouteAutoDLZImage)
-		_, err := (mediaLinkRouteProviders{autodlZImage: typedNil}).providerForRoute(route)
+		route, _ := coregeneration.FindRoute(coregeneration.RouteAutoDLImage)
+		_, err := (mediaLinkRouteProviders{autodlImage: typedNil}).providerForRoute(route)
 		want := fmt.Sprintf("MediaLink route %q provider is not configured", route.ID)
 		if err == nil || err.Error() != want {
 			t.Fatalf("providerForRoute() typed nil error = %v, want %q", err, want)
@@ -289,7 +289,7 @@ func TestMediaLinkRouteProviders(t *testing.T) {
 		workflow.SetMediaLinkProviders(codexProvider, h3Provider, func(context.Context, string) (bool, string) {
 			return true, ""
 		})
-		route, _ := coregeneration.FindRoute(coregeneration.RouteAutoDLZImage)
+		route, _ := coregeneration.FindRoute(coregeneration.RouteAutoDLImage)
 		if workflow.generationRouteConfigured(route) {
 			t.Fatal("Z-Image route configured = true with nil provider")
 		}

@@ -175,10 +175,10 @@ func TestGenerationRequestFromMessageSelectsMediagoHappyHorseModelFromReferences
 	}
 }
 
-func TestGenerationRequestFromMessageCopiesAutoDLInstanceProfile(t *testing.T) {
-	route, ok := coregeneration.FindRoute(coregeneration.RouteAutoDLZImage)
+func TestGenerationRequestFromMessageCopiesAutoDLProfileSelection(t *testing.T) {
+	route, ok := coregeneration.FindRoute(coregeneration.RouteAutoDLImage)
 	if !ok {
-		t.Fatalf("missing route %q", coregeneration.RouteAutoDLZImage)
+		t.Fatalf("missing route %q", coregeneration.RouteAutoDLImage)
 	}
 	payload := GenerationMessageRequest{
 		Kind:              string(route.Kind),
@@ -186,11 +186,15 @@ func TestGenerationRequestFromMessageCopiesAutoDLInstanceProfile(t *testing.T) {
 		Model:             route.Model,
 		Prompt:            "portrait",
 		InstanceProfileID: " instance-a ",
+		WorkflowProfileID: " zimage-i2i ",
 	}
 
 	request := GenerationRequestFromMessage(payload, route, nil)
 	if request.InstanceProfileID != "instance-a" {
 		t.Fatalf("InstanceProfileID = %q, want instance-a", request.InstanceProfileID)
+	}
+	if request.WorkflowProfileID != "zimage-i2i" {
+		t.Fatalf("WorkflowProfileID = %q, want zimage-i2i", request.WorkflowProfileID)
 	}
 }
 
@@ -206,17 +210,21 @@ func TestGenerationRequestFromMessageDoesNotCopyInstanceProfileOutsideAutoDL(t *
 			Model:             route.Model,
 			Prompt:            "portrait",
 			InstanceProfileID: "instance-must-not-leak",
+			WorkflowProfileID: "workflow-must-not-leak",
 		}, route, nil)
 		if request.InstanceProfileID != "" {
 			t.Fatalf("route %q InstanceProfileID = %q, want empty", routeID, request.InstanceProfileID)
 		}
+		if request.WorkflowProfileID != "" {
+			t.Fatalf("route %q WorkflowProfileID = %q, want empty", routeID, request.WorkflowProfileID)
+		}
 	}
 }
 
-func TestGenerationTaskFromMessageSnapshotsManualAutoDLInstance(t *testing.T) {
-	route, ok := coregeneration.FindRoute(coregeneration.RouteAutoDLZImage)
+func TestGenerationTaskFromMessageSnapshotsManualAutoDLProfiles(t *testing.T) {
+	route, ok := coregeneration.FindRoute(coregeneration.RouteAutoDLImage)
 	if !ok {
-		t.Fatalf("missing route %q", coregeneration.RouteAutoDLZImage)
+		t.Fatalf("missing route %q", coregeneration.RouteAutoDLImage)
 	}
 	task := GenerationTaskFromMessage(GenerationMessageRequest{
 		Kind:              string(route.Kind),
@@ -224,10 +232,14 @@ func TestGenerationTaskFromMessageSnapshotsManualAutoDLInstance(t *testing.T) {
 		Model:             route.Model,
 		Prompt:            "portrait",
 		InstanceProfileID: " instance-a ",
+		WorkflowProfileID: " zimage-i2i ",
 	}, route, GenerationMessageResponse{ID: "task-zimage", Status: "waiting_for_instance"})
 
 	if task.RuntimeState.InstanceProfileID != "instance-a" {
 		t.Fatalf("RuntimeState.InstanceProfileID = %q, want instance-a", task.RuntimeState.InstanceProfileID)
+	}
+	if task.RuntimeState.WorkflowProfileID != "zimage-i2i" {
+		t.Fatalf("RuntimeState.WorkflowProfileID = %q, want zimage-i2i", task.RuntimeState.WorkflowProfileID)
 	}
 }
 
@@ -242,16 +254,20 @@ func TestGenerationTaskFromMessageDoesNotSnapshotManualInstanceOutsideAutoDL(t *
 		Model:             route.Model,
 		Prompt:            "portrait",
 		InstanceProfileID: "instance-must-not-leak",
+		WorkflowProfileID: "workflow-must-not-leak",
 	}, route, GenerationMessageResponse{ID: "task-codex", Status: "submitted"})
 	if task.RuntimeState.InstanceProfileID != "" {
 		t.Fatalf("RuntimeState.InstanceProfileID = %q, want empty", task.RuntimeState.InstanceProfileID)
 	}
+	if task.RuntimeState.WorkflowProfileID != "" {
+		t.Fatalf("RuntimeState.WorkflowProfileID = %q, want empty", task.RuntimeState.WorkflowProfileID)
+	}
 }
 
 func TestGenerationTaskFromMessageRejectsProviderIdentityThatConflictsWithManualInstance(t *testing.T) {
-	route, ok := coregeneration.FindRoute(coregeneration.RouteAutoDLZImage)
+	route, ok := coregeneration.FindRoute(coregeneration.RouteAutoDLImage)
 	if !ok {
-		t.Fatalf("missing route %q", coregeneration.RouteAutoDLZImage)
+		t.Fatalf("missing route %q", coregeneration.RouteAutoDLImage)
 	}
 	task := GenerationTaskFromMessage(GenerationMessageRequest{
 		Kind:              string(route.Kind),
@@ -304,7 +320,7 @@ func TestGenerationTaskWithMessageRejectsConflictingAutoDLAttemptIdentity(t *tes
 		ComfyPromptID:          "prompt-1",
 		SubmittedAt:            "2026-08-30T12:00:00Z",
 	}
-	task := GenerationTaskRecord{ID: "task-conflict", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage, RuntimeState: current}
+	task := GenerationTaskRecord{ID: "task-conflict", Kind: "image", RouteID: coregeneration.RouteAutoDLImage, RuntimeState: current}
 	update := current
 	update.WorkflowDigest = "sha256:two"
 
@@ -319,7 +335,7 @@ func TestGenerationTaskWithMessageRejectsConflictingAutoDLAttemptIdentity(t *tes
 
 func TestGenerationTaskWithMessageRejectsUnanchoredPartialAutoDLAttemptUpdate(t *testing.T) {
 	current := GenerationTaskRuntimeState{InstanceProfileID: "instance-a", WorkflowProfileID: "zimage-t2i"}
-	task := GenerationTaskRecord{ID: "task-partial", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage, RuntimeState: current}
+	task := GenerationTaskRecord{ID: "task-partial", Kind: "image", RouteID: coregeneration.RouteAutoDLImage, RuntimeState: current}
 
 	got := GenerationTaskWithMessage(task, GenerationMessageResponse{
 		Status:       "running",
@@ -343,7 +359,7 @@ func TestGenerationTaskWithMessageAcceptsAnchoredLateAutoDLAttemptUpdate(t *test
 	update := current
 	update.ComfyPromptID = "prompt-1"
 	update.SubmittedAt = "2026-08-30T12:00:00Z"
-	task := GenerationTaskRecord{ID: "task-late", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage, RuntimeState: current}
+	task := GenerationTaskRecord{ID: "task-late", Kind: "image", RouteID: coregeneration.RouteAutoDLImage, RuntimeState: current}
 
 	got := GenerationTaskWithMessage(task, GenerationMessageResponse{Status: "running", RuntimeState: update})
 	if got.Status != "running" || got.RuntimeState != update {
@@ -360,7 +376,7 @@ func TestGenerationTaskWithMessageAcceptsFirstCompleteAutoDLAttemptIdentity(t *t
 		ComfyPromptID:          "prompt-1",
 		SubmittedAt:            "2026-08-30T12:00:00Z",
 	}
-	task := GenerationTaskRecord{ID: "task-first-checkpoint", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage}
+	task := GenerationTaskRecord{ID: "task-first-checkpoint", Kind: "image", RouteID: coregeneration.RouteAutoDLImage}
 	got := GenerationTaskWithMessage(task, GenerationMessageResponse{Status: "running", RuntimeState: want})
 	if got.Status != "running" || got.RuntimeState != want {
 		t.Fatalf("task = status %q state %+v, want first complete identity %+v", got.Status, got.RuntimeState, want)
@@ -368,7 +384,7 @@ func TestGenerationTaskWithMessageAcceptsFirstCompleteAutoDLAttemptIdentity(t *t
 }
 
 func TestGenerationTaskWithMessageRejectsPromptIDWithoutSubmissionTime(t *testing.T) {
-	task := GenerationTaskRecord{ID: "task-incomplete-prompt", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage}
+	task := GenerationTaskRecord{ID: "task-incomplete-prompt", Kind: "image", RouteID: coregeneration.RouteAutoDLImage}
 	got := GenerationTaskWithMessage(task, GenerationMessageResponse{
 		Status:       "running",
 		RuntimeState: GenerationTaskRuntimeState{ComfyPromptID: "prompt-1"},
@@ -382,7 +398,7 @@ func TestGenerationTaskWithMessageRejectsPromptIDWithoutSubmissionTime(t *testin
 }
 
 func TestGenerationTaskWithMessageRejectsPromptPairWithoutAutoDLAnchors(t *testing.T) {
-	task := GenerationTaskRecord{ID: "task-unanchored-prompt", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage}
+	task := GenerationTaskRecord{ID: "task-unanchored-prompt", Kind: "image", RouteID: coregeneration.RouteAutoDLImage}
 	got := GenerationTaskWithMessage(task, GenerationMessageResponse{
 		Status: "running",
 		RuntimeState: GenerationTaskRuntimeState{
@@ -401,7 +417,7 @@ func TestGenerationTaskWithMessageEmptyUpdateDetectsMalformedStoredAutoDLIdentit
 		SubmittedAt:   "2026-08-30T12:00:00Z",
 	}
 	task := GenerationTaskRecord{
-		ID: "task-malformed-current", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage,
+		ID: "task-malformed-current", Kind: "image", RouteID: coregeneration.RouteAutoDLImage,
 		Status: "running", RuntimeState: malformed,
 	}
 	got := GenerationTaskWithMessage(task, GenerationMessageResponse{Status: "running"})

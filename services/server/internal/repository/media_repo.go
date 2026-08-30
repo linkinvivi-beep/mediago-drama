@@ -135,6 +135,35 @@ func (repo *MediaAssetRepository) CreateMediaAsset(model domain.AssetModel) erro
 	return nil
 }
 
+// CreateMediaAssetWithCleanupIntent makes a task-owned asset and its cleanup
+// responsibility visible in one transaction.
+func (repo *MediaAssetRepository) CreateMediaAssetWithCleanupIntent(model domain.AssetModel, intent domain.MediaAssetCleanupIntentModel) error {
+	model.ID = strings.TrimSpace(model.ID)
+	intent.AssetID = strings.TrimSpace(intent.AssetID)
+	if model.ID == "" || intent.AssetID != model.ID {
+		return errors.New("media asset cleanup intent has invalid asset identity")
+	}
+	if domain.CleanProjectID(domain.StringValue(model.ProjectID)) != domain.CleanProjectID(intent.ProjectID) ||
+		model.RelPath != intent.AssetRelPath || model.PosterRelPath != intent.AssetPosterPath {
+		return errors.New("media asset cleanup intent does not match canonical asset storage")
+	}
+	model.CleanupPending = true
+	if err := repo.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&model).Error; err != nil {
+			return err
+		}
+		if repo.cleanupIntentInsertHook != nil {
+			if err := repo.cleanupIntentInsertHook(tx); err != nil {
+				return err
+			}
+		}
+		return tx.Create(&intent).Error
+	}); err != nil {
+		return fmt.Errorf("creating media asset cleanup candidate: %w", err)
+	}
+	return nil
+}
+
 // DeleteMediaAsset deletes a media asset by ID.
 func (repo *MediaAssetRepository) DeleteMediaAsset(id string) (bool, error) {
 	result := repo.db.Delete(&domain.AssetModel{}, "id = ?", strings.TrimSpace(id))
@@ -163,78 +192,6 @@ func (repo *MediaAssetRepository) DeleteMediaAssetIfUnreferenced(id string) (boo
 	return result.RowsAffected > 0, nil
 }
 
-// MarkMediaAssetCleanupPending makes a failed task-owned asset discoverable by
-// the cleanup recovery scan even when intent creation is temporarily blocked.
-func (repo *MediaAssetRepository) MarkMediaAssetCleanupPending(id string, pending bool) error {
-	result := repo.db.Model(&domain.AssetModel{}).
-		Where("id = ?", strings.TrimSpace(id)).
-		Update("cleanup_pending", pending)
-	if result.Error != nil {
-		return fmt.Errorf("marking media asset cleanup pending: %w", result.Error)
-	}
-	return nil
-}
-
-// PrepareMediaAssetCleanupIntent atomically confirms that a cleanup-pending
-// asset is unreferenced and persists its managed relative file identities.
-func (repo *MediaAssetRepository) PrepareMediaAssetCleanupIntent(intent domain.MediaAssetCleanupIntentModel) (bool, error) {
-	intent.AssetID = strings.TrimSpace(intent.AssetID)
-	if intent.AssetID == "" {
-		return false, nil
-	}
-	prepared := false
-	err := repo.db.Transaction(func(tx *gorm.DB) error {
-		var asset domain.AssetModel
-		if err := tx.First(&asset, "id = ?", intent.AssetID).Error; err != nil {
-			return err
-		}
-		if domain.CleanProjectID(domain.StringValue(asset.ProjectID)) != domain.CleanProjectID(intent.ProjectID) ||
-			asset.RelPath != intent.AssetRelPath || asset.PosterRelPath != intent.AssetPosterPath {
-			return errors.New("media asset cleanup intent does not match canonical asset storage")
-		}
-		var references int64
-		if err := tx.Model(&domain.AssetModel{}).
-			Where(`id = ?
-				AND NOT EXISTS (SELECT 1 FROM generation_task_assets WHERE asset_id = ?)
-				AND NOT EXISTS (SELECT 1 FROM generation_task_references WHERE asset_id = ?)
-				AND NOT EXISTS (SELECT 1 FROM project_selected_assets WHERE asset_id = ?)
-				AND NOT EXISTS (SELECT 1 FROM project_reference_assets WHERE asset_id = ?)`,
-				intent.AssetID, intent.AssetID, intent.AssetID, intent.AssetID, intent.AssetID).
-			Count(&references).Error; err != nil {
-			return err
-		}
-		if references == 0 {
-			return nil
-		}
-		var existing int64
-		if err := tx.Model(&domain.MediaAssetCleanupIntentModel{}).
-			Where("asset_id = ?", intent.AssetID).Count(&existing).Error; err != nil {
-			return err
-		}
-		if existing == 0 {
-			if err := tx.Model(&domain.AssetModel{}).Where("id = ?", intent.AssetID).Update("cleanup_pending", true).Error; err != nil {
-				return err
-			}
-			if repo.cleanupIntentInsertHook != nil {
-				if err := repo.cleanupIntentInsertHook(tx); err != nil {
-					return err
-				}
-			}
-			if err := tx.Create(&intent).Error; err != nil {
-				return err
-			}
-		} else if !asset.CleanupPending {
-			return errors.New("media asset cleanup intent exists without pending ownership")
-		}
-		prepared = true
-		return nil
-	})
-	if err != nil {
-		return false, fmt.Errorf("preparing media asset cleanup intent: %w", err)
-	}
-	return prepared, nil
-}
-
 // GetMediaAssetCleanupIntent returns one persisted cleanup intent.
 func (repo *MediaAssetRepository) GetMediaAssetCleanupIntent(assetID string) (domain.MediaAssetCleanupIntentModel, error) {
 	var intent domain.MediaAssetCleanupIntentModel
@@ -256,27 +213,6 @@ func (repo *MediaAssetRepository) DeleteMediaAssetCleanupIntent(assetID string) 
 	return nil
 }
 
-// ListMediaAssetsPendingCleanupWithoutIntent returns bounded unreferenced
-// generated assets whose atomic intent transaction did not complete.
-func (repo *MediaAssetRepository) ListMediaAssetsPendingCleanupWithoutIntent(limit int) ([]domain.AssetModel, error) {
-	if limit <= 0 {
-		return nil, nil
-	}
-	assets := []domain.AssetModel{}
-	err := repo.db.Model(&domain.AssetModel{}).
-		Where(`source = ?
-			AND NOT EXISTS (SELECT 1 FROM media_asset_cleanup_intents WHERE asset_id = assets.id)
-			AND NOT EXISTS (SELECT 1 FROM generation_task_assets WHERE asset_id = assets.id)
-			AND NOT EXISTS (SELECT 1 FROM generation_task_references WHERE asset_id = assets.id)
-			AND NOT EXISTS (SELECT 1 FROM project_selected_assets WHERE asset_id = assets.id)
-			AND NOT EXISTS (SELECT 1 FROM project_reference_assets WHERE asset_id = assets.id)`, "generation").
-		Order("created_at ASC, id ASC").Limit(limit).Find(&assets).Error
-	if err != nil {
-		return nil, fmt.Errorf("listing media assets pending cleanup: %w", err)
-	}
-	return assets, nil
-}
-
 // ListMediaAssetCleanupIntents returns a bounded retry batch.
 func (repo *MediaAssetRepository) ListMediaAssetCleanupIntents(limit int, now time.Time, includeDeferred bool) ([]domain.MediaAssetCleanupIntentModel, error) {
 	if limit <= 0 {
@@ -293,17 +229,8 @@ func (repo *MediaAssetRepository) ListMediaAssetCleanupIntents(limit int, now ti
 	return intents, nil
 }
 
-// NextMediaAssetCleanupAttempt returns the earliest persisted retry deadline,
-// or now when an unreferenced generated asset still needs an intent.
+// NextMediaAssetCleanupAttempt returns the earliest persisted retry deadline.
 func (repo *MediaAssetRepository) NextMediaAssetCleanupAttempt(now time.Time) (*time.Time, error) {
-	candidates, err := repo.ListMediaAssetsPendingCleanupWithoutIntent(1)
-	if err != nil {
-		return nil, err
-	}
-	if len(candidates) > 0 {
-		value := now
-		return &value, nil
-	}
 	var immediate int64
 	if err := repo.db.Model(&domain.MediaAssetCleanupIntentModel{}).Where("stage <> ? AND next_attempt_at IS NULL", "quarantined").Count(&immediate).Error; err != nil {
 		return nil, fmt.Errorf("checking immediate media cleanup intents: %w", err)
@@ -313,7 +240,7 @@ func (repo *MediaAssetRepository) NextMediaAssetCleanupAttempt(now time.Time) (*
 		return &value, nil
 	}
 	var intent domain.MediaAssetCleanupIntentModel
-	err = repo.db.Where("stage <> ? AND next_attempt_at IS NOT NULL", "quarantined").Order("next_attempt_at ASC").First(&intent).Error
+	err := repo.db.Where("stage <> ? AND next_attempt_at IS NOT NULL", "quarantined").Order("next_attempt_at ASC").First(&intent).Error
 	if IsRecordNotFound(err) {
 		return nil, nil
 	}
@@ -355,6 +282,17 @@ func (repo *MediaAssetRepository) RecordMediaAssetCleanupFailure(assetID string,
 			"updated_at":      updatedAt,
 		}).Error; err != nil {
 		return fmt.Errorf("recording media asset cleanup failure: %w", err)
+	}
+	return nil
+}
+
+// DeferMediaAssetCleanupIntent keeps a task-owned candidate pending while an
+// in-process generation claim still owns it, without consuming a retry.
+func (repo *MediaAssetRepository) DeferMediaAssetCleanupIntent(assetID string, nextAttemptAt time.Time, updatedAt time.Time) error {
+	if err := repo.db.Model(&domain.MediaAssetCleanupIntentModel{}).
+		Where("asset_id = ?", strings.TrimSpace(assetID)).
+		Updates(map[string]any{"next_attempt_at": nextAttemptAt, "updated_at": updatedAt}).Error; err != nil {
+		return fmt.Errorf("deferring media asset cleanup intent: %w", err)
 	}
 	return nil
 }

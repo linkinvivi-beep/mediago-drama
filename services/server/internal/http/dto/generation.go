@@ -58,6 +58,7 @@ type GenerationMessageRequest struct {
 	VersionID          string                               `json:"versionId,omitempty"`
 	Provider           string                               `json:"provider,omitempty"`
 	InstanceProfileID  string                               `json:"instanceProfileId,omitempty"`
+	WorkflowProfileID  string                               `json:"workflowProfileId,omitempty"`
 	TextExecutor       string                               `json:"textExecutor,omitempty"`
 	ModelID            string                               `json:"modelId"`
 	Model              string                               `json:"model"`

@@ -1,10 +1,10 @@
-# MediaLink AutoDL Z-Image and Instance Pool Implementation Plan
+# MediaLink AutoDL Cloud Image and Instance Pool Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add `AutoDL · Z-Image` to every existing MediaLink image-generation entry and run Z-Image or MiniMax H3 jobs through a shared, secure, multi-instance AutoDL pool with automatic scheduling and optional manual instance selection.
+**Goal:** Add `AutoDL · 云端生图` to every existing MediaLink image-generation entry and run nine validated Z-Image/FLUX workflow profiles or MiniMax H3 jobs through a shared, secure, multi-instance AutoDL pool with automatic scheduling and optional manual instance selection.
 
-**Architecture:** Keep the existing generation request, task, asset-import, document-link, and history flows authoritative. Add a settings-owned AutoDL instance/profile registry, one tunnel and one execution slot per instance, a loopback-only ComfyUI client, a manifest-driven workflow instantiator, and a Z-Image provider that checkpoints `instanceProfileId + prompt_id` before polling. The future H3 provider consumes the same pool and scheduler rather than introducing a second connection stack.
+**Architecture:** Keep the existing generation request, task, asset-import, document-link, and history flows authoritative. Add a settings-owned AutoDL instance/profile registry, one tunnel and one execution slot per instance, a loopback-only ComfyUI client, a manifest-driven workflow instantiator, and one AutoDL image provider that checkpoints `instanceProfileId + workflowProfileId + prompt_id` before polling. The H3 provider consumes the same pool and scheduler rather than introducing a second connection stack.
 
 **Tech Stack:** Go 1.25, GORM/SQLite app settings, macOS Keychain through `/usr/bin/security`, `golang.org/x/crypto/ssh`, ComfyUI HTTP API, React 19, TypeScript, SWR, Go `testing`, Vitest.
 
@@ -12,24 +12,36 @@
 
 - Target only macOS Apple Silicon (`darwin/arm64`); do not add Windows, Intel Mac, or Linux packaging.
 - Preserve the original MediaGo Drama character, scene, prop, storyboard, asset, task-history, preview, Skills, and prompt-template workflows.
-- Expose exactly three visual routes: `Codex 生图`, `AutoDL · Z-Image`, and `AutoDL · MiniMax H3`; do not delete legacy provider source modules.
+- Expose exactly three visual routes: `Codex 生图`, `AutoDL · 云端生图`, and `AutoDL · MiniMax H3`; do not delete legacy provider source modules.
 - Never call OpenAI Images API or add an OpenAI API-key field.
 - Accept a standard OpenSSH login command plus a separate password; store the password only in macOS Keychain and never in SQLite, JSON responses, process arguments, runtime state, or logs.
 - Support multiple dynamic AutoDL instances and configurable remote ComfyUI ports; use one execution slot per instance and allow different instances to run concurrently.
 - Default to automatic compatible-instance selection; allow advanced manual selection and never silently override a manual selection.
-- Accept ComfyUI API-format workflows only; node IDs live in profile manifests, not business code.
-- Z-Image uses the text-to-image workflow with zero references and the image-to-image workflow with exactly one reference; reject more than one reference in the first release.
+- Import ComfyUI UI-format workflows, validate their `nodes`/`links`, compile them to an API prompt template, and keep node IDs in profile manifests rather than provider business code.
+- Support the nine live-inspected profile kinds listed below. Each declares exactly zero or one reference; reject more than one reference in the first release.
 - Never resubmit when `/prompt` acceptance is unknown or when a persisted `prompt_id` exists.
-- Run fake/no-consumption tests only. Real SSH inspection is read-only; real `/prompt` submission requires a separate explicit user approval.
+- Run fake/no-consumption tests by default. The user explicitly authorized live testing on 2026-08-30; Z-Image T2I and I2I smoke tests completed successfully. No further real `/prompt` is implied by that completed authorization.
 - Avoid unrelated refactors and broad renames.
 
 **Plan relationship:** Execute this plan's shared AutoDL Tasks 2-8 before resuming `2026-08-30-medialink-autodl-h3-video.md`. They supersede that older plan's single-instance Keychain, tunnel, ComfyUI client, settings, API, and connection-UI work. After the pool exists, retain only H3-specific workflow, provider, recovery, prompt, and UI tasks and adapt them to `AutoDLInstanceScheduler`; do not build a second H3-only connection stack.
+
+## 2026-08-30 live scope amendment
+
+This amendment supersedes later text that says “Z-Image only” without requiring a second provider stack.
+
+- Public route/adapter: `RouteAutoDLImage = "autodl.image"`, `AdapterAutoDLComfyImage = "autodl.comfyui.image"`.
+- Request adds `WorkflowProfileID`; empty chooses `zimage-t2i` for zero references and `zimage-i2i` for one reference. All non-empty profiles are explicit and persisted with the attempt.
+- Profile kinds: `zimage-t2i`, `zimage-i2i`, `flux-fp8-t2i`, `flux-fp8-i2i`, `flux-lustly-adult-t2i`, `flux-lustly-adult-i2i`, `flux-lustly-adult-portrait`, `flux-lustly-adult-fullbody`, and `zimage-flux-refine`.
+- Adult profiles are never auto-selected and require explicit selection; prompt optimization preserves an explicit 21+ adult boundary.
+- `zimage-flux-refine` returns two assets with semantic output roles: draft/secondary and final/primary.
+- Live workflow SHA256 values and node baselines are authoritative in `docs/superpowers/specs/2026-08-30-medialink-autodl-zimage-design.md`.
+- Live Z-Image smoke evidence: T2I prompt `8c0cf941-81ad-413e-9bb1-3c0f936e0e07`; I2I prompt `46576aef-b55a-465d-a404-fa58de5856ec`; both completed with empty node errors and valid 1024×1024 PNG outputs.
 
 ---
 
 ## File Map
 
-- `packages/core/pkg/generation/catalog_*` owns the public Z-Image route contract.
+- `packages/core/pkg/generation/catalog_*` owns the public AutoDL cloud-image route contract.
 - `services/server/internal/service/settings/autodl_instances.go` owns non-secret instance/profile settings and response redaction.
 - `services/server/internal/platform/keychain/generic_password.go` owns Keychain password storage.
 - `services/server/internal/platform/autodl/ssh_command.go` parses the restricted login command.
@@ -37,13 +49,13 @@
 - `services/server/internal/platform/comfyui/` owns typed HTTP transport only.
 - `services/server/internal/service/generation/comfy_workflow_profile.go` validates and instantiates semantic workflow profiles.
 - `services/server/internal/service/generation/autodl_instance_scheduler.go` owns reservations and per-instance serialization.
-- `services/server/internal/service/generation/autodl_zimage_provider.go` owns Z-Image upload, submit, poll, download, and recovery.
+- `services/server/internal/service/generation/autodl_image_provider.go` owns profile selection, upload, submit, poll, multi-output download, and recovery.
 - Existing generation runtime files persist provider checkpoints and import validated assets.
 - Settings React components manage instances and workflows; the existing generation form adds only the advanced instance selector.
 
 ---
 
-### Task 1: Add the Z-Image route and durable request identity
+### Task 1: Add the AutoDL cloud-image route and durable request identity
 
 **Files:**
 - Modify: `packages/core/pkg/generation/catalog_adapters.go`
@@ -59,8 +71,8 @@
 - Modify: `apps/workspace/src/api/types/generation.ts`
 
 **Interfaces:**
-- Produces: `RouteAutoDLZImage = "autodl.zimage"`, `AdapterAutoDLComfyZImage = "autodl.comfyui.z-image"`.
-- Produces: `coregeneration.Request.InstanceProfileID string` and `GenerationMessageRequest.InstanceProfileID string` where empty means automatic scheduling; `GenerationRequestFromMessage` copies it to the provider request.
+- Produces: `RouteAutoDLImage = "autodl.image"`, `AdapterAutoDLComfyImage = "autodl.comfyui.image"`.
+- Produces: `coregeneration.Request.InstanceProfileID string`, `coregeneration.Request.WorkflowProfileID string`, and matching `GenerationMessageRequest` fields. Empty instance means automatic scheduling; empty workflow means the default Z-Image 0/1-reference profile. `GenerationRequestFromMessage` copies both to the provider request.
 - Produces: new runtime fields `InstanceProfileID`, `WorkflowProfileID`, `WorkflowProfileVersion`, and `WorkflowDigest`; preserves the existing `ComfyPromptID` and `SubmittedAt` fields.
 - Produces: `GenerationTaskFromMessage` snapshots a non-empty manually selected instance into initial runtime state so a background task remains visibly pinned while waiting.
 
@@ -421,17 +433,17 @@ git commit -m "feat(comfyui): add bounded loopback client"
 
 ---
 
-### Task 6: Validate and instantiate Z-Image workflow profiles
+### Task 6: Validate and instantiate all cloud-image workflow profiles
 
 **Files:**
 - Create: `services/server/internal/service/generation/comfy_workflow_profile.go`
 - Create: `services/server/internal/service/generation/comfy_workflow_profile_test.go`
-- Create: `services/server/internal/service/generation/testdata/zimage_t2i_api.json`
-- Create: `services/server/internal/service/generation/testdata/zimage_i2i_api.json`
+- Create: minimal synthetic UI-format fixtures for the nine profile shapes; do not commit user-specific default prompts.
 
 **Interfaces:**
 - Produces: `ValidateWorkflowProfile`, `ValidateWorkflowOnInstance`, and `InstantiateWorkflow`.
-- Produces kinds `zimage-t2i`, `zimage-i2i`, `h3-ref2va`, and `h3-fl2va`; this task fully implements the two Z-Image rules and reserves the H3 kind names for its existing plan.
+- Produces all nine image kinds from the live scope amendment plus reserved `h3-ref2va` and `h3-fl2va` kinds.
+- Produces semantic bindings for prompt(s), seed, dimensions, reference image, denoise, LoRA strength, output prefix, and one-or-more output roles.
 
 - [ ] **Step 1: Write profile validation tests**
 
@@ -446,7 +458,7 @@ type WorkflowBindings struct {
 }
 ```
 
-Test valid T2I and I2I fixtures, UI-format JSON rejection, missing node/input, T2I incorrectly requiring a reference, I2I missing a reference binding, workflow immutability after instantiation, digest stability, and `/object_info` missing-node/model failures.
+Test all nine UI-format profile shapes, compile-to-API correctness, missing node/link/input, 0/1-reference rules, adult explicit-selection gate, hybrid two-output roles, workflow immutability, digest stability, and `/object_info` missing-node/model failures.
 
 - [ ] **Step 2: Run tests and verify RED**
 
@@ -471,7 +483,7 @@ type WorkflowInputValues struct {
 }
 ```
 
-Reject top-level `nodes`/`links`, require an API map shaped as node ID to `{class_type, inputs}`, calculate SHA-256 over canonical stored workflow bytes, deep copy before mutation, and set only declared bindings. Enforce exactly zero references for T2I and one for I2I.
+Require and validate top-level UI `nodes`/`links`, compile enabled nodes to an API map shaped as node ID to `{class_type, inputs}`, calculate SHA-256 over the exact stored UI bytes and compiled API template, deep copy before mutation, and set only declared bindings. Enforce each profile's exact 0/1-reference and output-role contract.
 
 - [ ] **Step 4: Run focused and full generation tests**
 
@@ -488,7 +500,7 @@ Expected: PASS.
 
 ```bash
 git add services/server/internal/service/generation/comfy_workflow_profile.go services/server/internal/service/generation/comfy_workflow_profile_test.go services/server/internal/service/generation/testdata
-git commit -m "feat(comfyui): validate Z-Image workflows"
+git commit -m "feat(comfyui): validate cloud image workflows"
 ```
 
 ---
@@ -622,24 +634,24 @@ git commit -m "feat(api): manage AutoDL instance pool"
 
 ---
 
-### Task 9: Implement the Z-Image provider and provider wiring
+### Task 9: Implement the AutoDL cloud-image provider and provider wiring
 
 **Files:**
-- Create: `services/server/internal/service/generation/autodl_zimage_provider.go`
-- Create: `services/server/internal/service/generation/autodl_zimage_provider_test.go`
+- Create: `services/server/internal/service/generation/autodl_image_provider.go`
+- Create: `services/server/internal/service/generation/autodl_image_provider_test.go`
 - Modify: `services/server/internal/service/generation/generation_medialink_catalog.go`
 - Modify: `services/server/internal/service/generation/generation_runtime_provider.go`
 - Modify: `services/server/internal/app/wire.go`
 
 **Interfaces:**
 - Consumes: scheduler, profile instantiator, ComfyUI client, asset limits, and progress callback.
-- Produces: `AutoDLZImageProvider` implementing `coregeneration.Provider`.
-- Provider task IDs use `autodl.zimage:<base64url(instanceProfileId)>:<base64url(promptId)>` and are parsed only by one tested helper.
+- Produces: `AutoDLImageProvider` implementing `coregeneration.Provider` for all nine profiles.
+- Provider task IDs use `autodl.image:<base64url(instanceProfileId)>:<base64url(promptId)>` and are parsed only by one tested helper.
 - Test helpers in `autodl_zimage_provider_test.go`: `newZImageProviderHarness(t) (*AutoDLZImageProvider, *[]string)` and `validT2IRequest() coregeneration.Request` construct deterministic fakes used by the call-order test.
 
 - [ ] **Step 1: Write provider tests with fake dependencies**
 
-Cover T2I success, I2I upload success, more than one reference rejection before lease acquisition, automatic and manual selection, checkpoint ordering, reconnect `Get`, unknown submission outcome, missing history, exact queue cancellation, invalid output, oversized output, and no asset URL leakage.
+Cover default Z T2I, Z I2I upload, FLUX T2I/I2I, explicit adult profiles, hybrid two-output role ordering, more than one reference rejection before lease acquisition, automatic/manual selection, checkpoint ordering, reconnect `Get`, unknown submission outcome, missing history, exact queue cancellation, invalid/oversized output, and no asset URL leakage.
 
 ```go
 func TestAutoDLZImageCheckpointsBeforePolling(t *testing.T) {
@@ -670,13 +682,13 @@ Before `/prompt`, emit waiting/preparing progress without a prompt ID. Immediate
 ```go
 func (workflow *GenerationService) SetMediaLinkProviders(
 	codexImage coregeneration.Provider,
-	autodlZImage coregeneration.Provider,
+	autodlImage coregeneration.Provider,
 	autodlH3 coregeneration.Provider,
 	readiness func(context.Context, string) (bool, string),
 )
 ```
 
-Readiness for `autodl.zimage` is true only when at least one enabled instance has the required profile validated. Preserve the two-second caller-aware readiness bound.
+Readiness for `autodl.image` is true only when at least one enabled instance has the selected/default profile validated. Preserve the two-second caller-aware readiness bound.
 
 - [ ] **Step 5: Run focused, full, and race tests**
 
@@ -694,7 +706,7 @@ Expected: PASS without a real SSH or `/prompt` call.
 
 ```bash
 git add services/server/internal/service/generation services/server/internal/app/wire.go
-git commit -m "feat(generation): run Z-Image on AutoDL"
+git commit -m "feat(generation): run cloud image workflows on AutoDL"
 ```
 
 ---

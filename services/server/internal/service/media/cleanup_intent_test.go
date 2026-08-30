@@ -16,36 +16,243 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func TestCleanupIntentInsertFailureRollsBackPendingAndUnreferencedScanRecovers(t *testing.T) {
+func TestOrdinaryGenerationSaveIsNeverCleanupCandidateAcrossRestart(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "workspace.db")
+	mediaDir := filepath.Join(root, "media")
+	store := newCleanupTestStore(t, dbPath, mediaDir)
+	asset, err := store.SaveBase64(
+		MediaKindImage,
+		"image/png",
+		base64.StdEncoding.EncodeToString([]byte("ordinary-generation-library-asset")),
+		"",
+		"",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := NewMediaAssets(dbPath, mediaDir)
+	defer restarted.Close()
+	waitForCleanupWorker(t, restarted)
+	if _, err := restarted.repo.GetMediaAsset(asset.ID); err != nil {
+		t.Fatalf("ordinary generation asset was selected for cleanup: %v", err)
+	}
+	if _, err := os.Stat(asset.FilePath); err != nil {
+		t.Fatalf("ordinary generation file was removed: %v", err)
+	}
+	if _, err := restarted.repo.GetMediaAssetCleanupIntent(asset.ID); !errors.Is(err, repository.ErrRecordNotFound) {
+		t.Fatalf("ordinary generation asset has cleanup intent: %v", err)
+	}
+}
+
+func TestClaimedGenerationAssetIsCreatedWithPersistentCleanupIntent(t *testing.T) {
+	root := t.TempDir()
+	store := newCleanupTestStore(t, filepath.Join(root, "workspace.db"), filepath.Join(root, "media"))
+	defer store.Close()
+	asset, claim, err := store.SaveBase64WithOptionsClaimed(
+		MediaKindImage,
+		"image/png",
+		base64.StdEncoding.EncodeToString([]byte("claimed-persistent-candidate")),
+		"",
+		MediaAssetSaveOptions{Source: MediaSourceGeneration},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !claim.Created {
+		t.Fatal("claim.Created = false")
+	}
+	model, err := store.repo.GetMediaAsset(asset.ID)
+	if err != nil || !model.CleanupPending {
+		t.Fatalf("claimed asset pending = %v err %v", model.CleanupPending, err)
+	}
+	if _, err := store.repo.GetMediaAssetCleanupIntent(asset.ID); err != nil {
+		t.Fatalf("claimed asset cleanup intent missing: %v", err)
+	}
+	if errorsFound := store.CommitGenerationAssetClaims([]MediaAssetClaim{claim}); len(errorsFound) != 0 {
+		t.Fatalf("commit errors = %v", errorsFound)
+	}
+}
+
+func TestTaskCleanupCandidateSurvivesCrashBeforeClaimAndCleansOnRestart(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "workspace.db")
+	mediaDir := filepath.Join(root, "media")
+	store := newCleanupTestStore(t, dbPath, mediaDir)
+	asset, created, err := store.saveBase64WithOptionsTrackedMode(MediaKindImage, "image/png", base64.StdEncoding.EncodeToString([]byte("crash-before-claim")), "", MediaAssetSaveOptions{Source: MediaSourceGeneration}, true)
+	if err != nil || !created {
+		t.Fatalf("candidate = created %v err %v", created, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewMediaAssets(dbPath, mediaDir)
+	defer restarted.Close()
+	waitForCleanupWorker(t, restarted)
+	if _, err := restarted.repo.GetMediaAsset(asset.ID); !errors.Is(err, repository.ErrRecordNotFound) {
+		t.Fatalf("crashed task candidate DB row remains: %v", err)
+	}
+	if _, err := os.Stat(asset.FilePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("crashed task candidate file remains: %v", err)
+	}
+}
+
+func TestOrdinaryGenerationAssetsAreNeverInferredAsCleanupCandidates(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "workspace.db")
+	mediaDir := filepath.Join(root, "media")
+	store := newCleanupTestStore(t, dbPath, mediaDir)
+	assets := make([]MediaAsset, 0, 12)
+	for index := 0; index < 12; index++ {
+		asset, err := store.SaveBase64WithOptions(MediaKindImage, "image/png", base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("ordinary-%d", index))), "", MediaAssetSaveOptions{Source: MediaSourceGeneration})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assets = append(assets, asset)
+	}
+	store.triggerMediaAssetCleanupMode(true)
+	waitForCleanupWorker(t, store)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewMediaAssets(dbPath, mediaDir)
+	defer restarted.Close()
+	waitForCleanupWorker(t, restarted)
+	for _, asset := range assets {
+		if _, err := restarted.repo.GetMediaAsset(asset.ID); err != nil {
+			t.Fatalf("ordinary asset %s was removed: %v", asset.ID, err)
+		}
+	}
+}
+
+func TestCleanupRejectsFileReplacementBetweenValidationAndStage(t *testing.T) {
+	root := t.TempDir()
+	store := newCleanupTestStore(t, filepath.Join(root, "workspace.db"), filepath.Join(root, "media"))
+	defer store.Close()
+	asset, claim := saveClaimedCleanupTestAsset(t, store, "original-identity")
+	store.cleanupBeforeMutation = func() {
+		store.cleanupBeforeMutation = nil
+		replacement := filepath.Join(root, "replacement.png")
+		if err := os.WriteFile(replacement, []byte("replacement-identity"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(replacement, asset.FilePath); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if errorsFound := store.CompensateGenerationAssetClaims([]MediaAssetClaim{claim}); len(errorsFound) == 0 {
+		t.Fatal("file identity swap was accepted")
+	}
+	data, err := os.ReadFile(asset.FilePath)
+	if err != nil || string(data) != "replacement-identity" {
+		t.Fatalf("replacement file changed: %q err %v", data, err)
+	}
+}
+
+func TestCleanupRejectsGlobalRootReplacementAfterOpeningFixedFD(t *testing.T) {
+	root := t.TempDir()
+	mediaDir := filepath.Join(root, "media")
+	store := newCleanupTestStore(t, filepath.Join(root, "workspace.db"), mediaDir)
+	defer store.Close()
+	asset, claim := saveClaimedCleanupTestAsset(t, store, "old-root-file")
+	oldRoot := mediaDir + "-owned"
+	relativeFile, err := filepath.Rel(mediaDir, asset.FilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newFile := filepath.Join(mediaDir, relativeFile)
+	store.cleanupAfterOpen = func() {
+		store.cleanupAfterOpen = nil
+		if err := os.Rename(mediaDir, oldRoot); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(newFile), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(newFile, []byte("new-root-file"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if errorsFound := store.CompensateGenerationAssetClaims([]MediaAssetClaim{claim}); len(errorsFound) == 0 {
+		t.Fatal("global root replacement was accepted")
+	}
+	if data, err := os.ReadFile(newFile); err != nil || string(data) != "new-root-file" {
+		t.Fatalf("new root file changed: %q err %v", data, err)
+	}
+	oldFile := filepath.Join(oldRoot, relativeFile)
+	if data, err := os.ReadFile(oldFile); err != nil || string(data) != "old-root-file" {
+		t.Fatalf("old root file changed: %q err %v", data, err)
+	}
+}
+
+func TestCleanupRejectsTombstoneReplacementBeforeDelete(t *testing.T) {
+	root := t.TempDir()
+	mediaDir := filepath.Join(root, "media")
+	store := newCleanupTestStore(t, filepath.Join(root, "workspace.db"), mediaDir)
+	defer store.Close()
+	asset, claim := saveClaimedCleanupTestAsset(t, store, "original-tombstone")
+	store.cleanupBeforeDelete = func() {
+		store.cleanupBeforeDelete = nil
+		tombstone := filepath.Join(mediaDir, ".trash", cleanupTombstoneName(asset.ID, "file", asset.FilePath))
+		replacement := filepath.Join(root, "replacement-tombstone")
+		if err := os.WriteFile(replacement, []byte("do-not-delete"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(replacement, tombstone); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if errorsFound := store.CompensateGenerationAssetClaims([]MediaAssetClaim{claim}); len(errorsFound) == 0 {
+		t.Fatal("tombstone identity swap was accepted")
+	}
+	if _, err := store.repo.GetMediaAsset(asset.ID); err != nil {
+		t.Fatalf("asset row deleted after tombstone swap: %v", err)
+	}
+}
+
+func TestCleanupIntentInsertFailureLeavesNoAssetOrFile(t *testing.T) {
 	root := t.TempDir()
 	store := newCleanupTestStore(t, filepath.Join(root, "workspace.db"), filepath.Join(root, "media"))
 	t.Cleanup(func() { _ = store.Close() })
-	asset, claim := saveClaimedCleanupTestAsset(t, store, "intent-insert-failure")
-	realPrepare := store.repo.PrepareMediaAssetCleanupIntent
-	store.prepareCleanupIntent = func(domain.MediaAssetCleanupIntentModel) (bool, error) {
-		return false, errors.New("forced intent insert failure")
+	store.createCleanupCandidate = func(domain.AssetModel, domain.MediaAssetCleanupIntentModel) error {
+		return errors.New("forced intent insert failure")
 	}
-	errorsFound := store.CompensateGenerationAssetClaims([]MediaAssetClaim{claim})
-	if len(errorsFound) == 0 {
-		t.Fatal("CompensateGenerationAssetClaims() error count = 0")
+	_, _, err := store.SaveBase64WithOptionsClaimed(MediaKindImage, "image/png", base64.StdEncoding.EncodeToString([]byte("intent-insert-failure")), "", MediaAssetSaveOptions{Source: MediaSourceGeneration})
+	if err == nil {
+		t.Fatal("SaveBase64WithOptionsClaimed() error = nil")
 	}
-	waitForCleanupWorker(t, store)
-	if _, err := os.Stat(asset.FilePath); err != nil {
-		t.Fatalf("asset moved after intent insert failure: %v", err)
+	assets, listErr := store.repo.ListAllMediaAssets()
+	if listErr != nil || len(assets) != 0 {
+		t.Fatalf("assets = %#v err %v", assets, listErr)
 	}
-	model, err := store.repo.GetMediaAsset(asset.ID)
-	if err != nil || model.CleanupPending {
-		t.Fatalf("cleanup candidate = pending %v err %v", model.CleanupPending, err)
-	}
+}
 
-	store.prepareCleanupIntent = realPrepare
-	store.triggerMediaAssetCleanupMode(true)
-	waitForCleanupWorker(t, store)
-	if _, err := os.Stat(asset.FilePath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("recovered cleanup file remains: %v", err)
+func TestTaskCleanupCanonicalizationFailsBeforeAssetTransaction(t *testing.T) {
+	root := t.TempDir()
+	store := newCleanupTestStore(t, filepath.Join(root, "workspace.db"), filepath.Join(root, "media"))
+	defer store.Close()
+	store.openCleanupFS = func() (*managedCleanupFS, error) {
+		return nil, errors.New("forced canonicalization failure")
 	}
-	if _, err := store.repo.GetMediaAsset(asset.ID); !errors.Is(err, repository.ErrRecordNotFound) {
-		t.Fatalf("recovered cleanup DB row remains: %v", err)
+	transactionCalled := false
+	store.createCleanupCandidate = func(domain.AssetModel, domain.MediaAssetCleanupIntentModel) error {
+		transactionCalled = true
+		return nil
+	}
+	_, _, err := store.SaveBase64WithOptionsClaimed(MediaKindImage, "image/png", base64.StdEncoding.EncodeToString([]byte("canonicalization-failure")), "", MediaAssetSaveOptions{Source: MediaSourceGeneration})
+	if err == nil {
+		t.Fatal("SaveBase64WithOptionsClaimed() error = nil")
+	}
+	if transactionCalled {
+		t.Fatal("asset transaction ran after canonicalization failure")
+	}
+	assets, listErr := store.repo.ListAllMediaAssets()
+	if listErr != nil || len(assets) != 0 {
+		t.Fatalf("assets = %#v err %v", assets, listErr)
 	}
 }
 
@@ -53,18 +260,15 @@ func TestGenerationClaimRejectsCleanupPendingAsset(t *testing.T) {
 	root := t.TempDir()
 	store := newCleanupTestStore(t, filepath.Join(root, "workspace.db"), filepath.Join(root, "media"))
 	defer store.Close()
-	asset, _ := saveClaimedCleanupTestAsset(t, store, "pending-claim")
-	if err := store.repo.MarkMediaAssetCleanupPending(asset.ID, true); err != nil {
-		t.Fatal(err)
-	}
+	asset, originalClaim := saveClaimedCleanupTestAsset(t, store, "pending-claim")
 	_, _, err := store.claimSavedGenerationAsset(func() (MediaAsset, bool, error) {
 		return asset, false, nil
 	})
 	if !errors.Is(err, ErrMediaAssetCleanupPending) {
 		t.Fatalf("claim error = %v, want ErrMediaAssetCleanupPending", err)
 	}
-	if errorsFound := store.CommitGenerationAssetClaims([]MediaAssetClaim{{AssetID: asset.ID}}); len(errorsFound) == 0 || !errors.Is(errorsFound[0], ErrMediaAssetCleanupPending) {
-		t.Fatalf("commit errors = %v, want cleanup pending", errorsFound)
+	if errorsFound := store.CommitGenerationAssetClaims([]MediaAssetClaim{originalClaim}); len(errorsFound) != 0 {
+		t.Fatalf("original claim commit errors = %v", errorsFound)
 	}
 }
 
@@ -81,15 +285,13 @@ func TestCleanupPendingAssetIsNotReusedByContentDedupe(t *testing.T) {
 		t.Fatal("CompensateGenerationAssetClaims() error count = 0")
 	}
 
-	newAsset, newClaim, err := store.claimSavedGenerationAsset(func() (MediaAsset, bool, error) {
-		return store.SaveBase64WithOptionsTracked(
-			MediaKindImage,
-			"image/png",
-			base64.StdEncoding.EncodeToString([]byte(payload)),
-			"",
-			MediaAssetSaveOptions{Source: MediaSourceGeneration},
-		)
-	})
+	newAsset, newClaim, err := store.SaveBase64WithOptionsClaimed(
+		MediaKindImage,
+		"image/png",
+		base64.StdEncoding.EncodeToString([]byte(payload)),
+		"",
+		MediaAssetSaveOptions{Source: MediaSourceGeneration},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,42 +309,41 @@ func TestCleanupPendingAssetIsNotReusedByContentDedupe(t *testing.T) {
 	}
 }
 
-func TestCleanupRetryRestoresAssetWhenANewClaimArrives(t *testing.T) {
+func TestCleanupWorkerCannotDeleteTaskAssetBetweenCreateAndClaim(t *testing.T) {
 	root := t.TempDir()
 	store := newCleanupTestStore(t, filepath.Join(root, "workspace.db"), filepath.Join(root, "media"))
 	t.Cleanup(func() { _ = store.Close() })
-	asset, claim := saveClaimedCleanupTestAsset(t, store, "claim-retry-barrier")
-	realDelete := store.deleteCleanupAsset
-	store.deleteCleanupAsset = func(string) (bool, bool, error) {
-		return false, false, errors.New("forced delete failure")
-	}
-	if errorsFound := store.CompensateGenerationAssetClaims([]MediaAssetClaim{claim}); len(errorsFound) == 0 {
-		t.Fatal("CompensateGenerationAssetClaims() error count = 0")
-	}
-	if _, err := os.Stat(asset.FilePath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("asset was not staged before retry: %v", err)
-	}
-
-	store.deleteCleanupAsset = realDelete
 	started := make(chan struct{})
 	release := make(chan struct{})
-	store.cleanupBeforeAttempt = func(context.Context, string) {
+	store.generationClaimAfterSave = func(MediaAsset) {
 		close(started)
 		<-release
 	}
-	store.triggerMediaAssetCleanupMode(true)
-	<-started
-	store.generationClaimMu.Lock()
-	store.generationClaims[asset.ID] = mediaAssetClaimState{count: 1, staged: true}
-	store.generationClaimMu.Unlock()
-	newClaim := MediaAssetClaim{AssetID: asset.ID}
-	close(release)
-	waitForCleanupWorker(t, store)
-	store.CommitGenerationAssetClaims([]MediaAssetClaim{newClaim})
-	if _, err := os.Stat(asset.FilePath); err != nil {
-		t.Fatalf("newly claimed asset was not restored: %v", err)
+	type result struct {
+		asset MediaAsset
+		claim MediaAssetClaim
+		err   error
 	}
-	model, err := store.repo.GetMediaAsset(asset.ID)
+	resultCh := make(chan result, 1)
+	go func() {
+		asset, claim, err := store.SaveBase64WithOptionsClaimed(MediaKindImage, "image/png", base64.StdEncoding.EncodeToString([]byte("claim-create-window")), "", MediaAssetSaveOptions{Source: MediaSourceGeneration})
+		resultCh <- result{asset: asset, claim: claim, err: err}
+	}()
+	<-started
+	store.triggerMediaAssetCleanupMode(true)
+	close(release)
+	got := <-resultCh
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	waitForCleanupWorker(t, store)
+	if errorsFound := store.CommitGenerationAssetClaims([]MediaAssetClaim{got.claim}); len(errorsFound) != 0 {
+		t.Fatalf("commit errors = %v", errorsFound)
+	}
+	if _, err := os.Stat(got.asset.FilePath); err != nil {
+		t.Fatalf("claimed asset was deleted in create window: %v", err)
+	}
+	model, err := store.repo.GetMediaAsset(got.asset.ID)
 	if err != nil || model.CleanupPending {
 		t.Fatalf("new claim DB state = pending %v err %v", model.CleanupPending, err)
 	}
@@ -201,10 +402,7 @@ func TestMediaAssetCleanupIgnoresLegacyFilesystemJournalWithoutReadingIt(t *test
 func TestMediaAssetsCloseCancelsAndWaitsForCleanupWorker(t *testing.T) {
 	root := t.TempDir()
 	store := newCleanupTestStore(t, filepath.Join(root, "workspace.db"), filepath.Join(root, "media"))
-	asset, _ := saveClaimedCleanupTestAsset(t, store, "close-worker")
-	if err := store.repo.MarkMediaAssetCleanupPending(asset.ID, true); err != nil {
-		t.Fatal(err)
-	}
+	_, _ = saveClaimedCleanupTestAsset(t, store, "close-worker")
 	started := make(chan struct{})
 	release := make(chan struct{})
 	store.cleanupBeforeAttempt = func(context.Context, string) {
@@ -240,12 +438,12 @@ func TestInitializeMediaAssetCleanupDoesNotWaitForWorkerBatch(t *testing.T) {
 	if err := os.WriteFile(filePath, []byte("pending"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now()
-	if err := repo.CreateMediaAsset(domain.AssetModel{
-		ID: "asset-pending", Kind: MediaKindImage, Filename: "pending.png", MIMEType: "image/png",
-		RelPath: "library/pending.png", Source: MediaSourceGeneration, CleanupPending: true,
-		CreatedAt: now, UpdatedAt: now,
-	}); err != nil {
+	seed := NewMediaAssetsFromRepository(repo, mediaDir, "", nil, nil)
+	waitForCleanupWorker(t, seed)
+	if _, _, err := seed.saveBase64WithOptionsTrackedMode(MediaKindImage, "image/png", base64.StdEncoding.EncodeToString([]byte("startup-explicit-candidate")), "", MediaAssetSaveOptions{Source: MediaSourceGeneration}, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.Close(); err != nil {
 		t.Fatal(err)
 	}
 	started := make(chan struct{})
@@ -290,12 +488,12 @@ func TestMediaAssetsOpensCleanupDirectoriesLazily(t *testing.T) {
 		return realOpen()
 	}
 	asset, claim := saveClaimedCleanupTestAsset(t, store, "lazy-cleanup-fd")
-	if opens != 0 {
-		t.Fatalf("ordinary save opened cleanup FDs %d times", opens)
+	if opens != 1 {
+		t.Fatalf("task candidate save opened cleanup FDs %d times, want 1", opens)
 	}
 	store.CommitGenerationAssetClaims([]MediaAssetClaim{claim})
-	if opens != 0 {
-		t.Fatalf("ordinary commit opened cleanup FDs %d times", opens)
+	if opens != 1 {
+		t.Fatalf("task candidate commit opened cleanup FDs %d times, want unchanged", opens)
 	}
 	if _, err := os.Stat(asset.FilePath); err != nil {
 		t.Fatal(err)
@@ -486,9 +684,7 @@ func TestCleanupRejectsProjectDirectorySwapWithSameNamedFile(t *testing.T) {
 	store := NewMediaAssetsFromRepository(repos.MediaAssets, mediaDir, root, repos.Workspace, nil)
 	waitForCleanupWorker(t, store)
 	defer store.Close()
-	asset, claim, err := store.claimSavedGenerationAsset(func() (MediaAsset, bool, error) {
-		return store.SaveBase64WithOptionsTracked(MediaKindImage, "image/png", base64.StdEncoding.EncodeToString([]byte("old-project-file")), "", MediaAssetSaveOptions{ProjectID: project.ID, Source: MediaSourceGeneration})
-	})
+	asset, claim, err := store.SaveBase64WithOptionsClaimed(MediaKindImage, "image/png", base64.StdEncoding.EncodeToString([]byte("old-project-file")), "", MediaAssetSaveOptions{ProjectID: project.ID, Source: MediaSourceGeneration})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -632,14 +828,17 @@ func TestCleanupWorkerQuarantinesPersistedCorruptAttemptsWithoutRescheduling(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	intent, err := store.cleanupIntentForModel(model)
+	intent, err := store.repo.GetMediaAssetCleanupIntent(model.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	intent.Attempts = -1
-	prepared, err := store.repo.PrepareMediaAssetCleanupIntent(intent)
-	if err != nil || !prepared {
-		t.Fatalf("PrepareMediaAssetCleanupIntent() = %v, %v", prepared, err)
+	if err := store.repo.RecordMediaAssetCleanupFailure(intent.AssetID, -1, time.Now(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	valid, _, err := store.saveBase64WithOptionsTrackedMode(MediaKindImage, "image/png", base64.StdEncoding.EncodeToString([]byte("valid-after-corrupt")), "", MediaAssetSaveOptions{Source: MediaSourceGeneration}, true)
+	if err != nil {
+		t.Fatal(err)
 	}
 	scheduled := make(chan struct{}, 1)
 	store.cleanupScheduleWake = func(time.Duration, func()) mediaCleanupWakeTimer {
@@ -651,6 +850,9 @@ func TestCleanupWorkerQuarantinesPersistedCorruptAttemptsWithoutRescheduling(t *
 	persisted, err := store.repo.GetMediaAssetCleanupIntent(asset.ID)
 	if err != nil || persisted.Stage != cleanupStageQuarantined {
 		t.Fatalf("corrupt intent = %#v err %v, want quarantined", persisted, err)
+	}
+	if _, err := store.repo.GetMediaAsset(valid.ID); !errors.Is(err, repository.ErrRecordNotFound) {
+		t.Fatalf("valid cleanup candidate starved behind corrupt intent: %v", err)
 	}
 	select {
 	case <-scheduled:
@@ -705,12 +907,12 @@ func TestCleanupWorkerDrainsMoreThanOneBatch(t *testing.T) {
 		return &testCleanupWakeTimer{}
 	}
 	for index := 0; index < mediaAssetCleanupBatchSize+8; index++ {
-		if _, _, err := store.SaveBase64WithOptionsTracked(
+		if _, _, err := store.saveBase64WithOptionsTrackedMode(
 			MediaKindImage,
 			"image/png",
 			base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("orphan-%d", index))),
 			"",
-			MediaAssetSaveOptions{Source: MediaSourceGeneration},
+			MediaAssetSaveOptions{Source: MediaSourceGeneration}, true,
 		); err != nil {
 			t.Fatal(err)
 		}
@@ -838,15 +1040,13 @@ func newCleanupTestStore(t *testing.T, dbPath, mediaDir string) *MediaAssets {
 
 func saveClaimedCleanupTestAsset(t *testing.T, store *MediaAssets, payload string) (MediaAsset, MediaAssetClaim) {
 	t.Helper()
-	asset, claim, err := store.claimSavedGenerationAsset(func() (MediaAsset, bool, error) {
-		return store.SaveBase64WithOptionsTracked(
-			MediaKindImage,
-			"image/png",
-			base64.StdEncoding.EncodeToString([]byte(payload)),
-			"",
-			MediaAssetSaveOptions{Source: MediaSourceGeneration},
-		)
-	})
+	asset, claim, err := store.SaveBase64WithOptionsClaimed(
+		MediaKindImage,
+		"image/png",
+		base64.StdEncoding.EncodeToString([]byte(payload)),
+		"",
+		MediaAssetSaveOptions{Source: MediaSourceGeneration},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

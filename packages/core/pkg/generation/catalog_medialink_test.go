@@ -17,9 +17,9 @@ func TestMediaLinkCatalogRoutes(t *testing.T) {
 }
 
 func TestMediaLinkCatalogIncludesZImageWithOneReference(t *testing.T) {
-	route, ok := FindRoute(RouteAutoDLZImage)
+	route, ok := FindRoute(RouteAutoDLImage)
 	if !ok || route.Kind != KindImage || route.Provider != ProviderAutoDL ||
-		route.Adapter != AdapterAutoDLComfyZImage || !route.SupportsReferenceURLs ||
+		route.Adapter != AdapterAutoDLComfyImage || !route.SupportsReferenceURLs ||
 		route.MaxReferenceURLs != 1 || route.Async {
 		t.Fatalf("route = %+v, found = %v", route, ok)
 	}
@@ -54,15 +54,15 @@ func TestMediaLinkCatalogRouteContracts(t *testing.T) {
 			wantReferenceURLs: true,
 		},
 		{
-			name:              "AutoDL Z-Image",
-			routeID:           RouteAutoDLZImage,
-			wantID:            "autodl.zimage",
+			name:              "AutoDL image",
+			routeID:           RouteAutoDLImage,
+			wantID:            "autodl.image",
 			wantFamilyID:      FamilyZImage,
 			wantVersionID:     VersionZImageV1,
-			wantLabel:         "AutoDL · Z-Image",
+			wantLabel:         "AutoDL · 云端生图",
 			wantKind:          KindImage,
 			wantProvider:      ProviderAutoDL,
-			wantAdapter:       AdapterAutoDLComfyZImage,
+			wantAdapter:       AdapterAutoDLComfyImage,
 			wantParams:        []string{"aspectRatio", "resolution", "seed"},
 			wantReferenceURLs: true,
 		},

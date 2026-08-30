@@ -9,39 +9,39 @@ import (
 	coregeneration "github.com/mediago-dev/mediago-drama/packages/core/pkg/generation"
 )
 
-func encodeAutoDLZImageProviderTaskID(instanceProfileID string, promptID string) (string, error) {
+func encodeAutoDLImageProviderTaskID(instanceProfileID string, promptID string) (string, error) {
 	instanceProfileID = strings.TrimSpace(instanceProfileID)
 	promptID = strings.TrimSpace(promptID)
 	if instanceProfileID == "" || promptID == "" {
-		return "", fmt.Errorf("AutoDL Z-Image provider task ID requires instance and prompt IDs")
+		return "", fmt.Errorf("AutoDL image provider task ID requires instance and prompt IDs")
 	}
 	return strings.Join([]string{
-		coregeneration.RouteAutoDLZImage,
+		coregeneration.RouteAutoDLImage,
 		base64.RawURLEncoding.EncodeToString([]byte(instanceProfileID)),
 		base64.RawURLEncoding.EncodeToString([]byte(promptID)),
 	}, ":"), nil
 }
 
-func parseAutoDLZImageProviderTaskID(value string) (string, string, error) {
+func parseAutoDLImageProviderTaskID(value string) (string, string, error) {
 	parts := strings.Split(strings.TrimSpace(value), ":")
-	if len(parts) != 3 || parts[0] != coregeneration.RouteAutoDLZImage || parts[1] == "" || parts[2] == "" {
-		return "", "", fmt.Errorf("invalid AutoDL Z-Image provider task ID")
+	if len(parts) != 3 || parts[0] != coregeneration.RouteAutoDLImage || parts[1] == "" || parts[2] == "" {
+		return "", "", fmt.Errorf("invalid AutoDL image provider task ID")
 	}
-	instanceProfileID, err := decodeAutoDLZImageProviderTaskIDSegment(parts[1])
+	instanceProfileID, err := decodeAutoDLImageProviderTaskIDSegment(parts[1])
 	if err != nil {
 		return "", "", err
 	}
-	promptID, err := decodeAutoDLZImageProviderTaskIDSegment(parts[2])
+	promptID, err := decodeAutoDLImageProviderTaskIDSegment(parts[2])
 	if err != nil {
 		return "", "", err
 	}
 	return instanceProfileID, promptID, nil
 }
 
-func decodeAutoDLZImageProviderTaskIDSegment(value string) (string, error) {
+func decodeAutoDLImageProviderTaskIDSegment(value string) (string, error) {
 	decoded, err := base64.RawURLEncoding.DecodeString(value)
 	if err != nil || len(decoded) == 0 || !utf8.Valid(decoded) || base64.RawURLEncoding.EncodeToString(decoded) != value {
-		return "", fmt.Errorf("invalid AutoDL Z-Image provider task ID encoding")
+		return "", fmt.Errorf("invalid AutoDL image provider task ID encoding")
 	}
 	return string(decoded), nil
 }
@@ -51,13 +51,13 @@ func validateAutoDLProviderCheckpoint(routeID string, state GenerationTaskRuntim
 		return err
 	}
 	switch strings.TrimSpace(routeID) {
-	case coregeneration.RouteAutoDLZImage:
-		instanceProfileID, promptID, err := parseAutoDLZImageProviderTaskID(providerTaskID)
+	case coregeneration.RouteAutoDLImage:
+		instanceProfileID, promptID, err := parseAutoDLImageProviderTaskID(providerTaskID)
 		if err != nil {
 			return err
 		}
 		if instanceProfileID != strings.TrimSpace(state.InstanceProfileID) || promptID != strings.TrimSpace(state.ComfyPromptID) {
-			return fmt.Errorf("AutoDL Z-Image provider task ID does not match its runtime checkpoint")
+			return fmt.Errorf("AutoDL image provider task ID does not match its runtime checkpoint")
 		}
 		return nil
 	case coregeneration.RouteAutoDLH3:

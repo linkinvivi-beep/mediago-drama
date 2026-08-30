@@ -173,6 +173,7 @@ export interface GenerationMessageRequest {
 	versionId?: string;
 	provider?: string;
 	instanceProfileId?: string;
+	workflowProfileId?: string;
 	textExecutor?: TextExecutorType;
 	modelId: string;
 	model: string;

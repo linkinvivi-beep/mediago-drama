@@ -295,8 +295,10 @@ func GenerationRequestFromMessage(
 ) coregeneration.Request {
 	model := generationModelForReferences(route, payload.Model, referenceURLs)
 	instanceProfileID := ""
+	workflowProfileID := ""
 	if isAutoDLGenerationRouteID(route.ID) {
 		instanceProfileID = strings.TrimSpace(payload.InstanceProfileID)
+		workflowProfileID = strings.TrimSpace(payload.WorkflowProfileID)
 	}
 	if route.Kind == coregeneration.KindText {
 		return coregeneration.Request{
@@ -306,6 +308,7 @@ func GenerationRequestFromMessage(
 			VersionID:         payload.VersionID,
 			Provider:          payload.Provider,
 			InstanceProfileID: instanceProfileID,
+			WorkflowProfileID: workflowProfileID,
 			ProjectID:         payload.ProjectID,
 			ProjectName:       payload.ProjectName,
 			ModelID:           payload.ModelID,
@@ -324,6 +327,7 @@ func GenerationRequestFromMessage(
 			VersionID:         payload.VersionID,
 			Provider:          payload.Provider,
 			InstanceProfileID: instanceProfileID,
+			WorkflowProfileID: workflowProfileID,
 			ProjectID:         payload.ProjectID,
 			ProjectName:       payload.ProjectName,
 			ModelID:           payload.ModelID,
@@ -342,6 +346,7 @@ func GenerationRequestFromMessage(
 		VersionID:         payload.VersionID,
 		Provider:          payload.Provider,
 		InstanceProfileID: instanceProfileID,
+		WorkflowProfileID: workflowProfileID,
 		ProjectID:         payload.ProjectID,
 		ProjectName:       payload.ProjectName,
 		ModelID:           payload.ModelID,
@@ -639,6 +644,9 @@ func GenerationTaskFromMessage(
 	runtimeState := GenerationTaskRuntimeState{}
 	if instanceProfileID := strings.TrimSpace(request.InstanceProfileID); isAutoDLGenerationRouteID(route.ID) && instanceProfileID != "" {
 		runtimeState.InstanceProfileID = instanceProfileID
+	}
+	if workflowProfileID := strings.TrimSpace(request.WorkflowProfileID); isAutoDLGenerationRouteID(route.ID) && workflowProfileID != "" {
+		runtimeState.WorkflowProfileID = workflowProfileID
 	}
 	runtimeState, runtimeErr := mergeGenerationTaskRuntimeState(
 		runtimeState,

@@ -49,16 +49,16 @@ var mediaLinkFamilySpecs = []familySpec{
 		},
 		Routes: []ModelRoute{
 			mediaLinkRoute(
-				RouteAutoDLZImage,
+				RouteAutoDLImage,
 				FamilyZImage,
 				VersionZImageV1,
-				"AutoDL · Z-Image",
+				"AutoDL · 云端生图",
 				KindImage,
 				ProviderAutoDL,
 				"z-image",
-				AdapterAutoDLComfyZImage,
+				AdapterAutoDLComfyImage,
 				"https://docs.comfy.org/development/core-concepts/api",
-				autoDLZImageParams(),
+				autoDLImageParams(),
 				false,
 				withReferenceURLLimit(1),
 			),
@@ -141,7 +141,7 @@ func codexImageParams() RouteParamConfig {
 	})
 }
 
-func autoDLZImageParams() RouteParamConfig {
+func autoDLImageParams() RouteParamConfig {
 	return identityRouteParamConfig([]RouteParam{
 		selectRouteParam(ParamAspectRatio, "1:1", []ParamOption{
 			{Label: "1:1", Value: "1:1"},
