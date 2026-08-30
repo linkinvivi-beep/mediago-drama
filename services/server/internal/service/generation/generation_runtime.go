@@ -56,6 +56,7 @@ type GenerationService struct {
 	// claim/delete transfer window. Production construction leaves both nil.
 	generationRetryClaimedHook   func()
 	generationDeleteStartingHook func()
+	generationAssetsCachedHook   func(string)
 }
 
 type generationTaskCancellation struct {

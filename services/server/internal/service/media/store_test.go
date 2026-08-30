@@ -185,6 +185,24 @@ func TestSaveBase64WithOptionsUsesExplicitFilenameWithoutRenamingStoredFile(t *t
 	}
 }
 
+func TestSaveBase64WithOptionsTrackedDistinguishesCreatedFromReused(t *testing.T) {
+	store := NewMediaAssets(filepath.Join(t.TempDir(), "settings.db"), t.TempDir())
+	payload := base64.StdEncoding.EncodeToString([]byte("tracked-image-bytes"))
+	options := MediaAssetSaveOptions{Source: MediaSourceGeneration}
+
+	first, firstCreated, err := store.SaveBase64WithOptionsTracked(MediaKindImage, "image/png", payload, "", options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, secondCreated, err := store.SaveBase64WithOptionsTracked(MediaKindImage, "image/png", payload, "", options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !firstCreated || secondCreated || first.ID != second.ID {
+		t.Fatalf("tracked saves = first %q created %v, second %q created %v", first.ID, firstCreated, second.ID, secondCreated)
+	}
+}
+
 func TestSaveTextWithOptionsStoresToolboxTextAsset(t *testing.T) {
 	workspaceRoot := t.TempDir()
 	globalDir := filepath.Join(workspaceRoot, "library")

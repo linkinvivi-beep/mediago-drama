@@ -404,7 +404,13 @@ func (store *MediaAssets) SaveBase64(kind string, mimeType string, value string,
 
 // SaveBase64WithOptions stores a base64 media asset using explicit placement metadata.
 func (store *MediaAssets) SaveBase64WithOptions(kind string, mimeType string, value string, sourceURL string, options MediaAssetSaveOptions) (MediaAsset, error) {
-	return store.saveBase64WithOptions(kind, mimeType, value, sourceURL, options)
+	asset, _, err := store.SaveBase64WithOptionsTracked(kind, mimeType, value, sourceURL, options)
+	return asset, err
+}
+
+// SaveBase64WithOptionsTracked stores a base64 asset and reports whether this call created it.
+func (store *MediaAssets) SaveBase64WithOptionsTracked(kind string, mimeType string, value string, sourceURL string, options MediaAssetSaveOptions) (MediaAsset, bool, error) {
+	return store.saveBase64WithOptionsTracked(kind, mimeType, value, sourceURL, options)
 }
 
 // SaveTextWithOptions stores a text asset using explicit placement metadata.
@@ -433,12 +439,17 @@ func (store *MediaAssets) SaveBase64ForStudioDir(kind string, mimeType string, v
 }
 
 func (store *MediaAssets) saveBase64WithOptions(kind string, mimeType string, value string, sourceURL string, options MediaAssetSaveOptions) (MediaAsset, error) {
+	asset, _, err := store.saveBase64WithOptionsTracked(kind, mimeType, value, sourceURL, options)
+	return asset, err
+}
+
+func (store *MediaAssets) saveBase64WithOptionsTracked(kind string, mimeType string, value string, sourceURL string, options MediaAssetSaveOptions) (MediaAsset, bool, error) {
 	if store.initErr != nil {
-		return MediaAsset{}, store.initErr
+		return MediaAsset{}, false, store.initErr
 	}
 	encoded := stripDataURI(value)
 	if encoded == "" {
-		return MediaAsset{}, fmt.Errorf("base64 asset is empty")
+		return MediaAsset{}, false, fmt.Errorf("base64 asset is empty")
 	}
 
 	data, err := base64.StdEncoding.DecodeString(encoded)
@@ -446,7 +457,7 @@ func (store *MediaAssets) saveBase64WithOptions(kind string, mimeType string, va
 		data, err = base64.RawStdEncoding.DecodeString(encoded)
 	}
 	if err != nil {
-		return MediaAsset{}, fmt.Errorf("decoding base64 asset: %w", err)
+		return MediaAsset{}, false, fmt.Errorf("decoding base64 asset: %w", err)
 	}
 	if mimeType == "" {
 		mimeType = http.DetectContentType(data)
@@ -460,7 +471,7 @@ func (store *MediaAssets) saveBase64WithOptions(kind string, mimeType string, va
 		filename = defaultAssetFilename(kind, mimeType)
 	}
 
-	return store.saveBytesWithKind(data, kind, filename, mimeType, sourceURL, options)
+	return store.saveBytesWithKindTracked(data, kind, filename, mimeType, sourceURL, options)
 }
 
 func (store *MediaAssets) SaveRemoteAsset(ctx context.Context, kind string, remoteURL string, projectID string) (MediaAsset, error) {
@@ -472,7 +483,13 @@ func (store *MediaAssets) SaveRemoteAsset(ctx context.Context, kind string, remo
 
 // SaveRemoteAssetWithOptions downloads and stores a remote media asset using explicit placement metadata.
 func (store *MediaAssets) SaveRemoteAssetWithOptions(ctx context.Context, kind string, remoteURL string, options MediaAssetSaveOptions) (MediaAsset, error) {
-	return store.saveRemoteAssetWithOptions(ctx, kind, remoteURL, options)
+	asset, _, err := store.SaveRemoteAssetWithOptionsTracked(ctx, kind, remoteURL, options)
+	return asset, err
+}
+
+// SaveRemoteAssetWithOptionsTracked downloads an asset and reports whether this call created it.
+func (store *MediaAssets) SaveRemoteAssetWithOptionsTracked(ctx context.Context, kind string, remoteURL string, options MediaAssetSaveOptions) (MediaAsset, bool, error) {
+	return store.saveRemoteAssetWithOptionsTracked(ctx, kind, remoteURL, options)
 }
 
 // SaveRemoteAssetForStudioSession is a legacy wrapper for toolbox conversation assets.
@@ -492,40 +509,45 @@ func (store *MediaAssets) SaveRemoteAssetForStudioDir(ctx context.Context, kind 
 }
 
 func (store *MediaAssets) saveRemoteAssetWithOptions(ctx context.Context, kind string, remoteURL string, options MediaAssetSaveOptions) (MediaAsset, error) {
+	asset, _, err := store.saveRemoteAssetWithOptionsTracked(ctx, kind, remoteURL, options)
+	return asset, err
+}
+
+func (store *MediaAssets) saveRemoteAssetWithOptionsTracked(ctx context.Context, kind string, remoteURL string, options MediaAssetSaveOptions) (MediaAsset, bool, error) {
 	if store.initErr != nil {
-		return MediaAsset{}, store.initErr
+		return MediaAsset{}, false, store.initErr
 	}
 	remoteURL = strings.TrimSpace(remoteURL)
 	if remoteURL == "" {
-		return MediaAsset{}, fmt.Errorf("remote asset url is empty")
+		return MediaAsset{}, false, fmt.Errorf("remote asset url is empty")
 	}
 	options = normalizeMediaAssetSaveOptions(options)
 	if existing, ok, err := store.FindBySourceURLAndScope(remoteURL, options); err != nil {
-		return MediaAsset{}, err
+		return MediaAsset{}, false, err
 	} else if ok {
-		return existing, nil
+		return existing, false, nil
 	}
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, remoteURL, nil)
 	if err != nil {
-		return MediaAsset{}, err
+		return MediaAsset{}, false, err
 	}
 	response, err := mediaAssetHTTPClient.Do(request)
 	if err != nil {
-		return MediaAsset{}, err
+		return MediaAsset{}, false, err
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return MediaAsset{}, fmt.Errorf("downloading asset failed with status %d", response.StatusCode)
+		return MediaAsset{}, false, fmt.Errorf("downloading asset failed with status %d", response.StatusCode)
 	}
 	if response.ContentLength > MaxMediaAssetUploadSize {
-		return MediaAsset{}, fmt.Errorf("asset is larger than %d bytes", MaxMediaAssetUploadSize)
+		return MediaAsset{}, false, fmt.Errorf("asset is larger than %d bytes", MaxMediaAssetUploadSize)
 	}
 
 	data, err := shared.ReadLimited(response.Body, MaxMediaAssetUploadSize)
 	if err != nil {
-		return MediaAsset{}, err
+		return MediaAsset{}, false, err
 	}
 
 	mimeType := response.Header.Get("Content-Type")
@@ -544,7 +566,7 @@ func (store *MediaAssets) saveRemoteAssetWithOptions(ctx context.Context, kind s
 		filename = defaultAssetFilename(kind, mimeType)
 	}
 
-	return store.saveBytesWithKind(data, kind, filename, mimeType, remoteURL, options)
+	return store.saveBytesWithKindTracked(data, kind, filename, mimeType, remoteURL, options)
 }
 
 // SaveLinkedAssetWithOptions stores metadata for an already-served asset URL.
@@ -679,8 +701,13 @@ func (store *MediaAssets) saveBytesForProject(data []byte, filename string, cont
 }
 
 func (store *MediaAssets) saveBytesWithKind(data []byte, kind string, filename string, mimeType string, sourceURL string, options MediaAssetSaveOptions) (MediaAsset, error) {
+	asset, _, err := store.saveBytesWithKindTracked(data, kind, filename, mimeType, sourceURL, options)
+	return asset, err
+}
+
+func (store *MediaAssets) saveBytesWithKindTracked(data []byte, kind string, filename string, mimeType string, sourceURL string, options MediaAssetSaveOptions) (MediaAsset, bool, error) {
 	if store.initErr != nil {
-		return MediaAsset{}, store.initErr
+		return MediaAsset{}, false, store.initErr
 	}
 	kind = strings.ToLower(strings.TrimSpace(kind))
 	mimeType = shared.NormalizeMIMEType(mimeType)
@@ -688,13 +715,13 @@ func (store *MediaAssets) saveBytesWithKind(data []byte, kind string, filename s
 		mimeType = defaultAssetMIMEType(kind)
 	}
 	if len(data) == 0 {
-		return MediaAsset{}, fmt.Errorf("asset file is empty")
+		return MediaAsset{}, false, fmt.Errorf("asset file is empty")
 	}
 	if len(data) > MaxMediaAssetUploadSize {
-		return MediaAsset{}, fmt.Errorf("asset is larger than %d bytes", MaxMediaAssetUploadSize)
+		return MediaAsset{}, false, fmt.Errorf("asset is larger than %d bytes", MaxMediaAssetUploadSize)
 	}
 	if !isSupportedMediaAssetKind(kind) {
-		return MediaAsset{}, unsupportedMediaAssetKindError()
+		return MediaAsset{}, false, unsupportedMediaAssetKindError()
 	}
 
 	nowTime := time.Now()
@@ -703,15 +730,15 @@ func (store *MediaAssets) saveBytesWithKind(data []byte, kind string, filename s
 	contentHash := mediaAssetContentHash(data)
 	if shouldReuseMediaAssetContent(options.Source) {
 		if existing, ok, err := store.FindByContentHashAndScope(contentHash, kind, options); err != nil {
-			return MediaAsset{}, err
+			return MediaAsset{}, false, err
 		} else if ok {
-			return existing, nil
+			return existing, false, nil
 		}
 	}
 
 	id, err := shared.RandomID("asset")
 	if err != nil {
-		return MediaAsset{}, err
+		return MediaAsset{}, false, err
 	}
 
 	filename = shared.SafeFilename(filename)
@@ -728,15 +755,15 @@ func (store *MediaAssets) saveBytesWithKind(data []byte, kind string, filename s
 
 	target, err := store.targetLocation(options, mediaAssetDateDirForTime(nowTime))
 	if err != nil {
-		return MediaAsset{}, err
+		return MediaAsset{}, false, err
 	}
 	if err := os.MkdirAll(target.Directory, 0o755); err != nil {
-		return MediaAsset{}, fmt.Errorf("creating media asset directory: %w", err)
+		return MediaAsset{}, false, fmt.Errorf("creating media asset directory: %w", err)
 	}
 
 	filePath := filepath.Join(target.Directory, id+filepath.Ext(filename))
 	if err := os.WriteFile(filePath, data, 0o600); err != nil {
-		return MediaAsset{}, err
+		return MediaAsset{}, false, err
 	}
 	relativePath := joinAssetRelativePath(target.RelativeDir, filepath.Base(filePath))
 
@@ -793,10 +820,10 @@ func (store *MediaAssets) saveBytesWithKind(data []byte, kind string, filename s
 		if asset.PosterPath != "" {
 			_ = os.Remove(asset.PosterPath)
 		}
-		return MediaAsset{}, err
+		return MediaAsset{}, false, err
 	}
 
-	return asset, nil
+	return asset, true, nil
 }
 
 func isSupportedMediaAssetKind(kind string) bool {

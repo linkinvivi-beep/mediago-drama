@@ -1514,6 +1514,448 @@ func TestCompletedAutoDLTaskIgnoresLateConflictingProgress(t *testing.T) {
 	}
 }
 
+func TestAutoDLAssetProgressConflictDoesNotImportAsset(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	current := completeAutoDLRuntimeIdentity("zimage-t2i")
+	task := GenerationTaskRecord{
+		ID: "task-asset-conflict", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage,
+		Status: "running", RuntimeState: current,
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	conflicting := current
+	conflicting.WorkflowDigest = "sha256:conflict"
+	workflow.persistGenerationProgress(context.Background(), task, coregeneration.ProgressEvent{
+		Response: coregeneration.Response{
+			Status: "running",
+			Assets: []coregeneration.Asset{{
+				Kind: coregeneration.KindImage, MIMEType: "image/png",
+				Base64: base64.StdEncoding.EncodeToString(testPNGBytes()),
+			}},
+			Metadata: map[string]any{"runtime_state": conflicting},
+		},
+	}, "", "", "")
+
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("imported assets = %+v, want none for rejected runtime checkpoint", assets)
+	}
+	got, found, err := store.Get(task.ID)
+	if err != nil || !found || got.Status != "failed" || got.ErrorCode != generationRuntimeStateConflictCode {
+		t.Fatalf("task = found %v err %v status %q error %q", found, err, got.Status, got.ErrorCode)
+	}
+}
+
+func TestAutoDLAssetFinalConflictDoesNotImportAsset(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	current := completeAutoDLRuntimeIdentity("zimage-t2i")
+	task := GenerationTaskRecord{
+		ID: "task-final-asset-conflict", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage,
+		Status: "submitted", RuntimeState: current,
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	conflicting := current
+	conflicting.WorkflowDigest = "sha256:conflict"
+	provider := &stubImageProvider{generateResponse: coregeneration.Response{
+		Status: "completed",
+		Assets: []coregeneration.Asset{{
+			Kind: coregeneration.KindImage, MIMEType: "image/png",
+			Base64: base64.StdEncoding.EncodeToString(testPNGBytes()),
+		}},
+		Metadata: map[string]any{"runtime_state": conflicting},
+	}}
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	workflow.completeSubmittedGeneration(context.Background(), task, provider, coregeneration.Request{Kind: coregeneration.KindImage}, "create", "", "")
+
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("final conflict imported assets = %+v", assets)
+	}
+	got, found, err := store.Get(task.ID)
+	if err != nil || !found || got.Status != "failed" || got.ErrorCode != generationRuntimeStateConflictCode {
+		t.Fatalf("task = found %v err %v status %q error %q", found, err, got.Status, got.ErrorCode)
+	}
+}
+
+func TestAutoDLAssetFinalDeleteRaceCompensatesNewAsset(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	current := completeAutoDLRuntimeIdentity("zimage-t2i")
+	task := GenerationTaskRecord{
+		ID: "task-final-asset-delete-race", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage,
+		Status: "submitted", RuntimeState: current,
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	provider := &stubImageProvider{generateResponse: coregeneration.Response{
+		Status: "completed",
+		Assets: []coregeneration.Asset{{
+			Kind: coregeneration.KindImage, MIMEType: "image/png",
+			Base64: base64.StdEncoding.EncodeToString(testPNGBytes()),
+		}},
+		Metadata: map[string]any{"runtime_state": current},
+	}}
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	assetCached := make(chan struct{})
+	releaseCAS := make(chan struct{})
+	workflow.generationAssetsCachedHook = func(taskID string) {
+		if taskID == task.ID {
+			close(assetCached)
+			<-releaseCAS
+		}
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		workflow.completeSubmittedGeneration(context.Background(), task, provider, coregeneration.Request{Kind: coregeneration.KindImage}, "create", "", "")
+	}()
+	<-assetCached
+	if deleted, err := store.Delete(task.ID); err != nil || !deleted {
+		t.Fatalf("Delete() = %v, %v", deleted, err)
+	}
+	close(releaseCAS)
+	<-done
+
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("orphan final assets after delete race = %+v", assets)
+	}
+	if _, found, err := store.Get(task.ID); err != nil || found {
+		t.Fatalf("deleted task revived = found %v err %v", found, err)
+	}
+}
+
+func TestAutoDLAssetProgressDeleteRaceCompensatesNewAsset(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	current := completeAutoDLRuntimeIdentity("zimage-t2i")
+	task := GenerationTaskRecord{
+		ID: "task-asset-delete-race", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage,
+		Status: "running", RuntimeState: current,
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	assetCached := make(chan struct{})
+	releaseCAS := make(chan struct{})
+	workflow.generationAssetsCachedHook = func(taskID string) {
+		if taskID != task.ID {
+			return
+		}
+		close(assetCached)
+		<-releaseCAS
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		workflow.persistGenerationProgress(context.Background(), task, coregeneration.ProgressEvent{
+			Response: coregeneration.Response{
+				Status: "running",
+				Assets: []coregeneration.Asset{{
+					Kind: coregeneration.KindImage, MIMEType: "image/png",
+					Base64: base64.StdEncoding.EncodeToString(testPNGBytes()),
+				}},
+				Metadata: map[string]any{"runtime_state": current},
+			},
+		}, "", "", "")
+	}()
+	<-assetCached
+	deleted, err := store.Delete(task.ID)
+	if err != nil || !deleted {
+		t.Fatalf("Delete() = %v, %v", deleted, err)
+	}
+	close(releaseCAS)
+	<-done
+
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("orphan assets after delete race = %+v", assets)
+	}
+	if _, found, err := store.Get(task.ID); err != nil || found {
+		t.Fatalf("deleted task revived = found %v err %v", found, err)
+	}
+}
+
+func TestAutoDLAssetProgressTerminalRaceCompensatesNewAsset(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	current := completeAutoDLRuntimeIdentity("zimage-t2i")
+	task := GenerationTaskRecord{
+		ID: "task-asset-terminal-race", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage,
+		Status: "running", RuntimeState: current,
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	assetCached := make(chan struct{})
+	releaseCAS := make(chan struct{})
+	workflow.generationAssetsCachedHook = func(taskID string) {
+		if taskID == task.ID {
+			close(assetCached)
+			<-releaseCAS
+		}
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		workflow.persistGenerationProgress(context.Background(), task, coregeneration.ProgressEvent{
+			Response: coregeneration.Response{
+				Status: "running",
+				Assets: []coregeneration.Asset{{
+					Kind: coregeneration.KindImage, MIMEType: "image/png",
+					Base64: base64.StdEncoding.EncodeToString(testPNGBytes()),
+				}},
+				Metadata: map[string]any{"runtime_state": current},
+			},
+		}, "", "", "")
+	}()
+	<-assetCached
+	terminal := task
+	terminal.Status = "completed"
+	if err := store.Upsert(terminal); err != nil {
+		t.Fatal(err)
+	}
+	close(releaseCAS)
+	<-done
+
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("orphan assets after terminal race = %+v", assets)
+	}
+	got, found, err := store.Get(task.ID)
+	if err != nil || !found || got.Status != "completed" {
+		t.Fatalf("terminal task changed = found %v err %v status %q", found, err, got.Status)
+	}
+}
+
+func TestAutoDLAssetProgressDeleteRacePreservesReusedAsset(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	payload := base64.StdEncoding.EncodeToString(testPNGBytes())
+	existing, err := mediaAssets.SaveBase64WithOptions(
+		"image", "image/png", payload, "", generationMediaSaveOptions("", "", ""),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := completeAutoDLRuntimeIdentity("zimage-t2i")
+	task := GenerationTaskRecord{
+		ID: "task-reused-asset-delete-race", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage,
+		Status: "running", RuntimeState: current,
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	assetCached := make(chan struct{})
+	releaseCAS := make(chan struct{})
+	workflow.generationAssetsCachedHook = func(taskID string) {
+		if taskID == task.ID {
+			close(assetCached)
+			<-releaseCAS
+		}
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		workflow.persistGenerationProgress(context.Background(), task, coregeneration.ProgressEvent{
+			Response: coregeneration.Response{
+				Status:   "running",
+				Assets:   []coregeneration.Asset{{Kind: coregeneration.KindImage, MIMEType: "image/png", Base64: payload}},
+				Metadata: map[string]any{"runtime_state": current},
+			},
+		}, "", "", "")
+	}()
+	<-assetCached
+	if deleted, err := store.Delete(task.ID); err != nil || !deleted {
+		t.Fatalf("Delete() = %v, %v", deleted, err)
+	}
+	close(releaseCAS)
+	<-done
+
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 1 || assets[0].ID != existing.ID {
+		t.Fatalf("reused asset was removed: got %+v, want %q", assets, existing.ID)
+	}
+}
+
+func TestAutoDLActiveHandoffPersistsFirstCompleteCheckpoint(t *testing.T) {
+	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	task := GenerationTaskRecord{
+		ID: "task-handoff-first-checkpoint", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage,
+		Status: "running",
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	want := completeAutoDLRuntimeIdentity("zimage-t2i")
+	workflow := NewGenerationService(nil, store, nil)
+	handedOff := workflow.handOffPendingGeneration(task, task, coregeneration.Response{
+		ID:     coregeneration.RouteAutoDLZImage + ":prompt-1",
+		Status: "running",
+		Metadata: map[string]any{
+			"runtime_state": want,
+		},
+	}, "create")
+	if !handedOff {
+		t.Fatal("handOffPendingGeneration() = false, want persisted handoff")
+	}
+	got, found, err := store.Get(task.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() = found %v err %v", found, err)
+	}
+	if got.RuntimeState != want || got.ProviderTaskID != coregeneration.RouteAutoDLZImage+":prompt-1" {
+		t.Fatalf("handoff identity/provider = %+v/%q, want %+v", got.RuntimeState, got.ProviderTaskID, want)
+	}
+}
+
+func TestAutoDLH3ActiveHandoffPersistsFirstCompleteCheckpoint(t *testing.T) {
+	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	task := GenerationTaskRecord{
+		ID: "task-h3-handoff-first-checkpoint", Kind: "video", RouteID: coregeneration.RouteAutoDLH3,
+		Status: "running",
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	want := completeAutoDLRuntimeIdentity("h3-ref2v")
+	workflow := NewGenerationService(nil, store, nil)
+	if !workflow.handOffPendingGeneration(task, task, coregeneration.Response{
+		ID:       coregeneration.RouteAutoDLH3 + ":prompt-1",
+		Status:   "running",
+		Metadata: map[string]any{"runtime_state": want},
+	}, "create") {
+		t.Fatal("handOffPendingGeneration() = false, want persisted H3 handoff")
+	}
+	got, found, err := store.Get(task.ID)
+	if err != nil || !found || got.RuntimeState != want || got.ProviderTaskID != coregeneration.RouteAutoDLH3+":prompt-1" {
+		t.Fatalf("H3 handoff = found %v err %v state %+v provider %q", found, err, got.RuntimeState, got.ProviderTaskID)
+	}
+}
+
+func TestAutoDLActiveHandoffRejectsConflictingCheckpoint(t *testing.T) {
+	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	current := completeAutoDLRuntimeIdentity("zimage-t2i")
+	task := GenerationTaskRecord{
+		ID: "task-handoff-conflict", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage,
+		Status: "running", RuntimeState: current,
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	conflicting := current
+	conflicting.WorkflowProfileID = "zimage-i2i"
+	workflow := NewGenerationService(nil, store, nil)
+	if !workflow.handOffPendingGeneration(task, task, coregeneration.Response{
+		ID:       coregeneration.RouteAutoDLZImage + ":prompt-2",
+		Status:   "running",
+		Metadata: map[string]any{"runtime_state": conflicting},
+	}, "create") {
+		t.Fatal("conflicting handoff was not persisted as terminal failure")
+	}
+	got, found, err := store.Get(task.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() = found %v err %v", found, err)
+	}
+	if got.Status != "failed" || got.ErrorCode != generationRuntimeStateConflictCode || got.RuntimeState != current || got.ProviderTaskID != "" {
+		t.Fatalf("conflicting handoff = status %q error %q state %+v provider %q", got.Status, got.ErrorCode, got.RuntimeState, got.ProviderTaskID)
+	}
+}
+
+func TestAutoDLActiveHandoffCompletesAnchorAfterMissedProgressCheckpoint(t *testing.T) {
+	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	anchor := GenerationTaskRuntimeState{
+		InstanceProfileID:      "instance-a",
+		WorkflowProfileID:      "zimage-t2i",
+		WorkflowProfileVersion: "v1",
+		WorkflowDigest:         "sha256:one",
+	}
+	task := GenerationTaskRecord{
+		ID: "task-handoff-progress-compensation", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage,
+		Status: "running", RuntimeState: anchor,
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	want := completeAutoDLRuntimeIdentity("zimage-t2i")
+	workflow := NewGenerationService(nil, store, nil)
+	if !workflow.handOffPendingGeneration(task, task, coregeneration.Response{
+		ID:       coregeneration.RouteAutoDLZImage + ":prompt-1",
+		Status:   "running",
+		Metadata: map[string]any{"runtime_state": want},
+	}, "create") {
+		t.Fatal("compensating handoff failed")
+	}
+	got, found, err := store.Get(task.ID)
+	if err != nil || !found || got.RuntimeState != want {
+		t.Fatalf("compensated runtime = found %v err %v state %+v, want %+v", found, err, got.RuntimeState, want)
+	}
+}
+
+func TestAutoDLActiveHandoffRejectsMissingPromptIdentity(t *testing.T) {
+	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	task := GenerationTaskRecord{
+		ID: "task-handoff-missing-prompt", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage,
+		Status: "running", ProviderTaskID: coregeneration.RouteAutoDLZImage + ":stale-prompt",
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	workflow := NewGenerationService(nil, store, nil)
+	if !workflow.handOffPendingGeneration(task, task, coregeneration.Response{
+		ID:     coregeneration.RouteAutoDLZImage + ":prompt-missing-runtime",
+		Status: "running",
+	}, "create") {
+		t.Fatal("missing runtime handoff was not persisted as terminal failure")
+	}
+	got, found, err := store.Get(task.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() = found %v err %v", found, err)
+	}
+	if got.Status != "failed" || got.ErrorCode != generationRuntimeStateConflictCode || got.ProviderTaskID != "" {
+		t.Fatalf("missing runtime handoff = status %q error %q provider %q", got.Status, got.ErrorCode, got.ProviderTaskID)
+	}
+}
+
 func completeAutoDLRuntimeIdentity(workflowProfileID string) GenerationTaskRuntimeState {
 	return GenerationTaskRuntimeState{
 		InstanceProfileID:      "instance-a",
