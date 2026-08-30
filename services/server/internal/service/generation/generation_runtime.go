@@ -50,6 +50,12 @@ type GenerationService struct {
 	generationCancelMu            sync.Mutex
 	generationCancels             map[string]map[*generationTaskCancellation]struct{}
 	generationPreflightCancels    map[string]map[*generationTaskCancellation]struct{}
+	generationDeleteMu            sync.Mutex
+	generationDeleting            map[string]int
+	// Test-only synchronization seams for the otherwise sub-millisecond
+	// claim/delete transfer window. Production construction leaves both nil.
+	generationRetryClaimedHook   func()
+	generationDeleteStartingHook func()
 }
 
 type generationTaskCancellation struct {
@@ -86,6 +92,7 @@ func NewGenerationService(settings *settings.Settings, generationTasks *Generati
 		generationRootCancel:          rootCancel,
 		generationCancels:             map[string]map[*generationTaskCancellation]struct{}{},
 		generationPreflightCancels:    map[string]map[*generationTaskCancellation]struct{}{},
+		generationDeleting:            map[string]int{},
 	}
 }
 
@@ -117,6 +124,12 @@ func (workflow *GenerationService) launchClaimedSubmittedGeneration(ctx context.
 
 func (workflow *GenerationService) generationTaskContext(taskID string) (context.Context, func()) {
 	workflow.generationCancelMu.Lock()
+	ctx, entry := workflow.registerGenerationTaskContextLocked(taskID)
+	workflow.generationCancelMu.Unlock()
+	return ctx, workflow.generationTaskContextRelease(taskID, entry)
+}
+
+func (workflow *GenerationService) registerGenerationTaskContextLocked(taskID string) (context.Context, *generationTaskCancellation) {
 	parent := workflow.generationRootCtx
 	if parent == nil {
 		parent = context.Background()
@@ -129,17 +142,48 @@ func (workflow *GenerationService) generationTaskContext(taskID string) (context
 		workflow.generationCancels[taskID] = entries
 	}
 	entries[entry] = struct{}{}
-	workflow.generationCancelMu.Unlock()
-	return ctx, func() {
-		cancel()
-		workflow.generationCancelMu.Lock()
-		entries := workflow.generationCancels[taskID]
-		delete(entries, entry)
-		if len(entries) == 0 {
-			delete(workflow.generationCancels, taskID)
+	return ctx, entry
+}
+
+func (workflow *GenerationService) generationTaskContextRelease(taskID string, entry *generationTaskCancellation) func() {
+	return func() {
+		if entry == nil {
+			return
 		}
+		workflow.generationCancelMu.Lock()
+		workflow.unregisterGenerationTaskContextLocked(taskID, entry)
 		workflow.generationCancelMu.Unlock()
 	}
+}
+
+func (workflow *GenerationService) unregisterGenerationTaskContextLocked(taskID string, entry *generationTaskCancellation) {
+	entry.cancel()
+	entries := workflow.generationCancels[taskID]
+	delete(entries, entry)
+	if len(entries) == 0 {
+		delete(workflow.generationCancels, taskID)
+	}
+}
+
+func (workflow *GenerationService) claimFailedCodexRetryContext(preflight context.Context, taskID string, message string) (GenerationTaskRuntimeState, context.Context, func(), bool, error) {
+	workflow.generationCancelMu.Lock()
+	defer workflow.generationCancelMu.Unlock()
+	if err := preflight.Err(); err != nil {
+		return GenerationTaskRuntimeState{}, nil, nil, false, err
+	}
+	if workflow.generationTaskDeletionRequested(taskID) {
+		return GenerationTaskRuntimeState{}, nil, nil, false, nil
+	}
+	ctx, entry := workflow.registerGenerationTaskContextLocked(taskID)
+	state, claimed, err := workflow.generationTasks.ClaimFailedCodexRetry(taskID, message)
+	if err != nil || !claimed {
+		workflow.unregisterGenerationTaskContextLocked(taskID, entry)
+		return state, nil, nil, claimed, err
+	}
+	if workflow.generationRetryClaimedHook != nil {
+		workflow.generationRetryClaimedHook()
+	}
+	return state, ctx, workflow.generationTaskContextRelease(taskID, entry), true, nil
 }
 
 // generationPreflightContext is caller-owned but also cancellable by task
@@ -179,6 +223,11 @@ func (workflow *GenerationService) generationPreflightContext(taskID string, cal
 
 func (workflow *GenerationService) cancelGenerationTask(taskID string) {
 	workflow.generationCancelMu.Lock()
+	workflow.cancelGenerationTaskLocked(taskID)
+	workflow.generationCancelMu.Unlock()
+}
+
+func (workflow *GenerationService) cancelGenerationTaskLocked(taskID string) {
 	entries := workflow.generationCancels[strings.TrimSpace(taskID)]
 	for entry := range entries {
 		entry.cancel()
@@ -187,7 +236,28 @@ func (workflow *GenerationService) cancelGenerationTask(taskID string) {
 	for entry := range preflightEntries {
 		entry.cancel()
 	}
-	workflow.generationCancelMu.Unlock()
+}
+
+func (workflow *GenerationService) markGenerationTaskDeleting(taskID string) func() {
+	taskID = strings.TrimSpace(taskID)
+	workflow.generationDeleteMu.Lock()
+	workflow.generationDeleting[taskID]++
+	workflow.generationDeleteMu.Unlock()
+	return func() {
+		workflow.generationDeleteMu.Lock()
+		workflow.generationDeleting[taskID]--
+		if workflow.generationDeleting[taskID] <= 0 {
+			delete(workflow.generationDeleting, taskID)
+		}
+		workflow.generationDeleteMu.Unlock()
+	}
+}
+
+func (workflow *GenerationService) generationTaskDeletionRequested(taskID string) bool {
+	workflow.generationDeleteMu.Lock()
+	deleting := workflow.generationDeleting[strings.TrimSpace(taskID)] > 0
+	workflow.generationDeleteMu.Unlock()
+	return deleting
 }
 
 // SetStylePromptLibrary wires the prompt library that owns style presets.

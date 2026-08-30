@@ -219,8 +219,11 @@ func (workflow *GenerationService) RetryGenerationTask(ctx context.Context, id s
 				return generationMessageResponse{}, http.StatusRequestTimeout, err
 			}
 			messageResponse := SubmittingGenerationResponse(task.ID, coregeneration.Kind(payload.Kind))
-			clearedState, claimed, claimErr := workflow.generationTasks.ClaimFailedCodexRetry(task.ID, messageResponse.Message)
+			clearedState, claimedCtx, releaseClaimedCtx, claimed, claimErr := workflow.claimFailedCodexRetryContext(ctx, task.ID, messageResponse.Message)
 			if claimErr != nil {
+				if ctx.Err() != nil {
+					return generationMessageResponse{}, http.StatusRequestTimeout, ctx.Err()
+				}
 				return generationMessageResponse{}, http.StatusInternalServerError, claimErr
 			}
 			if !claimed {
@@ -233,7 +236,6 @@ func (workflow *GenerationService) RetryGenerationTask(ctx context.Context, id s
 				}
 				return GenerationResponseFromTask(current), http.StatusConflict, nil
 			}
-			claimedCtx, releaseClaimedCtx := workflow.generationTaskContext(task.ID)
 			nextTask := GenerationTaskWithMessage(task, messageResponse)
 			nextTask.ProviderTaskID = ""
 			nextTask.RuntimeState = clearedState
@@ -630,8 +632,15 @@ func (workflow *GenerationService) DeleteGenerationTaskAsset(id string, assetInd
 
 // DeleteGenerationTask deletes a generation task and returns the updated task list.
 func (workflow *GenerationService) DeleteGenerationTask(id string) (generationTasksResponse, bool, error) {
-	workflow.cancelGenerationTask(id)
+	clearDeleting := workflow.markGenerationTaskDeleting(id)
+	defer clearDeleting()
+	if workflow.generationDeleteStartingHook != nil {
+		workflow.generationDeleteStartingHook()
+	}
+	workflow.generationCancelMu.Lock()
+	workflow.cancelGenerationTaskLocked(id)
 	deleted, err := workflow.generationTasks.Delete(id)
+	workflow.generationCancelMu.Unlock()
 	if err != nil || !deleted {
 		return generationTasksResponse{}, deleted, err
 	}
@@ -907,7 +916,7 @@ func (workflow *GenerationService) completeSubmittedGeneration(
 	projectID string,
 	conversationID string,
 ) {
-	if ctx.Err() != nil {
+	if ctx.Err() != nil || workflow.generationTaskDeletionRequested(task.ID) {
 		return
 	}
 	runningTask := task
@@ -925,7 +934,7 @@ func (workflow *GenerationService) completeSubmittedGeneration(
 	}
 	workflow.syncGenerationNotificationTask(runningTask)
 	_ = workflow.generationTasks.RecordAttempt(task.ID, action, runningTask.Status, runningTask.Message, nil)
-	if ctx.Err() != nil {
+	if ctx.Err() != nil || workflow.generationTaskDeletionRequested(task.ID) {
 		return
 	}
 

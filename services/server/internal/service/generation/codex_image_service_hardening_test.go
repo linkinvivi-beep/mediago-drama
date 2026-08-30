@@ -430,6 +430,59 @@ func TestRetryCodexDeleteAfterClaimCancelsQueuedTurnWithoutProviderCall(t *testi
 	waitForGenerationCancelRegistry(t, workflow, first.ID, false)
 }
 
+func TestRetryCodexDeleteInClaimTransferWindowNeverCallsProvider(t *testing.T) {
+	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	task := testCodexGenerationTask("task-delete-claim-window", "failed")
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	provider := &quotaSafeCodexProvider{
+		started:          make(chan coregeneration.Request, 1),
+		generateResponse: completedCoreCodexResponse("must not run"),
+	}
+	workflow := NewGenerationService(nil, store, nil)
+	workflow.SetMediaLinkProviders(provider, &mediaLinkTestProvider{name: "h3"}, func(context.Context, string) (bool, string) { return true, "" })
+	claimed := make(chan struct{})
+	releaseClaim := make(chan struct{})
+	deleteStarting := make(chan struct{})
+	workflow.generationRetryClaimedHook = func() {
+		close(claimed)
+		<-releaseClaim
+	}
+	workflow.generationDeleteStartingHook = func() { close(deleteStarting) }
+	retryDone := make(chan struct{})
+	go func() {
+		_, _, _ = workflow.RetryGenerationTask(context.Background(), task.ID)
+		close(retryDone)
+	}()
+	<-claimed
+	deleteDone := make(chan struct{})
+	go func() {
+		_, _, _ = workflow.DeleteGenerationTask(task.ID)
+		close(deleteDone)
+	}()
+	<-deleteStarting
+	close(releaseClaim)
+	select {
+	case <-retryDone:
+	case <-time.After(time.Second):
+		t.Fatal("retry did not leave claim transfer window")
+	}
+	select {
+	case <-deleteDone:
+	case <-time.After(time.Second):
+		t.Fatal("delete did not finish")
+	}
+	time.Sleep(20 * time.Millisecond)
+	generate, _ := provider.counts()
+	if generate != 0 {
+		t.Fatalf("Generate calls = %d, want 0", generate)
+	}
+	if _, found, err := store.Get(task.ID); err != nil || found {
+		t.Fatalf("deleted task found=%v err=%v", found, err)
+	}
+}
+
 func TestCodexRecoveryCompletionClearsIdentityAndImportsOnce(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "settings.db")
 	store := NewGenerationTaskService(dbPath, nil)
