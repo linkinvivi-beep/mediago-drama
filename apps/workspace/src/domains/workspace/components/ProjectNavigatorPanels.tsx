@@ -8,7 +8,6 @@ import {
 	Download,
 	Image as ImageIcon,
 	Keyboard,
-	KeyRound,
 	Loader2,
 	Network,
 	ReceiptText,
@@ -591,9 +590,7 @@ const debugNavItem = (value: DebugTabValue): SettingsNavItem => {
 };
 
 const settingsNavGroups = (activeAgentBackendId = "codex"): SettingsNavGroup[] => {
-	const generationItems: SettingsNavItem[] = [
-		{ value: "api-keys", label: "API 密钥", icon: KeyRound },
-	];
+	const generationItems: SettingsNavItem[] = [];
 	if (activeAgentBackendId === "codex") {
 		generationItems.push({ value: "codex-access", label: "Codex 接入", icon: Network });
 	}

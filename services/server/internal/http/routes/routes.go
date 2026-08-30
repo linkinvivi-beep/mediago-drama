@@ -129,6 +129,7 @@ func registerSettingsRoutes(apiRoutes *gin.RouterGroup, handlers Handlers) {
 	apiRoutes.GET("/settings/jianying-draft", handlers.Settings.HandleJianyingDraftSettings)
 	apiRoutes.PUT("/settings/jianying-draft", handlers.Settings.HandlePutJianyingDraftSettings)
 	apiRoutes.GET("/settings/codex-account", handlers.Settings.HandleCodexAccount)
+	apiRoutes.GET("/settings/codex-image/preflight", handlers.Settings.HandleCodexImagePreflight)
 	apiRoutes.POST("/settings/codex-account/login", handlers.Settings.HandlePostCodexAccountLogin)
 	apiRoutes.GET("/settings/codex-account/login/:loginId", handlers.Settings.HandleCodexAccountLogin)
 	apiRoutes.DELETE("/settings/codex-account/login/:loginId", handlers.Settings.HandleDeleteCodexAccountLogin)

@@ -61,22 +61,18 @@ describe("SettingsSidebarPanel", () => {
 		expect(screen.queryByRole("button", { name: "打开 GitHub 页面" })).not.toBeInTheDocument();
 	});
 
-	it("shows API keys without the retired agent model profile entry", () => {
-		const onSelectTab = vi.fn();
-
+	it("hides legacy API key and agent model entries", () => {
 		render(
 			<SettingsSidebarPanel
 				activeTab="appearance"
 				isProjectSettings={false}
 				onBack={vi.fn()}
-				onSelectTab={onSelectTab}
+				onSelectTab={vi.fn()}
 			/>,
 		);
 
 		expect(screen.queryByRole("button", { name: "模型接入" })).toBeNull();
-
-		fireEvent.click(screen.getByRole("button", { name: "API 密钥" }));
-		expect(onSelectTab).toHaveBeenCalledWith("api-keys");
+		expect(screen.queryByRole("button", { name: "API 密钥" })).toBeNull();
 	});
 
 	it("shows the Codex access settings entry for Codex", () => {
@@ -140,8 +136,8 @@ describe("SettingsSidebarPanel", () => {
 			within(codexGroup as HTMLElement)
 				.getAllByRole("button")
 				.map((button) => button.textContent)
-				.slice(0, 4),
-		).toEqual(["API 密钥", "Codex 接入", "Codex 技能", "智能体指令"]);
+				.slice(0, 3),
+		).toEqual(["Codex 接入", "Codex 技能", "智能体指令"]);
 
 		rerender(
 			<SettingsSidebarPanel
@@ -157,8 +153,8 @@ describe("SettingsSidebarPanel", () => {
 			within(otherGroup as HTMLElement)
 				.getAllByRole("button")
 				.map((button) => button.textContent)
-				.slice(0, 3),
-		).toEqual(["API 密钥", "Codex 技能", "智能体指令"]);
+				.slice(0, 2),
+		).toEqual(["Codex 技能", "智能体指令"]);
 	});
 
 	it("shows the app updates settings entry", () => {
@@ -238,7 +234,7 @@ describe("SettingsSidebarPanel", () => {
 		expect(screen.getByText("项目设置")).toBeTruthy();
 		expect(screen.getByRole("button", { name: "常规" }).className).toContain("bg-ide-list-active");
 		expect(screen.getByRole("button", { name: "基础设置" })).toBeTruthy();
-		expect(screen.getByRole("button", { name: "API 密钥" })).toBeTruthy();
+		expect(screen.queryByRole("button", { name: "API 密钥" })).toBeNull();
 
 		fireEvent.click(screen.getByRole("button", { name: "基础设置" }));
 		expect(onSelectTab).toHaveBeenCalledWith("appearance");

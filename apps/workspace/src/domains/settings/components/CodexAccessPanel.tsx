@@ -1,4 +1,4 @@
-import { LogOut } from "lucide-react";
+import { CheckCircle2, CircleAlert, Image, Loader2, LogOut, RefreshCw } from "lucide-react";
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
 import useSWR, { useSWRConfig } from "swr";
@@ -8,13 +8,16 @@ import {
 	beginCodexAccountLogin,
 	cancelCodexAccountLogin,
 	codexAccountKey,
+	codexImagePreflightKey,
 	getCodexAccount,
 	getCodexAccountLogin,
+	getCodexImagePreflight,
 	logoutCodexAccount,
 } from "@/domains/settings/api/settings";
-import { CodexRelayPanel } from "@/domains/settings/components/CodexRelayPanel";
+import { SettingsPanelLayout } from "@/domains/settings/components/SettingsPanelLayout";
 import { useToast } from "@/hooks/useToast";
 import { confirmDialog } from "@/shared/components/callable/ConfirmDialog";
+import { Button } from "@/shared/components/ui/button";
 import { openExternalUrl } from "@/shared/desktop/actions";
 
 export const CodexAccessPanel: React.FC = () => {
@@ -26,13 +29,36 @@ export const CodexAccessPanel: React.FC = () => {
 		isLoading,
 		mutate,
 	} = useSWR(codexAccountKey, getCodexAccount);
+	const {
+		data: preflight,
+		error: preflightError,
+		isLoading: preflightLoading,
+		isValidating: preflightValidating,
+		mutate: mutatePreflight,
+	} = useSWR(codexImagePreflightKey, getCodexImagePreflight);
 	const [attempt, setAttempt] = useState<CodexLoginAttempt>();
 	const [busy, setBusy] = useState("");
+	const [refreshError, setRefreshError] = useState("");
 
 	const refreshAccount = useCallback(async () => {
-		await mutate();
+		await Promise.all([mutate(), mutatePreflight()]);
 		void mutateGlobal(isAgentRuntimeConfigKey, undefined, { revalidate: true });
-	}, [mutate, mutateGlobal]);
+	}, [mutate, mutateGlobal, mutatePreflight]);
+
+	const refreshReadiness = async () => {
+		setBusy("refresh");
+		setRefreshError("");
+		try {
+			await refreshAccount();
+			toast.success("Codex 生图检查完成");
+		} catch (error) {
+			const message = errorMessage(error);
+			setRefreshError(message);
+			toast.error("Codex 生图检查失败", { description: message });
+		} finally {
+			setBusy("");
+		}
+	};
 
 	useEffect(() => {
 		if (!attempt || attempt.status !== "pending") return;
@@ -105,6 +131,7 @@ export const CodexAccessPanel: React.FC = () => {
 		try {
 			const next = await logoutCodexAccount();
 			await mutate(next, false);
+			await mutatePreflight();
 			toast.success("已退出全局 Codex 账号");
 			return true;
 		} catch (error) {
@@ -127,32 +154,144 @@ export const CodexAccessPanel: React.FC = () => {
 
 	const loggedIn = account?.status === "loggedIn";
 	const pending = attempt?.status === "pending";
-	const status = isLoading
-		? ("loading" as const)
-		: accountError
-			? ("error" as const)
-			: loggedIn
-				? ("loggedIn" as const)
-				: pending
-					? ("pending" as const)
-					: ("loggedOut" as const);
+	const readiness = codexImageReadiness(preflight?.reason, preflight?.ready);
 
 	return (
-		<CodexRelayPanel
+		<SettingsPanelLayout
 			title="Codex 接入"
-			description="选择 ChatGPT 官方订阅，或通过中转平台接入 Codex。"
-			officialChannel={{
-				status,
-				email: account?.email,
-				detail: loggedIn ? `${planLabel(account.planType)} · ${account.codexHome}` : undefined,
-				busy: busy !== "",
-				onCancel: () => void cancelLogin(),
-				onLogin: () => void startLogin(),
-				onLogout: confirmLogout,
-				onReopen: () => void reopenLogin(),
-			}}
-		/>
+			description="复用本机 Codex 的全局 ChatGPT 登录，检查内置生图能力。"
+			icon={<Image className="size-4" />}
+			actions={
+				<Button
+					type="button"
+					variant="outline"
+					size="sm"
+					disabled={busy !== "" || preflightLoading || preflightValidating}
+					onClick={() => void refreshReadiness()}
+				>
+					{busy === "refresh" || preflightValidating ? (
+						<Loader2 className="animate-spin" />
+					) : (
+						<RefreshCw />
+					)}
+					刷新并测试
+				</Button>
+			}
+		>
+			<div className="mx-auto flex w-full max-w-3xl flex-col gap-4">
+				<section className="rounded-lg border border-border bg-card p-4">
+					<div className="flex flex-wrap items-start justify-between gap-3">
+						<div>
+							<h3 className="text-sm font-semibold text-foreground">共享 ChatGPT 登录</h3>
+							{isLoading ? (
+								<p className="mt-1 text-sm text-muted-foreground">正在读取全局账号…</p>
+							) : accountError ? (
+								<p className="mt-1 text-sm text-destructive">无法读取全局账号</p>
+							) : loggedIn ? (
+								<>
+									<p className="mt-1 text-sm text-foreground">
+										{account?.email || "已登录 ChatGPT"}
+									</p>
+									<p className="mt-1 text-xs text-muted-foreground">
+										{planLabel(account?.planType)} · {account?.codexHome}
+									</p>
+								</>
+							) : (
+								<p className="mt-1 text-sm text-muted-foreground">尚未登录 ChatGPT</p>
+							)}
+						</div>
+						<div className="flex flex-wrap gap-2">
+							{loggedIn ? (
+								<Button
+									type="button"
+									variant="outline"
+									size="sm"
+									onClick={confirmLogout}
+									disabled={busy !== ""}
+								>
+									<LogOut />
+									退出全局账号
+								</Button>
+							) : pending ? (
+								<>
+									<Button
+										type="button"
+										variant="outline"
+										size="sm"
+										onClick={() => void reopenLogin()}
+									>
+										重新打开浏览器
+									</Button>
+									<Button
+										type="button"
+										variant="ghost"
+										size="sm"
+										onClick={() => void cancelLogin()}
+										disabled={busy !== ""}
+									>
+										取消登录
+									</Button>
+								</>
+							) : (
+								<Button
+									type="button"
+									size="sm"
+									onClick={() => void startLogin()}
+									disabled={busy !== ""}
+								>
+									使用 ChatGPT 登录
+								</Button>
+							)}
+						</div>
+					</div>
+				</section>
+
+				<section className="rounded-lg border border-border bg-card p-4">
+					<div className="flex items-start gap-3">
+						{preflightLoading ? (
+							<Loader2 className="mt-0.5 size-5 animate-spin text-muted-foreground" />
+						) : readiness.ready ? (
+							<CheckCircle2 className="mt-0.5 size-5 text-emerald-500" />
+						) : (
+							<CircleAlert className="mt-0.5 size-5 text-amber-500" />
+						)}
+						<div>
+							<h3 className="text-sm font-semibold text-foreground">
+								{preflightLoading ? "正在检查 Codex 生图能力…" : readiness.label}
+							</h3>
+							<p className="mt-1 text-xs text-muted-foreground">
+								生图会使用当前 ChatGPT 账号的 Codex 配额。
+							</p>
+							{preflightError && !refreshError ? (
+								<p className="mt-2 text-xs text-destructive">
+									检查失败：{errorMessage(preflightError)}
+								</p>
+							) : null}
+							{refreshError ? (
+								<p className="mt-2 text-xs text-destructive">检查失败：{refreshError}</p>
+							) : null}
+						</div>
+					</div>
+				</section>
+			</div>
+		</SettingsPanelLayout>
 	);
+};
+
+const codexImageReadiness = (reason?: string, ready?: boolean) => {
+	if (ready || reason === "ready") return { ready: true, label: "Codex 生图已就绪" };
+	switch (reason) {
+		case "not_logged_in":
+			return { ready: false, label: "登录 ChatGPT 后可检查生图能力" };
+		case "cli_unavailable":
+			return { ready: false, label: "内置 Codex CLI 不可用" };
+		case "capability_disabled":
+			return { ready: false, label: "当前账号未启用 Codex 生图" };
+		case "capability_unavailable":
+			return { ready: false, label: "无法读取 Codex 生图能力" };
+		default:
+			return { ready: false, label: "Codex 生图尚未就绪" };
+	}
 };
 
 const planLabel = (value?: string) => {
