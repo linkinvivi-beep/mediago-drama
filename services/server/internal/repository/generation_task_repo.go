@@ -741,6 +741,34 @@ func (repo *GenerationTaskRepository) RecordGenerationTaskError(
 	return nil
 }
 
+// FailGenerationTaskPreservingRecovery marks one active task failed without
+// replacing provider/runtime recovery identity written by progress checkpoints.
+func (repo *GenerationTaskRepository) FailGenerationTaskPreservingRecovery(
+	id string,
+	message string,
+	errorMessage string,
+	errorCode string,
+	errorType string,
+	retryable bool,
+	updatedAt string,
+) (bool, error) {
+	result := repo.db.Model(&domain.GenerationTaskModel{}).
+		Where("id = ? AND status NOT IN ?", strings.TrimSpace(id), []string{"completed", "failed"}).
+		Updates(map[string]any{
+			"status":     "failed",
+			"message":    strings.TrimSpace(message),
+			"error":      strings.TrimSpace(errorMessage),
+			"error_code": strings.TrimSpace(errorCode),
+			"error_type": strings.TrimSpace(errorType),
+			"retryable":  retryable,
+			"updated_at": domain.TimeFromString(updatedAt),
+		})
+	if result.Error != nil {
+		return false, fmt.Errorf("failing generation task while preserving recovery state: %w", result.Error)
+	}
+	return result.RowsAffected == 1, nil
+}
+
 // ClaimFailedGenerationTask atomically transitions one existing failed row to
 // submitting while clearing provider recovery identity. Concurrent callers can
 // observe at most one successful claim.

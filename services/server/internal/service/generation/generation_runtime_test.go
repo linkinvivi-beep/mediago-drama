@@ -1221,7 +1221,10 @@ func TestGenerationProgressRuntimeStatePersistsBeforeProviderDisconnects(t *test
 	}
 
 	close(provider.disconnect)
-	waitForGenerationTask(t, store, task.ID, func(task GenerationTaskRecord) bool { return task.Status == "failed" })
+	failed := waitForGenerationTask(t, store, task.ID, func(task GenerationTaskRecord) bool { return task.Status == "failed" })
+	if failed.ProviderTaskID != codexImageResponseIDPrefix+"thread-progress" || failed.RuntimeState != wantState {
+		t.Fatalf("failed task recovery identity = %q/%+v, want latest checkpoint", failed.ProviderTaskID, failed.RuntimeState)
+	}
 }
 
 func TestGenerationProgressRuntimeStateSurvivesReconnectHandoff(t *testing.T) {
@@ -1246,6 +1249,150 @@ func TestGenerationProgressRuntimeStateSurvivesReconnectHandoff(t *testing.T) {
 	}
 	if stored.RuntimeState != state {
 		t.Fatalf("RuntimeState = %+v, want %+v", stored.RuntimeState, state)
+	}
+}
+
+func TestCodexCheckpointSurvivesShutdownAndRestartsWithGet(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	task := testCodexGenerationTask("task-shutdown-recovery", "submitted")
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	provider := &metadataProgressDisconnectProvider{
+		progressPersisted: make(chan struct{}),
+		disconnect:        make(chan struct{}),
+	}
+	parent, shutdown := context.WithCancel(context.Background())
+	workflow := NewGenerationService(nil, store, nil)
+	workflow.SetGenerationRuntimeContext(parent)
+	workflow.launchSubmittedGeneration(task, provider, codexImageRequest(task.ID), "create", "", "")
+	select {
+	case <-provider.progressPersisted:
+	case <-time.After(time.Second):
+		t.Fatal("metadata checkpoint was not emitted")
+	}
+	shutdown()
+	waitForGenerationCancelRegistry(t, workflow, task.ID, false)
+
+	checkpointed, found, err := store.Get(task.ID)
+	if err != nil || !found {
+		t.Fatalf("checkpointed Get() = found %v, err %v", found, err)
+	}
+	wantState := GenerationTaskRuntimeState{
+		CodexThreadID: "thread-progress",
+		CodexTurnID:   "turn-progress",
+		CodexItemID:   "item-progress",
+	}
+	if checkpointed.Status != "importing" || checkpointed.ProviderTaskID != codexImageResponseIDPrefix+"thread-progress" || checkpointed.RuntimeState != wantState {
+		t.Fatalf("checkpointed task = status %q, provider id %q, state %+v", checkpointed.Status, checkpointed.ProviderTaskID, checkpointed.RuntimeState)
+	}
+
+	restartedStore := NewGenerationTaskService(dbPath, nil)
+	recoveryProvider := &quotaSafeCodexProvider{getResponse: completedCoreCodexResponseForThread("thread-progress", "shutdown recovered")}
+	restarted := NewGenerationService(nil, restartedStore, media.NewMediaAssets(dbPath, filepath.Join(root, "media")))
+	restarted.SetMediaLinkProviders(recoveryProvider, &mediaLinkTestProvider{name: "h3"}, func(context.Context, string) (bool, string) { return true, "" })
+	restarted.PollPendingGenerationTasks(context.Background(), 10)
+	recovered, found, err := restartedStore.Get(task.ID)
+	if err != nil || !found || recovered.Status != "completed" || len(recovered.Assets) != 1 {
+		t.Fatalf("recovered task = found %v, err %v, status %q, assets %d", found, err, recovered.Status, len(recovered.Assets))
+	}
+	generateCalls, getCalls := recoveryProvider.counts()
+	if generateCalls != 0 || getCalls != 1 {
+		t.Fatalf("restart provider Generate/Get = %d/%d, want 0/1", generateCalls, getCalls)
+	}
+}
+
+func TestPollPendingCodexImageSkipsLiveLocalOwnerAfterWorkerInterval(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	task := testCodexGenerationTask("task-live-owner", "submitted")
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	provider := &liveOwnedCodexProvider{
+		checkpoint: make(chan struct{}),
+		release:    make(chan struct{}),
+		response:   completedCoreCodexResponseForThread("thread-live", "live completed"),
+	}
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	workflow.SetMediaLinkProviders(provider, &mediaLinkTestProvider{name: "h3"}, func(context.Context, string) (bool, string) { return true, "" })
+	workflow.launchSubmittedGeneration(task, provider, codexImageRequest(task.ID), "create", "", "")
+	select {
+	case <-provider.checkpoint:
+	case <-time.After(time.Second):
+		t.Fatal("live Generate did not emit a checkpoint")
+	}
+
+	time.Sleep(2100 * time.Millisecond)
+	workflow.PollPendingGenerationTasks(context.Background(), 10)
+	if got := provider.getCalls.Load(); got != 0 {
+		t.Fatalf("Get calls while local Generate owns task = %d, want 0", got)
+	}
+	close(provider.release)
+	waitForGenerationTask(t, store, task.ID, func(task GenerationTaskRecord) bool { return task.Status == "completed" })
+	waitForGenerationCancelRegistry(t, workflow, task.ID, false)
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 1 {
+		t.Fatalf("imported media assets = %d, want one", len(assets))
+	}
+	if provider.generateCalls.Load() != 1 || provider.getCalls.Load() != 0 {
+		t.Fatalf("provider Generate/Get = %d/%d, want 1/0", provider.generateCalls.Load(), provider.getCalls.Load())
+	}
+}
+
+func TestCodexPollCompletionAfterDeleteDoesNotImportOrResurrect(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	task := testCodexGenerationTask("task-delete-poll", "waiting_reconnect")
+	task.ProviderTaskID = codexImageResponseIDPrefix + "thread-delete"
+	task.RuntimeState = GenerationTaskRuntimeState{CodexThreadID: "thread-delete"}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	provider := &blockingCodexPollProvider{
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+		response: completedCoreCodexResponseForThread("thread-delete", "deleted result"),
+	}
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	workflow.SetMediaLinkProviders(provider, &mediaLinkTestProvider{name: "h3"}, func(context.Context, string) (bool, string) { return true, "" })
+	done := make(chan struct{})
+	go func() {
+		workflow.PollGenerationTask(context.Background(), task)
+		close(done)
+	}()
+	select {
+	case <-provider.started:
+	case <-time.After(time.Second):
+		t.Fatal("provider Get did not start")
+	}
+	if _, deleted, err := workflow.DeleteGenerationTask(task.ID); err != nil || !deleted {
+		t.Fatalf("DeleteGenerationTask() = deleted %v, err %v", deleted, err)
+	}
+	close(provider.release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("poll did not finish")
+	}
+	if _, found, err := store.Get(task.ID); err != nil || found {
+		t.Fatalf("deleted task found = %v, err %v", found, err)
+	}
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("media assets imported after delete = %d, want zero", len(assets))
 	}
 }
 
@@ -2485,6 +2632,75 @@ type metadataProgressDisconnectProvider struct {
 
 type reconnectingMetadataProgressProvider struct {
 	state GenerationTaskRuntimeState
+}
+
+type liveOwnedCodexProvider struct {
+	checkpoint    chan struct{}
+	release       chan struct{}
+	response      coregeneration.Response
+	generateCalls atomic.Int32
+	getCalls      atomic.Int32
+}
+
+type blockingCodexPollProvider struct {
+	started  chan struct{}
+	release  chan struct{}
+	response coregeneration.Response
+}
+
+func (*blockingCodexPollProvider) Name() string { return "blocking-codex-poll" }
+
+func (*blockingCodexPollProvider) Generate(context.Context, coregeneration.Request) (coregeneration.Response, error) {
+	return coregeneration.Response{}, fmt.Errorf("unexpected Generate call")
+}
+
+func (provider *blockingCodexPollProvider) Get(ctx context.Context, _ string) (coregeneration.Response, error) {
+	close(provider.started)
+	select {
+	case <-provider.release:
+		return provider.response, nil
+	case <-ctx.Done():
+		return coregeneration.Response{}, ctx.Err()
+	}
+}
+
+func (*liveOwnedCodexProvider) Name() string { return "live-owned-codex" }
+
+func (provider *liveOwnedCodexProvider) Generate(ctx context.Context, request coregeneration.Request) (coregeneration.Response, error) {
+	provider.generateCalls.Add(1)
+	callback, ok := coregeneration.ProgressCallbackFromOptions(request.Options)
+	if !ok {
+		return coregeneration.Response{}, fmt.Errorf("progress callback is missing")
+	}
+	callback(ctx, coregeneration.ProgressEvent{Response: coregeneration.Response{
+		ID:     codexImageResponseIDPrefix + "thread-live",
+		Status: "running",
+		Metadata: map[string]any{"runtime_state": GenerationTaskRuntimeState{
+			CodexThreadID: "thread-live",
+			CodexTurnID:   "turn-live",
+		}},
+	}})
+	close(provider.checkpoint)
+	select {
+	case <-provider.release:
+		return provider.response, nil
+	case <-ctx.Done():
+		return coregeneration.Response{}, ctx.Err()
+	}
+}
+
+func (provider *liveOwnedCodexProvider) Get(context.Context, string) (coregeneration.Response, error) {
+	provider.getCalls.Add(1)
+	return provider.response, nil
+}
+
+func completedCoreCodexResponseForThread(threadID string, revised string) coregeneration.Response {
+	response := completedCoreCodexResponse(revised)
+	response.ID = codexImageResponseIDPrefix + threadID
+	state := response.Metadata["runtime_state"].(GenerationTaskRuntimeState)
+	state.CodexThreadID = threadID
+	response.Metadata["runtime_state"] = state
+	return response
 }
 
 func (*reconnectingMetadataProgressProvider) Name() string { return "metadata-progress-reconnect" }

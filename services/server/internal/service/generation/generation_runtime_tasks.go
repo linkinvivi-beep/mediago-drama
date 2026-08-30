@@ -741,6 +741,18 @@ func (workflow *GenerationService) PollGenerationTask(ctx context.Context, task 
 	if status == "completed" || status == "failed" {
 		return
 	}
+	if workflow.generationTaskLocallyOwned(task.ID) {
+		return
+	}
+	latestTask, found, err := workflow.generationTasks.Get(task.ID)
+	if err != nil || !found {
+		return
+	}
+	task = latestTask
+	status = strings.ToLower(strings.TrimSpace(task.Status))
+	if status == "completed" || status == "failed" || workflow.generationTaskLocallyOwned(task.ID) {
+		return
+	}
 	route, err := RouteForStoredGenerationTask(task.ID, task, true)
 	if err != nil {
 		_ = workflow.generationTasks.RecordAttempt(task.ID, "poll", task.Status, "后台轮询的供应商未配置。", err)
@@ -781,13 +793,21 @@ func (workflow *GenerationService) PollGenerationTask(ctx context.Context, task 
 
 	response, err := provider.Get(pollCtx, pollID)
 	if err != nil {
+		latestTask, found, getErr := workflow.generationTasks.Get(task.ID)
+		if getErr != nil || !found {
+			return
+		}
+		latestStatus := strings.ToLower(strings.TrimSpace(latestTask.Status))
+		if latestStatus == "completed" || latestStatus == "failed" || workflow.generationTaskLocallyOwned(task.ID) {
+			return
+		}
+		task = latestTask
 		_ = workflow.generationTasks.RecordError(task.ID, err)
 		if route.Kind == coregeneration.KindImage &&
 			isExpiredBackgroundImageGeneration(task, time.Now().UTC()) {
 			timeoutErr := backgroundImageGenerationTimeoutError()
 			messageResponse := FailedGenerationResponse(task.ID, timeoutErr)
-			failedTask := GenerationTaskWithMessage(task, messageResponse)
-			existed, saveErr := workflow.generationTasks.UpsertExisting(failedTask)
+			failedTask, existed, saveErr := workflow.generationTasks.FailExistingPreservingRecovery(task.ID, messageResponse)
 			if saveErr != nil {
 				_ = workflow.generationTasks.RecordAttempt(task.ID, "poll", task.Status, "后台状态检查超时结果保存失败。", saveErr)
 				return
@@ -802,8 +822,26 @@ func (workflow *GenerationService) PollGenerationTask(ctx context.Context, task 
 		_ = workflow.generationTasks.RecordAttempt(task.ID, "poll", task.Status, "后台状态检查失败。", err)
 		return
 	}
+	latestTask, found, err = workflow.generationTasks.Get(task.ID)
+	if err != nil || !found {
+		return
+	}
+	latestStatus := strings.ToLower(strings.TrimSpace(latestTask.Status))
+	if latestStatus == "completed" || latestStatus == "failed" || workflow.generationTaskLocallyOwned(task.ID) {
+		return
+	}
+	task = latestTask
 
 	response = workflow.cacheGenerationResponseAssetsForTask(ctx, response, task)
+	latestTask, found, err = workflow.generationTasks.Get(task.ID)
+	if err != nil || !found {
+		return
+	}
+	latestStatus = strings.ToLower(strings.TrimSpace(latestTask.Status))
+	if latestStatus == "completed" || latestStatus == "failed" || workflow.generationTaskLocallyOwned(task.ID) {
+		return
+	}
+	task = latestTask
 	messageResponse := GenerationResponseFromCore(response, task.Kind)
 	messageResponse.ID = task.ID
 	// An image task recovered by background polling must not spin forever if the provider
@@ -952,10 +990,11 @@ func (workflow *GenerationService) completeSubmittedGeneration(
 		generationProviderLogContext{Action: action, TaskID: task.ID},
 	)
 	if err != nil {
+		if ctx.Err() != nil || workflow.generationTaskDeletionRequested(task.ID) {
+			return
+		}
 		messageResponse := FailedGenerationResponse(task.ID, err)
-		failedTask := GenerationTaskWithMessage(runningTask, messageResponse)
-		failedTask = workflow.taskWithCurrentProgressAssets(task.ID, failedTask)
-		failedExisted, saveErr := workflow.generationTasks.UpsertExisting(failedTask)
+		failedTask, failedExisted, saveErr := workflow.generationTasks.FailExistingPreservingRecovery(task.ID, messageResponse)
 		if saveErr != nil {
 			slog.Error("generation task failure could not be saved", "task_id", task.ID, "error", saveErr)
 			return

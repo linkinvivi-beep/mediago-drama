@@ -129,6 +129,13 @@ func (workflow *GenerationService) generationTaskContext(taskID string) (context
 	return ctx, workflow.generationTaskContextRelease(taskID, entry)
 }
 
+func (workflow *GenerationService) generationTaskLocallyOwned(taskID string) bool {
+	workflow.generationCancelMu.Lock()
+	owned := len(workflow.generationCancels[strings.TrimSpace(taskID)]) > 0
+	workflow.generationCancelMu.Unlock()
+	return owned
+}
+
 func (workflow *GenerationService) registerGenerationTaskContextLocked(taskID string) (context.Context, *generationTaskCancellation) {
 	parent := workflow.generationRootCtx
 	if parent == nil {

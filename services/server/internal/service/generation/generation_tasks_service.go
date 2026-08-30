@@ -837,6 +837,37 @@ func (service *GenerationTaskService) UpsertExisting(task GenerationTaskRecord) 
 	return service.upsertTask(task, true, true)
 }
 
+// FailExistingPreservingRecovery marks one active row failed while leaving the
+// latest provider task ID, runtime state, and cached progress assets untouched.
+func (service *GenerationTaskService) FailExistingPreservingRecovery(id string, response GenerationMessageResponse) (GenerationTaskRecord, bool, error) {
+	if service.initErr != nil {
+		return GenerationTaskRecord{}, false, service.initErr
+	}
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	updated, err := service.repo.FailGenerationTaskPreservingRecovery(
+		id,
+		response.Message,
+		generationTaskErrorFromResponse(response),
+		response.ErrorCode,
+		response.ErrorType,
+		response.Retryable,
+		timestamp.NowRFC3339Nano(),
+	)
+	if err != nil || !updated {
+		return GenerationTaskRecord{}, updated, err
+	}
+	model, err := service.repo.GetGenerationTask(id)
+	if err != nil {
+		return GenerationTaskRecord{}, false, err
+	}
+	task, err := generationTaskRecordFromModel(model)
+	if err != nil {
+		return GenerationTaskRecord{}, false, err
+	}
+	return task, true, nil
+}
+
 // ClaimFailedCodexRetry is an existing-row-only compare-and-swap claim. It
 // preserves non-Codex runtime fields and revisedPrompt while clearing stale
 // recovery identity before a new paid turn can launch.
