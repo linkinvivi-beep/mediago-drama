@@ -103,6 +103,12 @@ func (session *Session) initialize(ctx context.Context) error {
 // Call sends one request and waits for its matching response.
 func (session *Session) Call(ctx context.Context, method string, params any, output any) error {
 	session.writeMu.Lock()
+	// This check is the cancellation boundary for submission. Cancellation after
+	// it races with the already-authorized write, but a pre-canceled call never writes.
+	if err := ctx.Err(); err != nil {
+		session.writeMu.Unlock()
+		return err
+	}
 	session.nextID++
 	id := session.nextID
 	response := make(chan Message, 1)
@@ -127,6 +133,9 @@ func (session *Session) Call(ctx context.Context, method string, params any, out
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-session.readDone:
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		select {
 		case message = <-response:
 		default:
@@ -163,6 +172,9 @@ func safeRPCMessage(value string) string {
 // Next returns the next queued or newly received app-server message.
 func (session *Session) Next(ctx context.Context) (Message, error) {
 	for {
+		if err := ctx.Err(); err != nil {
+			return Message{}, err
+		}
 		if message, ok := session.popPending(); ok {
 			return message, nil
 		}
@@ -172,6 +184,9 @@ func (session *Session) Next(ctx context.Context) (Message, error) {
 		case <-session.notify:
 			continue
 		case <-session.readDone:
+			if err := ctx.Err(); err != nil {
+				return Message{}, err
+			}
 			if message, ok := session.popPending(); ok {
 				return message, nil
 			}
@@ -215,7 +230,7 @@ func (session *Session) writeUnlocked(value any) error {
 
 func (session *Session) route(message Message) {
 	var responseID int
-	if len(message.ID) > 0 && json.Unmarshal(message.ID, &responseID) == nil {
+	if message.Method == "" && (len(message.Result) > 0 || message.Error != nil) && len(message.ID) > 0 && json.Unmarshal(message.ID, &responseID) == nil {
 		session.stateMu.Lock()
 		waiter := session.waiters[responseID]
 		session.stateMu.Unlock()

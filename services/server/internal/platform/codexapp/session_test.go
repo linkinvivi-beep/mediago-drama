@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -194,6 +195,158 @@ done
 	if nextErr := <-nextResult; !errors.Is(nextErr, context.Canceled) {
 		t.Fatalf("Next() error = %v, want context.Canceled", nextErr)
 	}
+}
+
+func TestSessionPreCanceledCallWritesNoRequest(t *testing.T) {
+	binPath := writeFakeAppServer(t, `#!/bin/sh
+canceled_requests=0
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*) echo '{"id":1,"result":{}}' ;;
+    *'"method":"test/canceled"'*) canceled_requests=$((canceled_requests + 1)) ;;
+    *'"method":"test/count"'*)
+      case "$line" in
+        *'"id":2'*) echo "{\"id\":2,\"result\":{\"count\":$canceled_requests}}" ;;
+        *'"id":3'*) echo "{\"id\":3,\"result\":{\"count\":$canceled_requests}}" ;;
+      esac
+      ;;
+  esac
+done
+`)
+	session, err := Start(context.Background(), binPath)
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer session.Close()
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := session.Call(canceled, "test/canceled", struct{}{}, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("pre-canceled Call() error = %v, want context.Canceled", err)
+	}
+	var response struct {
+		Count int `json:"count"`
+	}
+	if err := session.Call(context.Background(), "test/count", struct{}{}, &response); err != nil {
+		t.Fatalf("count Call() error = %v", err)
+	}
+	if response.Count != 0 {
+		t.Fatalf("canceled request count = %d, want 0", response.Count)
+	}
+}
+
+func TestSessionParentCancellationIsReturnedInsteadOfEOF(t *testing.T) {
+	binPath := writeFakeAppServer(t, `#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*) echo '{"id":1,"result":{}}' ;;
+  esac
+done
+`)
+	parent, cancel := context.WithCancel(context.Background())
+	session, err := Start(parent, binPath)
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer session.Close()
+	cancel()
+	<-session.readDone
+
+	if _, err := session.Next(parent); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Next() after parent cancellation error = %v, want context.Canceled", err)
+	}
+	if err := session.Call(parent, "test/never-written", struct{}{}, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Call() after parent cancellation error = %v, want context.Canceled", err)
+	}
+}
+
+func TestSessionCallReadDonePrefersContextCancellation(t *testing.T) {
+	binPath := writeFakeAppServer(t, `#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*) echo '{"id":1,"result":{}}' ;;
+    *'"method":"test/block"'*) echo '{"method":"test/received","params":{}}' ;;
+    *'"method":"test/exit"'*) exit 0 ;;
+  esac
+done
+`)
+	session, err := Start(context.Background(), binPath)
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer session.Close()
+
+	callContext := &controlledErrorContext{}
+	callResult := make(chan error, 1)
+	go func() {
+		callResult <- session.Call(callContext, "test/block", struct{}{}, nil)
+	}()
+	message, err := session.Next(context.Background())
+	if err != nil || message.Method != "test/received" {
+		t.Fatalf("Next() = %#v, %v, want test/received", message, err)
+	}
+	callContext.setError(context.Canceled)
+	_ = session.Call(context.Background(), "test/exit", struct{}{}, nil)
+	if err := <-callResult; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Call() readDone error = %v, want context.Canceled", err)
+	}
+}
+
+func TestSessionServerRequestWithResponseIDCollisionRemainsPending(t *testing.T) {
+	binPath := writeFakeAppServer(t, `#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*) echo '{"id":1,"result":{}}' ;;
+    *'"method":"test/collision"'*)
+      echo '{"id":2,"method":"server/request","params":{"question":"confirm"}}'
+      echo '{"id":2,"result":{"value":"done"}}'
+      ;;
+  esac
+done
+`)
+	session, err := Start(context.Background(), binPath)
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer session.Close()
+
+	var response struct {
+		Value string `json:"value"`
+	}
+	if err := session.Call(context.Background(), "test/collision", struct{}{}, &response); err != nil {
+		t.Fatalf("Call() error = %v", err)
+	}
+	if response.Value != "done" {
+		t.Fatalf("Call() response = %#v", response)
+	}
+	message, err := session.Next(context.Background())
+	if err != nil {
+		t.Fatalf("Next() error = %v", err)
+	}
+	if message.Method != "server/request" || string(message.ID) != "2" {
+		t.Fatalf("Next() = %#v, want colliding server request", message)
+	}
+}
+
+type controlledErrorContext struct {
+	mu  sync.Mutex
+	err error
+}
+
+func (*controlledErrorContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (*controlledErrorContext) Done() <-chan struct{}       { return nil }
+func (*controlledErrorContext) Value(any) any               { return nil }
+
+func (ctx *controlledErrorContext) Err() error {
+	ctx.mu.Lock()
+	defer ctx.mu.Unlock()
+	return ctx.err
+}
+
+func (ctx *controlledErrorContext) setError(err error) {
+	ctx.mu.Lock()
+	ctx.err = err
+	ctx.mu.Unlock()
 }
 
 func writeFakeAppServer(t *testing.T, script string) string {
