@@ -85,6 +85,7 @@ func GenerationResponseFromCore(response coregeneration.Response, kind string) G
 		message += " 本地素材缓存失败：" + strings.Join(warnings, "；")
 	}
 
+	runtimeState, _ := response.Metadata["runtime_state"].(GenerationTaskRuntimeState)
 	return GenerationMessageResponse{
 		ID:      ValueOrFallback(response.ID, shared.MustRandomID("generation")),
 		Role:    "assistant",
@@ -99,10 +100,11 @@ func GenerationResponseFromCore(response coregeneration.Response, kind string) G
 			ReasoningTokens: response.Usage.ReasoningTokens,
 			CachedTokens:    response.Usage.CachedTokens,
 		},
-		Error:     errorMessage,
-		ErrorCode: StringFromMetadata(response.Metadata, "error_code"),
-		ErrorType: StringFromMetadata(response.Metadata, "error_type"),
-		Retryable: BoolFromMetadata(response.Metadata, "retryable"),
+		RuntimeState: runtimeState,
+		Error:        errorMessage,
+		ErrorCode:    StringFromMetadata(response.Metadata, "error_code"),
+		ErrorType:    StringFromMetadata(response.Metadata, "error_type"),
+		Retryable:    BoolFromMetadata(response.Metadata, "retryable"),
 	}
 }
 
@@ -240,17 +242,18 @@ func SubmittedGenerationResponse(id string, kind coregeneration.Kind) Generation
 // GenerationResponseFromTask maps one stored task to a message response.
 func GenerationResponseFromTask(task GenerationTaskRecord) GenerationMessageResponse {
 	return GenerationMessageResponse{
-		ID:        task.ID,
-		Role:      "assistant",
-		Status:    task.Status,
-		Message:   task.Message,
-		Text:      task.Text,
-		Assets:    task.Assets,
-		Usage:     task.Usage,
-		Error:     task.Error,
-		ErrorCode: task.ErrorCode,
-		ErrorType: task.ErrorType,
-		Retryable: task.Retryable,
+		ID:           task.ID,
+		Role:         "assistant",
+		Status:       task.Status,
+		Message:      task.Message,
+		Text:         task.Text,
+		Assets:       task.Assets,
+		Usage:        task.Usage,
+		RuntimeState: task.RuntimeState,
+		Error:        task.Error,
+		ErrorCode:    task.ErrorCode,
+		ErrorType:    task.ErrorType,
+		Retryable:    task.Retryable,
 	}
 }
 
@@ -626,15 +629,16 @@ func GenerationTaskFromMessage(
 			generationParamsWithAssetTitle(request.Params, assetTitle),
 			request.ReferenceBindings,
 		),
-		Status:    response.Status,
-		Message:   response.Message,
-		Text:      response.Text,
-		Assets:    response.Assets,
-		Usage:     response.Usage,
-		Error:     responseError,
-		ErrorCode: response.ErrorCode,
-		ErrorType: response.ErrorType,
-		Retryable: response.Retryable,
+		Status:       response.Status,
+		Message:      response.Message,
+		Text:         response.Text,
+		Assets:       response.Assets,
+		Usage:        response.Usage,
+		Error:        responseError,
+		ErrorCode:    response.ErrorCode,
+		ErrorType:    response.ErrorType,
+		Retryable:    response.Retryable,
+		RuntimeState: response.RuntimeState,
 	}
 }
 
@@ -763,9 +767,10 @@ func GenerationTaskWithMessage(task GenerationTaskRecord, response GenerationMes
 	if strings.TrimSpace(task.ID) == "" {
 		task.ID = response.ID
 	}
-	if task.ProviderTaskID == "" && task.Kind == string(coregeneration.KindVideo) {
+	if task.ProviderTaskID == "" && (task.Kind == string(coregeneration.KindVideo) || task.RouteID == coregeneration.RouteCodexImage) {
 		task.ProviderTaskID = generationProviderTaskIDFromMessageID(response.ID, task.ID)
 	}
+	task.RuntimeState = mergeGenerationTaskRuntimeState(task.RuntimeState, response.RuntimeState)
 	task.Status = response.Status
 	task.Message = response.Message
 	task.Text = response.Text
@@ -864,10 +869,38 @@ func IsActiveGenerationStatus(status string) bool {
 }
 
 func generationProviderTaskIDForResponse(route coregeneration.ModelRoute, response GenerationMessageResponse) string {
+	if route.ID == coregeneration.RouteCodexImage {
+		return generationProviderTaskIDFromMessageID(response.ID, "")
+	}
 	if route.Kind != coregeneration.KindVideo || !route.Async {
 		return ""
 	}
 	return generationProviderTaskIDFromMessageID(response.ID, "")
+}
+
+func mergeGenerationTaskRuntimeState(current GenerationTaskRuntimeState, update GenerationTaskRuntimeState) GenerationTaskRuntimeState {
+	if update.CodexThreadID != "" {
+		current.CodexThreadID = update.CodexThreadID
+	}
+	if update.CodexTurnID != "" {
+		current.CodexTurnID = update.CodexTurnID
+	}
+	if update.CodexItemID != "" {
+		current.CodexItemID = update.CodexItemID
+	}
+	if update.RevisedPrompt != "" {
+		current.RevisedPrompt = update.RevisedPrompt
+	}
+	if update.SavedPath != "" {
+		current.SavedPath = update.SavedPath
+	}
+	if update.ComfyPromptID != "" {
+		current.ComfyPromptID = update.ComfyPromptID
+	}
+	if update.SubmittedAt != "" {
+		current.SubmittedAt = update.SubmittedAt
+	}
+	return current
 }
 
 func generationProviderTaskIDFromMessageID(messageID string, localID string) string {

@@ -205,17 +205,18 @@ type ImportGenerationMediaAssetsRequest struct {
 
 // GenerationMessageResponse is returned by generation create/poll/retry calls.
 type GenerationMessageResponse struct {
-	ID        string            `json:"id"`
-	Role      string            `json:"role"`
-	Status    string            `json:"status"`
-	Message   string            `json:"message"`
-	Text      string            `json:"text,omitempty"`
-	Assets    []GenerationAsset `json:"assets"`
-	Usage     GenerationUsage   `json:"usage"`
-	Error     string            `json:"error,omitempty"`
-	ErrorCode string            `json:"errorCode,omitempty"`
-	ErrorType string            `json:"errorType,omitempty"`
-	Retryable bool              `json:"retryable,omitempty"`
+	ID           string                     `json:"id"`
+	Role         string                     `json:"role"`
+	Status       string                     `json:"status"`
+	Message      string                     `json:"message"`
+	Text         string                     `json:"text,omitempty"`
+	Assets       []GenerationAsset          `json:"assets"`
+	Usage        GenerationUsage            `json:"usage"`
+	RuntimeState GenerationTaskRuntimeState `json:"runtimeState"`
+	Error        string                     `json:"error,omitempty"`
+	ErrorCode    string                     `json:"errorCode,omitempty"`
+	ErrorType    string                     `json:"errorType,omitempty"`
+	Retryable    bool                       `json:"retryable,omitempty"`
 }
 
 // GenerationTextStreamEvent is one server-sent event for text generation.

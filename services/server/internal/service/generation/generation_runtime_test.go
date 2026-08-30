@@ -24,6 +24,7 @@ import (
 	"github.com/mediago-dev/mediago-drama/packages/core/pkg/generation/runtime"
 	"github.com/mediago-dev/mediago-drama/packages/core/pkg/multimodal"
 	mediamcp "github.com/mediago-dev/mediago-drama/packages/mcp/pkg/mcp"
+	"github.com/mediago-dev/mediago-drama/services/server/internal/platform/codexapp"
 	"github.com/mediago-dev/mediago-drama/services/server/internal/repository"
 	"github.com/mediago-dev/mediago-drama/services/server/internal/service/media"
 	"github.com/mediago-dev/mediago-drama/services/server/internal/service/settings"
@@ -1179,6 +1180,117 @@ func TestCreateJimengImageGenerationPersistsOneTaskForRequestedCount(t *testing.
 	})
 	if len(task.Assets) != 3 {
 		t.Fatalf("task assets = %#v, want three generated images on one task", task.Assets)
+	}
+}
+
+func TestGenerationProgressRuntimeStatePersistsBeforeProviderDisconnects(t *testing.T) {
+	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	task := testCodexGenerationTask("task-progress-runtime", "submitted")
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	provider := &metadataProgressDisconnectProvider{
+		progressPersisted: make(chan struct{}),
+		disconnect:        make(chan struct{}),
+	}
+	workflow := NewGenerationService(nil, store, nil)
+	workflow.launchSubmittedGeneration(task, provider, codexImageRequest(task.ID), "create", "", "")
+
+	select {
+	case <-provider.progressPersisted:
+	case <-time.After(time.Second):
+		t.Fatal("metadata-only progress callback was not emitted")
+	}
+	stored, found, err := store.Get(task.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() = found %v, err %v", found, err)
+	}
+	if stored.Status != "importing" {
+		t.Fatalf("status = %q, want importing", stored.Status)
+	}
+	if stored.ProviderTaskID != codexImageResponseIDPrefix+"thread-progress" {
+		t.Fatalf("ProviderTaskID = %q, want persisted Codex thread id", stored.ProviderTaskID)
+	}
+	wantState := GenerationTaskRuntimeState{
+		CodexThreadID: "thread-progress",
+		CodexTurnID:   "turn-progress",
+		CodexItemID:   "item-progress",
+	}
+	if stored.RuntimeState != wantState {
+		t.Fatalf("RuntimeState = %+v, want %+v", stored.RuntimeState, wantState)
+	}
+
+	close(provider.disconnect)
+	waitForGenerationTask(t, store, task.ID, func(task GenerationTaskRecord) bool { return task.Status == "failed" })
+}
+
+func TestGenerationProgressRuntimeStateSurvivesReconnectHandoff(t *testing.T) {
+	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	task := testCodexGenerationTask("task-progress-handoff", "submitted")
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	state := GenerationTaskRuntimeState{CodexThreadID: "thread-handoff", CodexTurnID: "turn-handoff"}
+	provider := &reconnectingMetadataProgressProvider{state: state}
+	workflow := NewGenerationService(nil, store, nil)
+	workflow.launchSubmittedGeneration(task, provider, codexImageRequest(task.ID), "create", "", "")
+
+	stored := waitForGenerationTask(t, store, task.ID, func(task GenerationTaskRecord) bool {
+		return task.Status != "submitted" && task.Status != "running"
+	})
+	if stored.Status != "waiting_reconnect" {
+		t.Fatalf("status = %q, want waiting_reconnect", stored.Status)
+	}
+	if stored.ProviderTaskID != codexImageResponseIDPrefix+"thread-handoff" {
+		t.Fatalf("ProviderTaskID = %q, want persisted Codex thread id", stored.ProviderTaskID)
+	}
+	if stored.RuntimeState != state {
+		t.Fatalf("RuntimeState = %+v, want %+v", stored.RuntimeState, state)
+	}
+}
+
+func TestRecoverCodexImageAfterRestartUsesExistingThread(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	initialStore := NewGenerationTaskService(dbPath, nil)
+	task := testCodexGenerationTask("task-restart", "waiting_reconnect")
+	task.ProviderTaskID = codexImageResponseIDPrefix + "thread-restart"
+	task.RuntimeState = GenerationTaskRuntimeState{CodexThreadID: "thread-restart", CodexTurnID: "turn-started"}
+	if err := initialStore.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+
+	jobDir := filepath.Join(root, "generation", "codex-image", task.ID, "attempt-0123456789abcdef0123456789abcdef")
+	savedPath := writeTestPNG(t, jobDir, "recovered.png")
+	session := &codexImageSessionStub{read: func(_ context.Context, threadID string) (codexapp.ImageGenerationResult, error) {
+		return completedCodexImageResult(threadID, "turn-restart", "item-restart", savedPath), nil
+	}}
+
+	restartedStore := NewGenerationTaskService(dbPath, nil)
+	workflow := NewGenerationService(nil, restartedStore, media.NewMediaAssets(dbPath, filepath.Join(root, "media")))
+	workflow.SetMediaLinkProviders(
+		NewCodexImageProvider(session, root),
+		&mediaLinkTestProvider{name: "h3"},
+		func(context.Context, string) (bool, string) { return true, "" },
+	)
+	workflow.PollPendingGenerationTasks(context.Background(), 10)
+
+	recovered, found, err := restartedStore.Get(task.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() = found %v, err %v", found, err)
+	}
+	if recovered.Status != "completed" || len(recovered.Assets) != 1 {
+		t.Fatalf("recovered task = status %q, assets %d; want completed with one asset", recovered.Status, len(recovered.Assets))
+	}
+	session.mu.Lock()
+	generateCalls := len(session.requests)
+	readThreadIDs := append([]string(nil), session.readThreadIDs...)
+	session.mu.Unlock()
+	if generateCalls != 0 {
+		t.Fatalf("GenerateImage calls = %d, want zero new turns", generateCalls)
+	}
+	if len(readThreadIDs) != 1 || readThreadIDs[0] != "thread-restart" {
+		t.Fatalf("ReadImageResult thread ids = %v, want [thread-restart]", readThreadIDs)
 	}
 }
 
@@ -2364,6 +2476,66 @@ type blockingMultiAssetImageGenerateProvider struct {
 	started chan coregeneration.Request
 	release chan struct{}
 	err     error
+}
+
+type metadataProgressDisconnectProvider struct {
+	progressPersisted chan struct{}
+	disconnect        chan struct{}
+}
+
+type reconnectingMetadataProgressProvider struct {
+	state GenerationTaskRuntimeState
+}
+
+func (*reconnectingMetadataProgressProvider) Name() string { return "metadata-progress-reconnect" }
+
+func (provider *reconnectingMetadataProgressProvider) Generate(ctx context.Context, request coregeneration.Request) (coregeneration.Response, error) {
+	response := coregeneration.Response{
+		ID:       codexImageResponseIDPrefix + provider.state.CodexThreadID,
+		Status:   "waiting_reconnect",
+		Metadata: map[string]any{"runtime_state": provider.state},
+	}
+	callback, ok := coregeneration.ProgressCallbackFromOptions(request.Options)
+	if !ok {
+		return coregeneration.Response{}, fmt.Errorf("progress callback is missing")
+	}
+	callback(ctx, coregeneration.ProgressEvent{Response: response})
+	return response, nil
+}
+
+func (*reconnectingMetadataProgressProvider) Get(context.Context, string) (coregeneration.Response, error) {
+	return coregeneration.Response{}, fmt.Errorf("unexpected Get call")
+}
+
+func (*metadataProgressDisconnectProvider) Name() string { return "metadata-progress-disconnect" }
+
+func (provider *metadataProgressDisconnectProvider) Generate(ctx context.Context, request coregeneration.Request) (coregeneration.Response, error) {
+	callback, ok := coregeneration.ProgressCallbackFromOptions(request.Options)
+	if !ok {
+		return coregeneration.Response{}, fmt.Errorf("progress callback is missing")
+	}
+	callback(ctx, coregeneration.ProgressEvent{Response: coregeneration.Response{
+		ID:     codexImageResponseIDPrefix + "thread-progress",
+		Status: "importing",
+		Metadata: map[string]any{
+			"runtime_state": GenerationTaskRuntimeState{
+				CodexThreadID: "thread-progress",
+				CodexTurnID:   "turn-progress",
+				CodexItemID:   "item-progress",
+			},
+		},
+	}})
+	close(provider.progressPersisted)
+	select {
+	case <-provider.disconnect:
+		return coregeneration.Response{}, fmt.Errorf("app-server disconnected")
+	case <-ctx.Done():
+		return coregeneration.Response{}, ctx.Err()
+	}
+}
+
+func (*metadataProgressDisconnectProvider) Get(context.Context, string) (coregeneration.Response, error) {
+	return coregeneration.Response{}, fmt.Errorf("unexpected Get call")
 }
 
 func (provider *blockingMultiAssetImageGenerateProvider) Name() string {

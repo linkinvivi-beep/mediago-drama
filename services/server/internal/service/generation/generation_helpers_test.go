@@ -6,6 +6,39 @@ import (
 	coregeneration "github.com/mediago-dev/mediago-drama/packages/core/pkg/generation"
 )
 
+func TestGenerationResponseFromCoreMapsTypedRuntimeState(t *testing.T) {
+	want := GenerationTaskRuntimeState{
+		CodexThreadID: "thread-progress",
+		CodexTurnID:   "turn-progress",
+		CodexItemID:   "item-progress",
+		SubmittedAt:   "2026-08-30T12:00:00Z",
+	}
+
+	response := GenerationResponseFromCore(coregeneration.Response{
+		ID:     codexImageResponseIDPrefix + "thread-progress",
+		Status: "running",
+		Metadata: map[string]any{
+			"runtime_state": want,
+		},
+	}, string(coregeneration.KindImage))
+
+	if response.RuntimeState != want {
+		t.Fatalf("RuntimeState = %+v, want %+v", response.RuntimeState, want)
+	}
+}
+
+func TestGenerationResponseFromTaskMapsRuntimeState(t *testing.T) {
+	want := GenerationTaskRuntimeState{CodexThreadID: "thread-stored", CodexTurnID: "turn-stored"}
+	response := GenerationResponseFromTask(GenerationTaskRecord{
+		ID:           "task-stored",
+		Status:       "waiting_reconnect",
+		RuntimeState: want,
+	})
+	if response.RuntimeState != want {
+		t.Fatalf("RuntimeState = %+v, want %+v", response.RuntimeState, want)
+	}
+}
+
 func TestGenerationProjectIDFromScopeID(t *testing.T) {
 	tests := []struct {
 		name    string

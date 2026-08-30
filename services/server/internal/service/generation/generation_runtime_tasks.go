@@ -1007,27 +1007,7 @@ func (workflow *GenerationService) taskWithCodexResponseRuntime(task generationT
 	}
 	state := task.RuntimeState
 	if responseState, ok := response.Metadata["runtime_state"].(GenerationTaskRuntimeState); ok {
-		if responseState.CodexThreadID != "" {
-			state.CodexThreadID = responseState.CodexThreadID
-		}
-		if responseState.CodexTurnID != "" {
-			state.CodexTurnID = responseState.CodexTurnID
-		}
-		if responseState.CodexItemID != "" {
-			state.CodexItemID = responseState.CodexItemID
-		}
-		if responseState.RevisedPrompt != "" {
-			state.RevisedPrompt = responseState.RevisedPrompt
-		}
-		if responseState.SavedPath != "" {
-			state.SavedPath = responseState.SavedPath
-		}
-		if responseState.ComfyPromptID != "" {
-			state.ComfyPromptID = responseState.ComfyPromptID
-		}
-		if responseState.SubmittedAt != "" {
-			state.SubmittedAt = responseState.SubmittedAt
-		}
+		state = mergeGenerationTaskRuntimeState(state, responseState)
 	}
 	if strings.EqualFold(strings.TrimSpace(response.Status), "completed") {
 		task.ProviderTaskID = ""
@@ -1056,6 +1036,11 @@ func (workflow *GenerationService) handOffPendingGeneration(
 	}
 
 	messageResponse := SubmittedGenerationResponse(task.ID, coregeneration.Kind(task.Kind))
+	if task.RouteID == coregeneration.RouteCodexImage {
+		codexResponse := GenerationResponseFromCore(response, task.Kind)
+		messageResponse.Status = codexResponse.Status
+		messageResponse.RuntimeState = codexResponse.RuntimeState
+	}
 	messageResponse.ID = task.ID
 	pendingTask := GenerationTaskWithMessage(runningTask, messageResponse)
 	pendingTask.ProviderTaskID = providerTaskID
@@ -1114,21 +1099,34 @@ func (workflow *GenerationService) persistGenerationProgress(
 	conversationID string,
 	assetTitle string,
 ) {
-	if workflow.generationTasks == nil || len(event.Response.Assets) == 0 {
+	if workflow.generationTasks == nil {
 		return
 	}
 
 	response := event.Response
-	response.Status = "running"
-	response = workflow.cacheGenerationResponseAssetsWithOptions(ctx, response, generationMediaSaveOptionsWithTitle(projectID, conversationID, task.SectionID, assetTitle))
+	progressStatus := strings.ToLower(strings.TrimSpace(response.Status))
+	if !IsActiveGenerationStatus(progressStatus) {
+		progressStatus = "running"
+	}
+	response.Status = progressStatus
+	if len(response.Assets) > 0 {
+		response = workflow.cacheGenerationResponseAssetsWithOptions(ctx, response, generationMediaSaveOptionsWithTitle(projectID, conversationID, task.SectionID, assetTitle))
+	}
 
 	messageResponse := generationResponseWithAssetTitle(GenerationResponseFromCore(response, task.Kind), assetTitle)
+	providerTaskID := ""
+	if task.RouteID == coregeneration.RouteCodexImage {
+		providerTaskID = generationProviderTaskIDFromMessageID(messageResponse.ID, task.ID)
+	}
 	messageResponse.ID = task.ID
-	messageResponse.Status = "running"
+	messageResponse.Status = progressStatus
 	messageResponse.Message = generationProgressMessage(event.Completed, event.Total)
 
 	progressTask := GenerationTaskWithMessage(task, messageResponse)
-	progressTask.Status = "running"
+	if providerTaskID != "" {
+		progressTask.ProviderTaskID = providerTaskID
+	}
+	progressTask.Status = progressStatus
 	existed, err := workflow.generationTasks.UpsertExisting(progressTask)
 	if err != nil {
 		slog.Warn("generation task progress could not be saved", "task_id", task.ID, "error", err)
