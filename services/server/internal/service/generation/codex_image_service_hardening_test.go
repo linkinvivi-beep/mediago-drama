@@ -259,6 +259,50 @@ func TestRetryCodexFailedTaskIsClaimedOnceConcurrently(t *testing.T) {
 	_, _, _ = workflow.DeleteGenerationTask(task.ID)
 }
 
+func TestRetryCodexDoesNotRegisterCallerOwnedTaskContextDuringPreflight(t *testing.T) {
+	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	task := testCodexGenerationTask("task-preflight-ownership", "failed")
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	workflow := NewGenerationService(nil, store, nil)
+	workflow.SetMediaLinkProviders(&quotaSafeCodexProvider{}, &mediaLinkTestProvider{name: "h3"}, func(ctx context.Context, _ string) (bool, string) {
+		close(entered)
+		select {
+		case <-release:
+			return false, "preflight stopped"
+		case <-ctx.Done():
+			return false, ctx.Err().Error()
+		}
+	})
+	caller, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		_, _, _ = workflow.RetryGenerationTask(caller, task.ID)
+		close(done)
+	}()
+	<-entered
+	workflow.generationCancelMu.Lock()
+	registered := len(workflow.generationCancels[task.ID])
+	preflightRegistered := len(workflow.generationPreflightCancels[task.ID])
+	workflow.generationCancelMu.Unlock()
+	if registered != 0 {
+		t.Fatalf("task contexts registered during caller-owned preflight = %d, want 0", registered)
+	}
+	if preflightRegistered != 1 {
+		t.Fatalf("cancellable preflight contexts = %d, want 1", preflightRegistered)
+	}
+	cancel()
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("retry preflight did not stop")
+	}
+}
+
 func TestRetryCodexCallerCancellationAfterClaimDoesNotCancelBackgroundTurn(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "settings.db")
 	store := NewGenerationTaskService(dbPath, nil)
@@ -338,6 +382,54 @@ func TestRetryCodexDeleteDuringPreflightDoesNotResurrectOrGenerate(t *testing.T)
 	}
 }
 
+func TestRetryCodexDeleteAfterClaimCancelsQueuedTurnWithoutProviderCall(t *testing.T) {
+	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	workflow := NewGenerationService(nil, store, nil)
+	firstStarted := make(chan struct{})
+	session := &codexImageSessionStub{
+		capabilities: codexapp.ModelProviderCapabilities{ImageGeneration: true},
+		generate: func(ctx context.Context, _ codexapp.ImageGenerationRequest, _ func(codexapp.ImageGenerationCheckpoint)) (codexapp.ImageGenerationResult, error) {
+			select {
+			case <-firstStarted:
+			default:
+				close(firstStarted)
+			}
+			<-ctx.Done()
+			return codexapp.ImageGenerationResult{}, ctx.Err()
+		},
+	}
+	provider := NewCodexImageProvider(session, t.TempDir())
+	workflow.SetMediaLinkProviders(provider, &mediaLinkTestProvider{name: "h3"}, func(context.Context, string) (bool, string) { return true, "" })
+	first := testCodexGenerationTask("task-claim-blocker", "submitted")
+	second := testCodexGenerationTask("task-claimed-queued", "failed")
+	for _, task := range []GenerationTaskRecord{first, second} {
+		if err := store.Upsert(task); err != nil {
+			t.Fatal(err)
+		}
+	}
+	workflow.launchSubmittedGeneration(first, provider, codexImageRequest(first.ID), "create", "", "")
+	<-firstStarted
+	if _, status, err := workflow.RetryGenerationTask(context.Background(), second.ID); err != nil || status != http.StatusOK {
+		t.Fatalf("RetryGenerationTask() status/error = %d/%v", status, err)
+	}
+	waitForCodexImageQueueDepth(t, provider.queue, 1)
+	if _, deleted, err := workflow.DeleteGenerationTask(second.ID); err != nil || !deleted {
+		t.Fatalf("DeleteGenerationTask() = %v/%v", deleted, err)
+	}
+	waitForGenerationCancelRegistry(t, workflow, second.ID, false)
+	session.mu.Lock()
+	requests := len(session.requests)
+	session.mu.Unlock()
+	if requests != 1 {
+		t.Fatalf("GenerateImage calls = %d, want only blocker turn", requests)
+	}
+	if _, found, err := store.Get(second.ID); err != nil || found {
+		t.Fatalf("deleted claimed task found=%v err=%v", found, err)
+	}
+	_, _, _ = workflow.DeleteGenerationTask(first.ID)
+	waitForGenerationCancelRegistry(t, workflow, first.ID, false)
+}
+
 func TestCodexRecoveryCompletionClearsIdentityAndImportsOnce(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "settings.db")
 	store := NewGenerationTaskService(dbPath, nil)
@@ -410,6 +502,60 @@ func TestCodexWorkerSkipsStoredTerminalTask(t *testing.T) {
 	generate, get := provider.counts()
 	if generate != 0 || get != 0 {
 		t.Fatalf("terminal worker Generate/Get = %d/%d", generate, get)
+	}
+}
+
+func TestCodexImageRealPathsHonorCallerDeadlineDuringSilentReadiness(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(context.Context, *GenerationService, *GenerationTaskService)
+	}{
+		{
+			name: "create",
+			run: func(ctx context.Context, workflow *GenerationService, _ *GenerationTaskService) {
+				_, _, _ = workflow.CreateGenerationMessage(ctx, GenerationMessageRequest{Kind: string(coregeneration.KindImage), RouteID: coregeneration.RouteCodexImage, Prompt: "portrait"})
+			},
+		},
+		{
+			name: "status",
+			run: func(ctx context.Context, workflow *GenerationService, store *GenerationTaskService) {
+				task := testCodexGenerationTask("task-status-deadline", "waiting_reconnect")
+				task.ProviderTaskID = codexImageResponseIDPrefix + "thread"
+				if err := store.Upsert(task); err != nil {
+					t.Fatal(err)
+				}
+				_, _, _ = workflow.GetGenerationVideo(ctx, task.ID)
+			},
+		},
+		{
+			name: "poll",
+			run: func(ctx context.Context, workflow *GenerationService, _ *GenerationTaskService) {
+				task := testCodexGenerationTask("task-poll-deadline", "waiting_reconnect")
+				task.ProviderTaskID = codexImageResponseIDPrefix + "thread"
+				workflow.PollGenerationTask(ctx, task)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+			workflow := NewGenerationService(nil, store, nil)
+			workflow.SetMediaLinkProviders(&quotaSafeCodexProvider{}, &mediaLinkTestProvider{name: "h3"}, func(ctx context.Context, _ string) (bool, string) {
+				select {
+				case <-ctx.Done():
+					return false, ctx.Err().Error()
+				case <-time.After(300 * time.Millisecond):
+					return false, "silent app-server guard elapsed"
+				}
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			defer cancel()
+			started := time.Now()
+			test.run(ctx, workflow, store)
+			if elapsed := time.Since(started); elapsed > 150*time.Millisecond {
+				t.Fatalf("silent readiness elapsed = %v, want caller deadline", elapsed)
+			}
+		})
 	}
 }
 

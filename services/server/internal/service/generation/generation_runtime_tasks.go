@@ -33,7 +33,7 @@ func (workflow *GenerationService) GetGenerationVideo(ctx context.Context, id st
 		id = pollID
 	}
 
-	provider, err := workflow.newGenerationProviderForStoredTask(id, storedTask, found)
+	provider, err := workflow.newGenerationProviderForStoredTaskContext(ctx, id, storedTask, found)
 	if err != nil {
 		return generationMessageResponse{}, http.StatusServiceUnavailable, err
 	}
@@ -89,20 +89,14 @@ func (workflow *GenerationService) RetryGenerationTask(ctx context.Context, id s
 		return generationMessageResponse{}, http.StatusNotFound, fmt.Errorf("generation task not found")
 	}
 	projectID := workflow.projectIDForTask(task)
-	var claimedCtx context.Context
-	var detachClaimedCaller func()
-	var releaseClaimedCtx func()
-	claimedCtxHandedOff := false
 	if task.RouteID == coregeneration.RouteCodexImage {
 		switch status := strings.ToLower(strings.TrimSpace(task.Status)); status {
 		case "failed":
-			claimedCtx, detachClaimedCaller, releaseClaimedCtx = workflow.generationTaskContext(task.ID, ctx)
-			defer func() {
-				if !claimedCtxHandedOff {
-					releaseClaimedCtx()
-				}
-			}()
-			ctx = claimedCtx
+			// Caller cancellation owns preflight only. A successful compare-and-swap
+			// below transfers ownership to an app-lifetime task context.
+			preflightCtx, releasePreflight := workflow.generationPreflightContext(task.ID, ctx)
+			defer releasePreflight()
+			ctx = preflightCtx
 		case "completed":
 			return GenerationResponseFromTask(task), http.StatusOK, nil
 		default:
@@ -221,8 +215,7 @@ func (workflow *GenerationService) RetryGenerationTask(ctx context.Context, id s
 	}
 	if ShouldRunGenerationInBackground(route) {
 		if route.ID == coregeneration.RouteCodexImage {
-			detachClaimedCaller()
-			if err := claimedCtx.Err(); err != nil {
+			if err := ctx.Err(); err != nil {
 				return generationMessageResponse{}, http.StatusRequestTimeout, err
 			}
 			messageResponse := SubmittingGenerationResponse(task.ID, coregeneration.Kind(payload.Kind))
@@ -240,12 +233,12 @@ func (workflow *GenerationService) RetryGenerationTask(ctx context.Context, id s
 				}
 				return GenerationResponseFromTask(current), http.StatusConflict, nil
 			}
+			claimedCtx, releaseClaimedCtx := workflow.generationTaskContext(task.ID)
 			nextTask := GenerationTaskWithMessage(task, messageResponse)
 			nextTask.ProviderTaskID = ""
 			nextTask.RuntimeState = clearedState
 			workflow.syncGenerationNotificationTask(nextTask)
 			_ = workflow.generationTasks.RecordAttempt(task.ID, "retry", messageResponse.Status, messageResponse.Message, nil)
-			claimedCtxHandedOff = true
 			workflow.launchClaimedSubmittedGeneration(claimedCtx, releaseClaimedCtx, nextTask, provider, generationRequest, "retry", projectID, nextTask.ConversationID)
 			return messageResponse, http.StatusOK, nil
 		}
@@ -744,7 +737,7 @@ func (workflow *GenerationService) PollGenerationTask(ctx context.Context, task 
 		_ = workflow.generationTasks.RecordAttempt(task.ID, "poll", task.Status, "后台轮询的供应商未配置。", err)
 		return
 	}
-	provider, err := workflow.newGenerationProvider(route)
+	provider, err := workflow.newGenerationProviderContext(ctx, route)
 	if err != nil {
 		_ = workflow.generationTasks.RecordAttempt(task.ID, "poll", task.Status, "后台轮询的供应商未配置。", err)
 		return

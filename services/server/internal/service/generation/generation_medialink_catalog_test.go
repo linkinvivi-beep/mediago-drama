@@ -97,6 +97,30 @@ func TestMediaLinkReadinessHonorsCallerCancellation(t *testing.T) {
 	}
 }
 
+func TestDefaultGenerationProviderWrapperBoundsSilentMediaLinkReadiness(t *testing.T) {
+	workflow := NewGenerationService(nil, nil, nil)
+	workflow.SetMediaLinkProviders(&mediaLinkTestProvider{name: "codex"}, &mediaLinkTestProvider{name: "h3"}, func(ctx context.Context, _ string) (bool, string) {
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err().Error()
+		case <-time.After(mediaLinkReadinessTimeout + time.Second):
+			return false, "silent app-server guard elapsed"
+		}
+	})
+	route, ok := coregeneration.FindRoute(coregeneration.RouteCodexImage)
+	if !ok {
+		t.Fatal("Codex image route missing")
+	}
+	started := time.Now()
+	_, err := workflow.newGenerationProvider(route)
+	if err == nil || err.Error() != context.DeadlineExceeded.Error() {
+		t.Fatalf("newGenerationProvider() error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > mediaLinkReadinessTimeout+750*time.Millisecond {
+		t.Fatalf("default readiness elapsed = %v, want bounded timeout", elapsed)
+	}
+}
+
 func assertMediaLinkCatalogShape(t *testing.T, catalog GenerationModelsResponse) {
 	t.Helper()
 	if got, want := mediaLinkRouteIDs(catalog.Routes), []string{

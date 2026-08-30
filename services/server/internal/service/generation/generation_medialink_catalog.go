@@ -98,14 +98,17 @@ func (workflow *GenerationService) SetMediaLinkProviders(
 }
 
 func (workflow *GenerationService) mediaLinkRouteReady(routeID string) (bool, string) {
-	ctx, cancel := context.WithTimeout(context.Background(), mediaLinkReadinessTimeout)
-	defer cancel()
-	return workflow.mediaLinkRouteReadyContext(ctx, routeID)
+	return workflow.mediaLinkRouteReadyContext(context.Background(), routeID)
 }
 
 func (workflow *GenerationService) mediaLinkRouteReadyContext(ctx context.Context, routeID string) (bool, string) {
 	if workflow == nil || workflow.mediaLinkReadiness == nil {
 		return false, fmt.Sprintf("MediaLink route %q is not ready", routeID)
 	}
-	return workflow.mediaLinkReadiness(ctx, routeID)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	readinessCtx, cancel := context.WithTimeout(ctx, mediaLinkReadinessTimeout)
+	defer cancel()
+	return workflow.mediaLinkReadiness(readinessCtx, routeID)
 }

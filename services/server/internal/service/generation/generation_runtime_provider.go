@@ -68,11 +68,20 @@ func (workflow *GenerationService) newGenerationProviderForStoredTask(
 	task generationTaskRecord,
 	found bool,
 ) (coregeneration.Provider, error) {
+	return workflow.newGenerationProviderForStoredTaskContext(context.Background(), id, task, found)
+}
+
+func (workflow *GenerationService) newGenerationProviderForStoredTaskContext(
+	ctx context.Context,
+	id string,
+	task generationTaskRecord,
+	found bool,
+) (coregeneration.Provider, error) {
 	route, err := RouteForStoredGenerationTask(id, task, found)
 	if err != nil {
 		return nil, err
 	}
-	return workflow.newGenerationProvider(route)
+	return workflow.newGenerationProviderContext(ctx, route)
 }
 
 func (workflow *GenerationService) requireGenerationRouteConfigured(route coregeneration.ModelRoute) error {
