@@ -155,7 +155,9 @@ func NewManagedCodexImageProvider(parent context.Context, binPath string, dataRo
 		factory: func(ctx context.Context, path string) (codexapp.Client, error) { return codexapp.Start(ctx, path) },
 		gate:    newCodexImageFIFO(),
 	}
-	go managed.closeOnShutdown()
+	if parent.Done() != nil {
+		go managed.closeOnShutdown()
+	}
 	return NewCodexImageProvider(managed, dataRoot)
 }
 
@@ -237,17 +239,22 @@ func (session *managedCodexImageSession) ReadImageResult(ctx context.Context, th
 
 func (session *managedCodexImageSession) ensure() (*codexapp.ImageGenerationSession, error) {
 	session.stateMu.Lock()
-	defer session.stateMu.Unlock()
 	if session.typed != nil {
-		return session.typed, nil
+		typed := session.typed
+		session.stateMu.Unlock()
+		return typed, nil
 	}
+	session.stateMu.Unlock()
 	client, err := session.factory(session.parent, session.binPath)
 	if err != nil {
 		return nil, err
 	}
+	session.stateMu.Lock()
 	session.client = client
 	session.typed = codexapp.NewImageGenerationSession(client)
-	return session.typed, nil
+	typed := session.typed
+	session.stateMu.Unlock()
+	return typed, nil
 }
 
 func (session *managedCodexImageSession) invalidate() {
