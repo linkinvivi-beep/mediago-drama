@@ -57,6 +57,7 @@ type GenerationMessageRequest struct {
 	FamilyID           string                               `json:"familyId,omitempty"`
 	VersionID          string                               `json:"versionId,omitempty"`
 	Provider           string                               `json:"provider,omitempty"`
+	InstanceProfileID  string                               `json:"instanceProfileId,omitempty"`
 	TextExecutor       string                               `json:"textExecutor,omitempty"`
 	ModelID            string                               `json:"modelId"`
 	Model              string                               `json:"model"`
@@ -308,13 +309,17 @@ type GenerationUsage struct {
 
 // GenerationTaskRuntimeState contains only non-secret identifiers and recovery data.
 type GenerationTaskRuntimeState struct {
-	CodexThreadID string `json:"codexThreadId,omitempty"`
-	CodexTurnID   string `json:"codexTurnId,omitempty"`
-	CodexItemID   string `json:"codexItemId,omitempty"`
-	RevisedPrompt string `json:"revisedPrompt,omitempty"`
-	SavedPath     string `json:"savedPath,omitempty"`
-	ComfyPromptID string `json:"comfyPromptId,omitempty"`
-	SubmittedAt   string `json:"submittedAt,omitempty"`
+	CodexThreadID          string `json:"codexThreadId,omitempty"`
+	CodexTurnID            string `json:"codexTurnId,omitempty"`
+	CodexItemID            string `json:"codexItemId,omitempty"`
+	RevisedPrompt          string `json:"revisedPrompt,omitempty"`
+	SavedPath              string `json:"savedPath,omitempty"`
+	InstanceProfileID      string `json:"instanceProfileId,omitempty"`
+	WorkflowProfileID      string `json:"workflowProfileId,omitempty"`
+	WorkflowProfileVersion string `json:"workflowProfileVersion,omitempty"`
+	WorkflowDigest         string `json:"workflowDigest,omitempty"`
+	ComfyPromptID          string `json:"comfyPromptId,omitempty"`
+	SubmittedAt            string `json:"submittedAt,omitempty"`
 }
 
 // GenerationTaskRecord is a persisted generation task.

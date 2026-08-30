@@ -172,6 +172,7 @@ export interface GenerationMessageRequest {
 	familyId?: string;
 	versionId?: string;
 	provider?: string;
+	instanceProfileId?: string;
 	textExecutor?: TextExecutorType;
 	modelId: string;
 	model: string;
@@ -320,6 +321,20 @@ export interface GenerationMessageResponse {
 	errorCode?: string;
 	errorType?: string;
 	retryable?: boolean;
+	runtimeState?: GenerationTaskRuntimeState;
+}
+
+export interface GenerationTaskRuntimeState {
+	codexThreadId?: string;
+	codexTurnId?: string;
+	codexItemId?: string;
+	revisedPrompt?: string;
+	instanceProfileId?: string;
+	workflowProfileId?: string;
+	workflowProfileVersion?: string;
+	workflowDigest?: string;
+	comfyPromptId?: string;
+	submittedAt?: string;
 }
 
 export interface GenerationTextStreamEvent {
@@ -435,6 +450,7 @@ export interface GenerationTaskRecord {
 	errorCode?: string;
 	errorType?: string;
 	retryable?: boolean;
+	runtimeState?: GenerationTaskRuntimeState;
 	createdAt: string;
 	updatedAt: string;
 	durationMs?: number;

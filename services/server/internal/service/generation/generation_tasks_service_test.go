@@ -191,6 +191,25 @@ func TestGenerationTaskServiceRuntimeStateRoundTrip(t *testing.T) {
 	}
 }
 
+func TestGenerationTaskRuntimeStateRoundTripsAutoDLIdentity(t *testing.T) {
+	service := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	want := GenerationTaskRuntimeState{
+		InstanceProfileID:      "instance-a",
+		WorkflowProfileID:      "zimage-t2i",
+		WorkflowProfileVersion: "v1",
+		WorkflowDigest:         "sha256:abc",
+		ComfyPromptID:          "prompt-123",
+		SubmittedAt:            "2026-08-30T12:00:00Z",
+	}
+	if err := service.Upsert(GenerationTaskRecord{ID: "task-a", Kind: "image", RuntimeState: want}); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := service.Get("task-a")
+	if err != nil || !ok || got.RuntimeState != want {
+		t.Fatalf("state = %+v, ok = %v, err = %v", got.RuntimeState, ok, err)
+	}
+}
+
 func TestGenerationTaskServiceRuntimeStateInvalidJSONReturnsDataError(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "workspace.db")
 	service := NewGenerationTaskService(dbPath, nil)

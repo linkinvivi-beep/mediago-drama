@@ -11,14 +11,16 @@ import (
 const mediaLinkReadinessTimeout = 2 * time.Second
 
 type mediaLinkRouteProviders struct {
-	codexImage coregeneration.Provider
-	autodlH3   coregeneration.Provider
+	codexImage   coregeneration.Provider
+	autodlZImage coregeneration.Provider
+	autodlH3     coregeneration.Provider
 }
 
 func mediaLinkCatalog(source coregeneration.ModelCatalog) coregeneration.ModelCatalog {
 	allowed := map[string]struct{}{
-		coregeneration.RouteCodexImage: {},
-		coregeneration.RouteAutoDLH3:   {},
+		coregeneration.RouteCodexImage:   {},
+		coregeneration.RouteAutoDLZImage: {},
+		coregeneration.RouteAutoDLH3:     {},
 	}
 	return filterCatalogRoutes(source, allowed)
 }
@@ -67,6 +69,8 @@ func (providers mediaLinkRouteProviders) providerForRoute(route coregeneration.M
 	switch route.ID {
 	case coregeneration.RouteCodexImage:
 		return providers.codexImage, nil
+	case coregeneration.RouteAutoDLZImage:
+		return providers.autodlZImage, nil
 	case coregeneration.RouteAutoDLH3:
 		return providers.autodlH3, nil
 	default:
@@ -76,7 +80,7 @@ func (providers mediaLinkRouteProviders) providerForRoute(route coregeneration.M
 
 func isMediaLinkRouteID(routeID string) bool {
 	switch routeID {
-	case coregeneration.RouteCodexImage, coregeneration.RouteAutoDLH3:
+	case coregeneration.RouteCodexImage, coregeneration.RouteAutoDLZImage, coregeneration.RouteAutoDLH3:
 		return true
 	default:
 		return false

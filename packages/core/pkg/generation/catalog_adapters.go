@@ -47,5 +47,6 @@ const (
 	AdapterLibTVCLIVideo                 = "libtv.cli.video"
 	AdapterPippitCLIVideo                = "pippit.cli.video"
 	AdapterCodexImage                    = "codex.imagegen"
+	AdapterAutoDLComfyZImage             = "autodl.comfyui.z-image"
 	AdapterAutoDLComfyH3Video            = "autodl.comfyui.minimax-h3"
 )

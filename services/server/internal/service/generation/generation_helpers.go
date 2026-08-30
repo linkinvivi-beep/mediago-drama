@@ -296,56 +296,59 @@ func GenerationRequestFromMessage(
 	model := generationModelForReferences(route, payload.Model, referenceURLs)
 	if route.Kind == coregeneration.KindText {
 		return coregeneration.Request{
-			Kind:          coregeneration.Kind(payload.Kind),
-			RouteID:       payload.RouteID,
-			FamilyID:      payload.FamilyID,
-			VersionID:     payload.VersionID,
-			Provider:      payload.Provider,
-			ProjectID:     payload.ProjectID,
-			ProjectName:   payload.ProjectName,
-			ModelID:       payload.ModelID,
-			Model:         model,
-			Prompt:        payload.Prompt,
-			ReferenceURLs: referenceURLs,
-			Params:        providerGenerationParams(payload.Params),
-			Options:       generationRequestOptions(payload),
+			Kind:              coregeneration.Kind(payload.Kind),
+			RouteID:           payload.RouteID,
+			FamilyID:          payload.FamilyID,
+			VersionID:         payload.VersionID,
+			Provider:          payload.Provider,
+			InstanceProfileID: strings.TrimSpace(payload.InstanceProfileID),
+			ProjectID:         payload.ProjectID,
+			ProjectName:       payload.ProjectName,
+			ModelID:           payload.ModelID,
+			Model:             model,
+			Prompt:            payload.Prompt,
+			ReferenceURLs:     referenceURLs,
+			Params:            providerGenerationParams(payload.Params),
+			Options:           generationRequestOptions(payload),
 		}
 	}
 	if route.Kind == coregeneration.KindAudio {
 		return coregeneration.Request{
-			Kind:          coregeneration.Kind(payload.Kind),
-			RouteID:       payload.RouteID,
-			FamilyID:      payload.FamilyID,
-			VersionID:     payload.VersionID,
-			Provider:      payload.Provider,
-			ProjectID:     payload.ProjectID,
-			ProjectName:   payload.ProjectName,
-			ModelID:       payload.ModelID,
-			Model:         model,
-			Prompt:        payload.Prompt,
-			ReferenceURLs: referenceURLs,
-			Params:        providerGenerationParams(payload.Params),
-			Options:       generationRequestOptions(payload),
+			Kind:              coregeneration.Kind(payload.Kind),
+			RouteID:           payload.RouteID,
+			FamilyID:          payload.FamilyID,
+			VersionID:         payload.VersionID,
+			Provider:          payload.Provider,
+			InstanceProfileID: strings.TrimSpace(payload.InstanceProfileID),
+			ProjectID:         payload.ProjectID,
+			ProjectName:       payload.ProjectName,
+			ModelID:           payload.ModelID,
+			Model:             model,
+			Prompt:            payload.Prompt,
+			ReferenceURLs:     referenceURLs,
+			Params:            providerGenerationParams(payload.Params),
+			Options:           generationRequestOptions(payload),
 		}
 	}
 
 	return coregeneration.Request{
-		Kind:           coregeneration.Kind(payload.Kind),
-		RouteID:        payload.RouteID,
-		FamilyID:       payload.FamilyID,
-		VersionID:      payload.VersionID,
-		Provider:       payload.Provider,
-		ProjectID:      payload.ProjectID,
-		ProjectName:    payload.ProjectName,
-		ModelID:        payload.ModelID,
-		Model:          model,
-		Prompt:         payload.Prompt,
-		ReferenceURLs:  referenceURLs,
-		OutputFormat:   "png",
-		ResponseFormat: ResponseFormatForRoute(route),
-		Watermark:      BoolPtr(false),
-		Params:         providerGenerationParams(payload.Params),
-		Options:        generationRequestOptions(payload),
+		Kind:              coregeneration.Kind(payload.Kind),
+		RouteID:           payload.RouteID,
+		FamilyID:          payload.FamilyID,
+		VersionID:         payload.VersionID,
+		Provider:          payload.Provider,
+		InstanceProfileID: strings.TrimSpace(payload.InstanceProfileID),
+		ProjectID:         payload.ProjectID,
+		ProjectName:       payload.ProjectName,
+		ModelID:           payload.ModelID,
+		Model:             model,
+		Prompt:            payload.Prompt,
+		ReferenceURLs:     referenceURLs,
+		OutputFormat:      "png",
+		ResponseFormat:    ResponseFormatForRoute(route),
+		Watermark:         BoolPtr(false),
+		Params:            providerGenerationParams(payload.Params),
+		Options:           generationRequestOptions(payload),
 	}
 }
 
@@ -629,6 +632,10 @@ func GenerationTaskFromMessage(
 	assetTitle := firstNonEmpty(request.AssetTitle, generationFirstAssetTitle(response.Assets))
 	response = generationResponseWithAssetTitle(response, assetTitle)
 	responseError := generationTaskErrorFromResponse(response)
+	runtimeState := response.RuntimeState
+	if instanceProfileID := strings.TrimSpace(request.InstanceProfileID); instanceProfileID != "" {
+		runtimeState.InstanceProfileID = instanceProfileID
+	}
 	return GenerationTaskRecord{
 		ID:                response.ID,
 		BatchID:           strings.TrimSpace(request.BatchID),
@@ -665,7 +672,7 @@ func GenerationTaskFromMessage(
 		ErrorCode:    response.ErrorCode,
 		ErrorType:    response.ErrorType,
 		Retryable:    response.Retryable,
-		RuntimeState: response.RuntimeState,
+		RuntimeState: runtimeState,
 	}
 }
 
@@ -920,6 +927,18 @@ func mergeGenerationTaskRuntimeState(current GenerationTaskRuntimeState, update 
 	}
 	if update.SavedPath != "" {
 		current.SavedPath = update.SavedPath
+	}
+	if update.InstanceProfileID != "" {
+		current.InstanceProfileID = update.InstanceProfileID
+	}
+	if update.WorkflowProfileID != "" {
+		current.WorkflowProfileID = update.WorkflowProfileID
+	}
+	if update.WorkflowProfileVersion != "" {
+		current.WorkflowProfileVersion = update.WorkflowProfileVersion
+	}
+	if update.WorkflowDigest != "" {
+		current.WorkflowDigest = update.WorkflowDigest
 	}
 	if update.ComfyPromptID != "" {
 		current.ComfyPromptID = update.ComfyPromptID

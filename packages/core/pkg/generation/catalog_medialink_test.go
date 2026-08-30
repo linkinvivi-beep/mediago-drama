@@ -16,6 +16,15 @@ func TestMediaLinkCatalogRoutes(t *testing.T) {
 	}
 }
 
+func TestMediaLinkCatalogIncludesZImageWithOneReference(t *testing.T) {
+	route, ok := FindRoute(RouteAutoDLZImage)
+	if !ok || route.Kind != KindImage || route.Provider != ProviderAutoDL ||
+		route.Adapter != AdapterAutoDLComfyZImage || !route.SupportsReferenceURLs ||
+		route.MaxReferenceURLs != 1 || route.Async {
+		t.Fatalf("route = %+v, found = %v", route, ok)
+	}
+}
+
 func TestMediaLinkCatalogRouteContracts(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -42,6 +51,19 @@ func TestMediaLinkCatalogRouteContracts(t *testing.T) {
 			wantProvider:      ProviderCodex,
 			wantAdapter:       AdapterCodexImage,
 			wantParams:        []string{"aspectRatio"},
+			wantReferenceURLs: true,
+		},
+		{
+			name:              "AutoDL Z-Image",
+			routeID:           RouteAutoDLZImage,
+			wantID:            "autodl.zimage",
+			wantFamilyID:      FamilyZImage,
+			wantVersionID:     VersionZImageV1,
+			wantLabel:         "AutoDL · Z-Image",
+			wantKind:          KindImage,
+			wantProvider:      ProviderAutoDL,
+			wantAdapter:       AdapterAutoDLComfyZImage,
+			wantParams:        []string{"aspectRatio", "resolution", "seed"},
 			wantReferenceURLs: true,
 		},
 		{
@@ -141,6 +163,7 @@ func TestMediaLinkFamiliesAreAddedWithoutRemovingLegacyCatalog(t *testing.T) {
 		kind      Kind
 	}{
 		FamilyCodexImage: {versionID: VersionCodexImageV1, kind: KindImage},
+		FamilyZImage:     {versionID: VersionZImageV1, kind: KindImage},
 		FamilyMiniMaxH3:  {versionID: VersionMiniMaxH3V1, kind: KindVideo},
 	}
 	for _, group := range ModelFamilyGroups() {

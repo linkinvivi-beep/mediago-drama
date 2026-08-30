@@ -2,9 +2,11 @@ package generation
 
 const (
 	FamilyCodexImage = "codex-image"
+	FamilyZImage     = "z-image"
 	FamilyMiniMaxH3  = "minimax-h3"
 
 	VersionCodexImageV1 = "codex-image-v1"
+	VersionZImageV1     = "z-image-v1"
 	VersionMiniMaxH3V1  = "minimax-h3-v1"
 )
 
@@ -32,6 +34,33 @@ var mediaLinkFamilySpecs = []familySpec{
 				"https://developers.openai.com/codex/app-server",
 				codexImageParams(),
 				false,
+			),
+		},
+	},
+	{
+		Family: ModelFamily{
+			ID:          FamilyZImage,
+			Label:       "Z-Image",
+			Kind:        KindImage,
+			Description: "Z-Image generation through AutoDL ComfyUI",
+		},
+		Versions: []ModelVersion{
+			version(VersionZImageV1, FamilyZImage, "Z-Image", KindImage, "z-image", false, true),
+		},
+		Routes: []ModelRoute{
+			mediaLinkRoute(
+				RouteAutoDLZImage,
+				FamilyZImage,
+				VersionZImageV1,
+				"AutoDL · Z-Image",
+				KindImage,
+				ProviderAutoDL,
+				"z-image",
+				AdapterAutoDLComfyZImage,
+				"https://docs.comfy.org/development/core-concepts/api",
+				autoDLZImageParams(),
+				false,
+				withReferenceURLLimit(1),
 			),
 		},
 	},
@@ -75,8 +104,9 @@ func mediaLinkRoute(
 	docURL string,
 	params RouteParamConfig,
 	async bool,
+	options ...routeOption,
 ) ModelRoute {
-	return ModelRoute{
+	route := ModelRoute{
 		ID:                    id,
 		FamilyID:              familyID,
 		VersionID:             versionID,
@@ -95,6 +125,8 @@ func mediaLinkRoute(
 		CanonicalParams:       params.CanonicalParams,
 		Translation:           params.Translation,
 	}
+	applyRouteOptions(&route, options...)
+	return route
 }
 
 func codexImageParams() RouteParamConfig {
@@ -106,6 +138,24 @@ func codexImageParams() RouteParamConfig {
 			{Label: "16:9", Value: "16:9"},
 			{Label: "9:16", Value: "9:16"},
 		}),
+	})
+}
+
+func autoDLZImageParams() RouteParamConfig {
+	return identityRouteParamConfig([]RouteParam{
+		selectRouteParam(ParamAspectRatio, "1:1", []ParamOption{
+			{Label: "1:1", Value: "1:1"},
+			{Label: "3:2", Value: "3:2"},
+			{Label: "2:3", Value: "2:3"},
+			{Label: "16:9", Value: "16:9"},
+			{Label: "9:16", Value: "9:16"},
+		}),
+		selectRouteParam(ParamResolution, "1K", []ParamOption{
+			{Label: "512px", Value: "512px"},
+			{Label: "1K", Value: "1K"},
+			{Label: "2K", Value: "2K"},
+		}),
+		optionalNumberRouteParam(ParamSeed, -1, 2147483647),
 	})
 }
 

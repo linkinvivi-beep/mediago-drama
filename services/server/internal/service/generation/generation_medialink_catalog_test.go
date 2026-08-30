@@ -125,11 +125,13 @@ func assertMediaLinkCatalogShape(t *testing.T, catalog GenerationModelsResponse)
 	t.Helper()
 	if got, want := mediaLinkRouteIDs(catalog.Routes), []string{
 		coregeneration.RouteCodexImage,
+		coregeneration.RouteAutoDLZImage,
 		coregeneration.RouteAutoDLH3,
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("route IDs = %v, want %v", got, want)
 	}
 	if got, want := mediaLinkRouteKinds(catalog.Routes), []coregeneration.Kind{
+		coregeneration.KindImage,
 		coregeneration.KindImage,
 		coregeneration.KindVideo,
 	}; !reflect.DeepEqual(got, want) {
@@ -137,12 +139,14 @@ func assertMediaLinkCatalogShape(t *testing.T, catalog GenerationModelsResponse)
 	}
 	if got, want := mediaLinkFamilyIDs(catalog.Families), []string{
 		coregeneration.FamilyCodexImage,
+		coregeneration.FamilyZImage,
 		coregeneration.FamilyMiniMaxH3,
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("family IDs = %v, want %v", got, want)
 	}
 	if got, want := mediaLinkVersionIDs(catalog.Versions), []string{
 		coregeneration.VersionCodexImageV1,
+		coregeneration.VersionZImageV1,
 		coregeneration.VersionMiniMaxH3V1,
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("version IDs = %v, want %v", got, want)
@@ -162,15 +166,15 @@ func assertMediaLinkCatalogShape(t *testing.T, catalog GenerationModelsResponse)
 		}
 	}
 	for _, version := range catalog.Versions {
-		if version.FamilyID != coregeneration.FamilyCodexImage && version.FamilyID != coregeneration.FamilyMiniMaxH3 {
+		if version.FamilyID != coregeneration.FamilyCodexImage && version.FamilyID != coregeneration.FamilyZImage && version.FamilyID != coregeneration.FamilyMiniMaxH3 {
 			t.Fatalf("version %q references hidden family %q", version.ID, version.FamilyID)
 		}
 	}
 	for _, route := range catalog.Routes {
-		if route.FamilyID != coregeneration.FamilyCodexImage && route.FamilyID != coregeneration.FamilyMiniMaxH3 {
+		if route.FamilyID != coregeneration.FamilyCodexImage && route.FamilyID != coregeneration.FamilyZImage && route.FamilyID != coregeneration.FamilyMiniMaxH3 {
 			t.Fatalf("route %q references hidden family %q", route.ID, route.FamilyID)
 		}
-		if route.VersionID != coregeneration.VersionCodexImageV1 && route.VersionID != coregeneration.VersionMiniMaxH3V1 {
+		if route.VersionID != coregeneration.VersionCodexImageV1 && route.VersionID != coregeneration.VersionZImageV1 && route.VersionID != coregeneration.VersionMiniMaxH3V1 {
 			t.Fatalf("route %q references hidden version %q", route.ID, route.VersionID)
 		}
 		if route.Provider != coregeneration.ProviderCodex && route.Provider != coregeneration.ProviderAutoDL {
@@ -223,8 +227,9 @@ func TestMediaLinkRouteProviders(t *testing.T) {
 	codexProvider := &mediaLinkTestProvider{name: "codex-test"}
 	h3Provider := &mediaLinkTestProvider{name: "autodl-h3-test"}
 	providers := mediaLinkRouteProviders{
-		codexImage: codexProvider,
-		autodlH3:   h3Provider,
+		codexImage:   codexProvider,
+		autodlZImage: nil,
+		autodlH3:     h3Provider,
 	}
 
 	t.Run("selects the provider for each MediaLink route", func(t *testing.T) {
@@ -233,6 +238,7 @@ func TestMediaLinkRouteProviders(t *testing.T) {
 			want    coregeneration.Provider
 		}{
 			{routeID: coregeneration.RouteCodexImage, want: codexProvider},
+			{routeID: coregeneration.RouteAutoDLZImage, want: nil},
 			{routeID: coregeneration.RouteAutoDLH3, want: h3Provider},
 		} {
 			route, ok := coregeneration.FindRoute(test.routeID)

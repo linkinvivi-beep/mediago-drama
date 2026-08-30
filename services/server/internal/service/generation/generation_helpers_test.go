@@ -174,3 +174,40 @@ func TestGenerationRequestFromMessageSelectsMediagoHappyHorseModelFromReferences
 		t.Fatalf("reference model = %q, want %q", referenceRequest.Model, coregeneration.ModelHappyHorse11R2V)
 	}
 }
+
+func TestGenerationRequestFromMessageCopiesAutoDLInstanceProfile(t *testing.T) {
+	route, ok := coregeneration.FindRoute(coregeneration.RouteAutoDLZImage)
+	if !ok {
+		t.Fatalf("missing route %q", coregeneration.RouteAutoDLZImage)
+	}
+	payload := GenerationMessageRequest{
+		Kind:              string(route.Kind),
+		RouteID:           route.ID,
+		Model:             route.Model,
+		Prompt:            "portrait",
+		InstanceProfileID: " instance-a ",
+	}
+
+	request := GenerationRequestFromMessage(payload, route, nil)
+	if request.InstanceProfileID != "instance-a" {
+		t.Fatalf("InstanceProfileID = %q, want instance-a", request.InstanceProfileID)
+	}
+}
+
+func TestGenerationTaskFromMessageSnapshotsManualAutoDLInstance(t *testing.T) {
+	route, ok := coregeneration.FindRoute(coregeneration.RouteAutoDLZImage)
+	if !ok {
+		t.Fatalf("missing route %q", coregeneration.RouteAutoDLZImage)
+	}
+	task := GenerationTaskFromMessage(GenerationMessageRequest{
+		Kind:              string(route.Kind),
+		RouteID:           route.ID,
+		Model:             route.Model,
+		Prompt:            "portrait",
+		InstanceProfileID: " instance-a ",
+	}, route, GenerationMessageResponse{ID: "task-zimage", Status: "waiting_for_instance"})
+
+	if task.RuntimeState.InstanceProfileID != "instance-a" {
+		t.Fatalf("RuntimeState.InstanceProfileID = %q, want instance-a", task.RuntimeState.InstanceProfileID)
+	}
+}
