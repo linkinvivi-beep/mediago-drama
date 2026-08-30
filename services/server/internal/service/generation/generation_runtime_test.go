@@ -2702,6 +2702,36 @@ func TestPollPendingGenerationTasksKeepsImageWithProviderIDPollable(t *testing.T
 	}
 }
 
+func TestPollPendingGenerationTasksPollsIdentifiedSubmittingImageWithoutGenerate(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "settings.db")
+	repo, err := repository.NewGenerationTaskRepository(dbPath)
+	if err != nil {
+		t.Fatalf("NewGenerationTaskRepository() error = %v", err)
+	}
+	store := NewGenerationTaskServiceFromRepository(repo, nil, nil)
+	settingsSvc := settings.NewSettings(&generationTestAPIKeyStore{
+		values: map[string]string{coregeneration.ProviderLibTV: "oauth:configured"},
+	})
+	providerID := "codex.imagegen:thread-1"
+	provider := &stubImageProvider{getResponse: coregeneration.Response{ID: providerID, Status: "running"}}
+	workflow := NewGenerationService(settingsSvc, store, nil)
+	workflow.legacyProviderFactory = func(coregeneration.ModelRoute) (coregeneration.Provider, error) {
+		return provider, nil
+	}
+
+	task := libTVImageTaskRecord("generation-submitting-with-provider-id")
+	task.Status = "submitting"
+	task.ProviderTaskID = providerID
+	if err := store.Upsert(task); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+
+	workflow.PollPendingGenerationTasks(context.Background(), 10)
+	if provider.generateCalls.Load() != 0 || provider.getCalls.Load() != 1 || provider.getID != providerID {
+		t.Fatalf("provider calls generate=%d get=%d id=%q, want one poll and no resubmit for identified image", provider.generateCalls.Load(), provider.getCalls.Load(), provider.getID)
+	}
+}
+
 func TestLibTVImageGenerationHandoffAndPoll(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "settings.db")
 	repo, err := repository.NewGenerationTaskRepository(dbPath)

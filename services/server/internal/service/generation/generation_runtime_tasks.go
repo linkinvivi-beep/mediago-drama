@@ -698,7 +698,8 @@ func (workflow *GenerationService) PollGenerationTask(ctx context.Context, task 
 		workflow.submitQueuedJimengSeedanceGeneration(ctx, task, provider, generationRequest)
 		return
 	}
-	if strings.EqualFold(strings.TrimSpace(task.Status), "submitting") {
+	if strings.EqualFold(strings.TrimSpace(task.Status), "submitting") &&
+		strings.EqualFold(strings.TrimSpace(task.Kind), string(coregeneration.KindVideo)) {
 		generationRequest, err := workflow.generationRequestForTask(ctx, task, route)
 		if err != nil {
 			_ = workflow.generationTasks.RecordAttempt(task.ID, "create", task.Status, "后台提交视频任务失败。", err)
