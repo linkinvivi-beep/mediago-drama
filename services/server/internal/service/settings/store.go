@@ -125,6 +125,9 @@ type Settings struct {
 	apiKeys                  APIKeyStore
 	agentProfiles            AgentModelProfileStore
 	appSettings              AppSettingStore
+	autoDLPasswords          autoDLPasswordStore
+	autoDLSettingsMu         sync.Mutex
+	autoDLIDGenerator        func(string) (string, error)
 	modelPlatformIDs         []string
 	modelPlatformsConfigured bool
 	generationCLIProviderIDs []string

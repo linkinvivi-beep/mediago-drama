@@ -22,6 +22,7 @@ import (
 	appevents "github.com/mediago-dev/mediago-drama/services/server/internal/app/events"
 	appworkspace "github.com/mediago-dev/mediago-drama/services/server/internal/app/workspace"
 	corecapability "github.com/mediago-dev/mediago-drama/services/server/internal/capability"
+	platformkeychain "github.com/mediago-dev/mediago-drama/services/server/internal/platform/keychain"
 	platformprotectedpack "github.com/mediago-dev/mediago-drama/services/server/internal/platform/protectedpack"
 	"github.com/mediago-dev/mediago-drama/services/server/internal/repository"
 	serviceacp "github.com/mediago-dev/mediago-drama/services/server/internal/service/acp"
@@ -131,6 +132,7 @@ func newAPIHandler(config Config) *apiHandler {
 		settingsRepos.AgentModelProfiles,
 		settingsRepos.AppSettings,
 	)
+	settings.SetAutoDLPasswordStore(platformkeychain.NewGenericPasswordStore())
 	settings.SetJimengCLIPaths(config.JimengBinPath, config.JimengBinDir)
 	settings.SetLibTVCLIPaths(config.LibTVBinPath, config.LibTVBinDir)
 	settings.SetPippitCLIPaths(config.PippitBinPath, config.PippitBinDir)
