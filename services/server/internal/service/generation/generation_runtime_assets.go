@@ -21,8 +21,17 @@ func (workflow *GenerationService) resolveGenerationReferences(
 		return []string{}, nil
 	}
 
-	references, referenceAssetIDs := splitReferenceURLs(request.ReferenceURLs)
-	for _, assetID := range uniqueCompactStrings(append(referenceAssetIDs, request.ReferenceAssetIDs...)) {
+	ordered := orderedGenerationReferencesFromParams(request.Params)
+	if len(ordered) == 0 {
+		ordered = canonicalOrderedGenerationReferences(request)
+	}
+	references := make([]string, 0, len(ordered))
+	for _, item := range ordered {
+		if strings.HasPrefix(item.Source, "url:") {
+			references = append(references, strings.TrimPrefix(item.Source, "url:"))
+			continue
+		}
+		assetID := strings.TrimPrefix(item.Source, "asset:")
 		asset, ok, err := workflow.mediaAssets.Get(assetID)
 		if err != nil {
 			return nil, err

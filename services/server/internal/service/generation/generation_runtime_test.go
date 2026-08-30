@@ -1933,14 +1933,7 @@ func TestCreatePromptOptimizedGenerationMessageRecordsOptimizationAndImageTasks(
 	if imageRequest.Prompt != "optimized prompt" {
 		t.Fatalf("image prompt = %q, want optimized prompt", imageRequest.Prompt)
 	}
-	if !strings.Contains(textRequest.Prompt, "优化 prompt：\ncinematic lighting, detailed composition") ||
-		!strings.Contains(textRequest.Prompt, "用户的输入：\n原始角色提示词") ||
-		!strings.Contains(textRequest.Prompt, "请按“优化 prompt”的风格和质量要求改写“用户的输入”") ||
-		!strings.Contains(textRequest.Prompt, "只输出优化后的提示词正文") ||
-		strings.Contains(textRequest.Prompt, "输出要求") ||
-		strings.Contains(textRequest.Prompt, "赛璐珞") {
-		t.Fatalf("text prompt = %q, want concise style-agnostic optimization prompt", textRequest.Prompt)
-	}
+	assertPromptOptimizationDataEnvelope(t, textRequest.Prompt, "cinematic lighting, detailed composition", "原始角色提示词", nil)
 
 	optimizationTask, ok, err := store.Get(response.Optimization.ID)
 	if err != nil {

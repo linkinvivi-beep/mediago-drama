@@ -150,9 +150,7 @@ func TestCreatePromptOptimizedGenerationMessageAppliesPromptSupplementsBeforeOpt
 	if err != nil || status != http.StatusOK {
 		t.Fatalf("CreatePromptOptimizedGenerationMessage() status = %d error = %v", status, err)
 	}
-	if !strings.Contains(textRequest.Prompt, "用户的输入：\nbase prompt\n\ncinematic lighting") {
-		t.Fatalf("optimization prompt = %q, want appended supplement", textRequest.Prompt)
-	}
+	assertPromptOptimizationDataEnvelope(t, textRequest.Prompt, "high quality", "base prompt\n\ncinematic lighting", nil)
 	imageRequest := waitForPromptSupplementsProviderRequest(t, imageProvider.started)
 	if response.OptimizedPrompt != "optimized prompt" || imageRequest.Prompt != "optimized prompt" {
 		t.Fatalf("response = %+v, image prompt = %q", response, imageRequest.Prompt)

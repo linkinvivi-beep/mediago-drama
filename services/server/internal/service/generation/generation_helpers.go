@@ -18,6 +18,8 @@ const agentGenerationConversationScopeID = "agent"
 const generationProjectScopePrefix = "project-"
 const generationInternalParamPrefix = "_mediago_"
 const generationAssetTitleRequestOption = "_mediago_asset_title"
+const generationSensitivePromptParam = "_mediago_sensitive_prompt"
+const generationSensitivePromptRequestOption = "_mediago_sensitive_prompt"
 
 var generationConversationIDPartPattern = regexp.MustCompile(`[^a-z0-9_-]+`)
 
@@ -366,12 +368,18 @@ func generationModelForReferences(
 
 func generationRequestOptions(payload GenerationMessageRequest) map[string]any {
 	assetTitle := strings.TrimSpace(payload.AssetTitle)
-	if assetTitle == "" {
+	sensitivePrompt, _ := payload.Params[generationSensitivePromptParam].(bool)
+	if assetTitle == "" && !sensitivePrompt {
 		return nil
 	}
-	return map[string]any{
-		generationAssetTitleRequestOption: assetTitle,
+	options := map[string]any{}
+	if assetTitle != "" {
+		options[generationAssetTitleRequestOption] = assetTitle
 	}
+	if sensitivePrompt {
+		options[generationSensitivePromptRequestOption] = true
+	}
+	return options
 }
 
 func generationAssetTitleFromRequest(request coregeneration.Request) string {

@@ -381,6 +381,7 @@ func (workflow *GenerationService) CreateGenerationMessage(ctx context.Context, 
 		payload.Kind = string(coregeneration.KindImage)
 	}
 	payload.Params = NormalizeGenerationParams(payload.Params)
+	payload.Params = generationParamsWithOrderedReferences(payload.Params, canonicalOrderedGenerationReferences(payload))
 	if payload.Prompt == "" {
 		return generationMessageResponse{}, http.StatusBadRequest, fmt.Errorf("缺少 prompt")
 	}

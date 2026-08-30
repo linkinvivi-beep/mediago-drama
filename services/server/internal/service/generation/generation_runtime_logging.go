@@ -2,6 +2,7 @@ package generation
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -31,9 +32,14 @@ func (workflow *GenerationService) generateWithProvider(
 	response, err := provider.Generate(ctx, request)
 	duration := time.Since(startedAt)
 	if err != nil {
+		loggedError := err
+		if generationRequestHasSensitivePrompt(request) {
+			loggedError = errors.New("protected prompt generation failed")
+			err = errors.New("提示词优化执行失败")
+		}
 		slog.Warn(
 			"generation provider request failed",
-			append(logArgs, "duration_ms", duration.Milliseconds(), "error", err)...,
+			append(logArgs, "duration_ms", duration.Milliseconds(), "error", loggedError)...,
 		)
 		return response, err
 	}
@@ -70,6 +76,10 @@ func generationProviderLogArgs(
 }
 
 func sanitizedGenerationRequest(request coregeneration.Request) map[string]any {
+	prompt := request.Prompt
+	if generationRequestHasSensitivePrompt(request) {
+		prompt = "<protected-prompt-omitted>"
+	}
 	return map[string]any{
 		"kind":            request.Kind,
 		"route_id":        request.RouteID,
@@ -78,7 +88,7 @@ func sanitizedGenerationRequest(request coregeneration.Request) map[string]any {
 		"provider":        request.Provider,
 		"model_id":        request.ModelID,
 		"model":           request.Model,
-		"prompt":          request.Prompt,
+		"prompt":          prompt,
 		"prompt_bytes":    len(request.Prompt),
 		"reference_count": len(request.ReferenceURLs),
 		"reference_urls":  sanitizedReferenceURLs(request.ReferenceURLs),
@@ -88,6 +98,11 @@ func sanitizedGenerationRequest(request coregeneration.Request) map[string]any {
 		"params":          sanitizedLogValue(request.Params),
 		"options":         sanitizedLogValue(request.Options),
 	}
+}
+
+func generationRequestHasSensitivePrompt(request coregeneration.Request) bool {
+	value, _ := request.Options[generationSensitivePromptRequestOption].(bool)
+	return value
 }
 
 func sanitizedGenerationResponse(response coregeneration.Response) map[string]any {
