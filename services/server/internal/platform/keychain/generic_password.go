@@ -6,17 +6,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
+	"syscall"
 	"unicode"
 	"unicode/utf8"
 )
 
 const (
-	securityExecutable             = "/usr/bin/security"
-	keychainItemNotFoundExitCode   = 44
-	maxIdentifierBytes             = 256
-	maxSecretBytes                 = 64 << 10
+	securityExecutable           = "/usr/bin/security"
+	keychainItemNotFoundExitCode = 44
+	maxIdentifierBytes           = 128
+	// security(1) reads -w through getpass. Keep the UTF-8 password at or
+	// below 127 bytes so the terminating newline also fits its conservative
+	// 128-byte input budget without truncation.
+	maxSecretBytes                 = 127
 	maxSecurityCommandOutputBytes  = maxSecretBytes + 2
 	maxSecurityCommandMessageBytes = 4 << 10
 )
@@ -47,7 +52,7 @@ type genericPasswordStore struct {
 
 // NewGenericPasswordStore creates the production macOS Keychain adapter.
 func NewGenericPasswordStore() GenericPasswordStore {
-	return newGenericPasswordStore(execRunner{})
+	return newGenericPasswordStore(execRunner{factory: execSecurityCommandFactory{}})
 }
 
 func newGenericPasswordStore(runner commandRunner) *genericPasswordStore {
@@ -58,11 +63,17 @@ func (store *genericPasswordStore) Set(ctx context.Context, service, account, se
 	if err := validateCall(ctx, store, service, account); err != nil {
 		return err
 	}
-	if len(secret) == 0 || len(secret) > maxSecretBytes || strings.IndexByte(secret, 0) >= 0 || !utf8.ValidString(secret) {
+	if !validSecret(secret) {
 		return fmt.Errorf("invalid generic password secret")
 	}
 	args := []string{"add-generic-password", "-U", "-s", service, "-a", account, "-w"}
-	_, _, err := store.runner.Run(ctx, securityExecutable, args, []byte(secret))
+	stdin := make([]byte, len(secret)+1)
+	copy(stdin, secret)
+	stdin[len(secret)] = '\n'
+	defer clear(stdin)
+	stdout, stderr, err := store.runner.Run(ctx, securityExecutable, args, stdin)
+	defer clear(stdout)
+	defer clear(stderr)
 	if err != nil {
 		if contextErr := ctx.Err(); contextErr != nil {
 			return contextErr
@@ -77,7 +88,9 @@ func (store *genericPasswordStore) Get(ctx context.Context, service, account str
 		return "", err
 	}
 	args := []string{"find-generic-password", "-s", service, "-a", account, "-w"}
-	stdout, _, err := store.runner.Run(ctx, securityExecutable, args, nil)
+	stdout, stderr, err := store.runner.Run(ctx, securityExecutable, args, nil)
+	defer clear(stdout)
+	defer clear(stderr)
 	if err != nil {
 		if contextErr := ctx.Err(); contextErr != nil {
 			return "", contextErr
@@ -95,7 +108,9 @@ func (store *genericPasswordStore) Delete(ctx context.Context, service, account 
 		return err
 	}
 	args := []string{"delete-generic-password", "-s", service, "-a", account}
-	_, _, err := store.runner.Run(ctx, securityExecutable, args, nil)
+	stdout, stderr, err := store.runner.Run(ctx, securityExecutable, args, nil)
+	defer clear(stdout)
+	defer clear(stderr)
 	if err != nil {
 		if contextErr := ctx.Err(); contextErr != nil {
 			return contextErr
@@ -125,15 +140,38 @@ func validateCall(ctx context.Context, store *genericPasswordStore, service, acc
 }
 
 func validIdentifier(value string) bool {
-	if len(value) == 0 || len(value) > maxIdentifierBytes || strings.TrimSpace(value) != value || !utf8.ValidString(value) {
+	if len(value) == 0 || len(value) > maxIdentifierBytes {
 		return false
 	}
-	for _, char := range value {
+	for index := 0; index < len(value); index++ {
+		char := value[index]
+		if index == 0 {
+			if !isASCIIAlphaNumeric(char) {
+				return false
+			}
+			continue
+		}
+		if !isASCIIAlphaNumeric(char) && char != '.' && char != '_' && char != ':' && char != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func validSecret(secret string) bool {
+	if len(secret) == 0 || len(secret) > maxSecretBytes || !utf8.ValidString(secret) {
+		return false
+	}
+	for _, char := range secret {
 		if unicode.IsControl(char) {
 			return false
 		}
 	}
 	return true
+}
+
+func isASCIIAlphaNumeric(char byte) bool {
+	return char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9'
 }
 
 func trimTerminalNewline(value string) string {
@@ -156,17 +194,61 @@ func commandExitCode(err error) int {
 	return -1
 }
 
-type execRunner struct{}
+type securityProcess interface {
+	ConfigureIO(stdin io.Reader, stdout, stderr io.Writer)
+	DetachFromControllingTTY()
+	Run() error
+}
 
-func (execRunner) Run(ctx context.Context, path string, args []string, stdin []byte) ([]byte, []byte, error) {
-	command := exec.CommandContext(ctx, path, args...)
-	command.Stdin = bytes.NewReader(stdin)
+type securityCommandFactory interface {
+	CommandContext(ctx context.Context, path string, args ...string) securityProcess
+}
+
+type execRunner struct {
+	factory securityCommandFactory
+}
+
+func (runner execRunner) Run(ctx context.Context, path string, args []string, stdin []byte) ([]byte, []byte, error) {
+	defer clear(stdin)
+	factory := runner.factory
+	if factory == nil {
+		factory = execSecurityCommandFactory{}
+	}
+	command := factory.CommandContext(ctx, path, args...)
 	stdout := &boundedBuffer{maxBytes: maxSecurityCommandOutputBytes}
 	stderr := &boundedBuffer{maxBytes: maxSecurityCommandMessageBytes}
-	command.Stdout = stdout
-	command.Stderr = stderr
+	command.ConfigureIO(bytes.NewReader(stdin), stdout, stderr)
+	command.DetachFromControllingTTY()
 	err := command.Run()
 	return stdout.Bytes(), stderr.Bytes(), err
+}
+
+type execSecurityCommandFactory struct{}
+
+func (execSecurityCommandFactory) CommandContext(ctx context.Context, path string, args ...string) securityProcess {
+	return &execSecurityProcess{command: exec.CommandContext(ctx, path, args...)}
+}
+
+type execSecurityProcess struct {
+	command *exec.Cmd
+}
+
+func (process *execSecurityProcess) ConfigureIO(stdin io.Reader, stdout, stderr io.Writer) {
+	process.command.Stdin = stdin
+	process.command.Stdout = stdout
+	process.command.Stderr = stderr
+}
+
+func (process *execSecurityProcess) DetachFromControllingTTY() {
+	// A new session has no controlling terminal, forcing security(1)'s
+	// getpass path to consume the supplied stdin pipe instead of /dev/tty.
+	// Noctty is intentionally omitted: Go applies it to fd 0 after fd
+	// remapping, where our pipe would make TIOCNOTTY fail with ENOTTY.
+	process.command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+}
+
+func (process *execSecurityProcess) Run() error {
+	return process.command.Run()
 }
 
 type boundedBuffer struct {
