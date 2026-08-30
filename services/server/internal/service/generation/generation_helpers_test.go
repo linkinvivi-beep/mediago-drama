@@ -194,6 +194,25 @@ func TestGenerationRequestFromMessageCopiesAutoDLInstanceProfile(t *testing.T) {
 	}
 }
 
+func TestGenerationRequestFromMessageDoesNotCopyInstanceProfileOutsideAutoDL(t *testing.T) {
+	for _, routeID := range []string{coregeneration.RouteCodexImage, coregeneration.RouteDMXSeedream5Lite} {
+		route, ok := coregeneration.FindRoute(routeID)
+		if !ok {
+			t.Fatalf("missing route %q", routeID)
+		}
+		request := GenerationRequestFromMessage(GenerationMessageRequest{
+			Kind:              string(route.Kind),
+			RouteID:           route.ID,
+			Model:             route.Model,
+			Prompt:            "portrait",
+			InstanceProfileID: "instance-must-not-leak",
+		}, route, nil)
+		if request.InstanceProfileID != "" {
+			t.Fatalf("route %q InstanceProfileID = %q, want empty", routeID, request.InstanceProfileID)
+		}
+	}
+}
+
 func TestGenerationTaskFromMessageSnapshotsManualAutoDLInstance(t *testing.T) {
 	route, ok := coregeneration.FindRoute(coregeneration.RouteAutoDLZImage)
 	if !ok {
@@ -209,5 +228,155 @@ func TestGenerationTaskFromMessageSnapshotsManualAutoDLInstance(t *testing.T) {
 
 	if task.RuntimeState.InstanceProfileID != "instance-a" {
 		t.Fatalf("RuntimeState.InstanceProfileID = %q, want instance-a", task.RuntimeState.InstanceProfileID)
+	}
+}
+
+func TestGenerationTaskFromMessageDoesNotSnapshotManualInstanceOutsideAutoDL(t *testing.T) {
+	route, ok := coregeneration.FindRoute(coregeneration.RouteCodexImage)
+	if !ok {
+		t.Fatalf("missing route %q", coregeneration.RouteCodexImage)
+	}
+	task := GenerationTaskFromMessage(GenerationMessageRequest{
+		Kind:              string(route.Kind),
+		RouteID:           route.ID,
+		Model:             route.Model,
+		Prompt:            "portrait",
+		InstanceProfileID: "instance-must-not-leak",
+	}, route, GenerationMessageResponse{ID: "task-codex", Status: "submitted"})
+	if task.RuntimeState.InstanceProfileID != "" {
+		t.Fatalf("RuntimeState.InstanceProfileID = %q, want empty", task.RuntimeState.InstanceProfileID)
+	}
+}
+
+func TestGenerationTaskFromMessageRejectsProviderIdentityThatConflictsWithManualInstance(t *testing.T) {
+	route, ok := coregeneration.FindRoute(coregeneration.RouteAutoDLZImage)
+	if !ok {
+		t.Fatalf("missing route %q", coregeneration.RouteAutoDLZImage)
+	}
+	task := GenerationTaskFromMessage(GenerationMessageRequest{
+		Kind:              string(route.Kind),
+		RouteID:           route.ID,
+		Model:             route.Model,
+		Prompt:            "portrait",
+		InstanceProfileID: "instance-a",
+	}, route, GenerationMessageResponse{
+		ID: "task-conflicting-create", Status: "running",
+		RuntimeState: GenerationTaskRuntimeState{
+			InstanceProfileID:      "instance-b",
+			WorkflowProfileID:      "zimage-t2i",
+			WorkflowProfileVersion: "v1",
+			WorkflowDigest:         "sha256:one",
+		},
+	})
+	if task.Status != "failed" || task.ErrorCode != generationRuntimeStateConflictCode {
+		t.Fatalf("task status/error = %q/%q, want explicit identity conflict", task.Status, task.ErrorCode)
+	}
+	if task.RuntimeState.InstanceProfileID != "instance-a" || task.RuntimeState.WorkflowProfileID != "" {
+		t.Fatalf("runtime state = %+v, want pinned instance without hybrid workflow", task.RuntimeState)
+	}
+}
+
+func TestGenerationTaskWithMessageIgnoresAutoDLIdentityForCodex(t *testing.T) {
+	task := GenerationTaskRecord{ID: "task-codex-update", Kind: "image", RouteID: coregeneration.RouteCodexImage}
+	got := GenerationTaskWithMessage(task, GenerationMessageResponse{
+		Status: "running",
+		RuntimeState: GenerationTaskRuntimeState{
+			CodexThreadID:     "thread-1",
+			InstanceProfileID: "instance-must-not-leak",
+			WorkflowProfileID: "zimage-t2i",
+			WorkflowDigest:    "sha256:must-not-leak",
+		},
+	})
+	if got.Status != "running" || got.RuntimeState.CodexThreadID != "thread-1" {
+		t.Fatalf("Codex task = %+v, want normal Codex checkpoint", got)
+	}
+	if got.RuntimeState.InstanceProfileID != "" || got.RuntimeState.WorkflowProfileID != "" || got.RuntimeState.WorkflowDigest != "" {
+		t.Fatalf("Codex runtime state contains AutoDL identity: %+v", got.RuntimeState)
+	}
+}
+
+func TestGenerationTaskWithMessageRejectsConflictingAutoDLAttemptIdentity(t *testing.T) {
+	current := GenerationTaskRuntimeState{
+		InstanceProfileID:      "instance-a",
+		WorkflowProfileID:      "zimage-t2i",
+		WorkflowProfileVersion: "v1",
+		WorkflowDigest:         "sha256:one",
+		ComfyPromptID:          "prompt-1",
+		SubmittedAt:            "2026-08-30T12:00:00Z",
+	}
+	task := GenerationTaskRecord{ID: "task-conflict", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage, RuntimeState: current}
+	update := current
+	update.WorkflowDigest = "sha256:two"
+
+	got := GenerationTaskWithMessage(task, GenerationMessageResponse{Status: "running", RuntimeState: update})
+	if got.Status != "failed" || got.ErrorCode != generationRuntimeStateConflictCode {
+		t.Fatalf("task status/error = %q/%q, want explicit runtime conflict failure", got.Status, got.ErrorCode)
+	}
+	if got.RuntimeState != current {
+		t.Fatalf("runtime state = %+v, want unchanged %+v", got.RuntimeState, current)
+	}
+}
+
+func TestGenerationTaskWithMessageRejectsUnanchoredPartialAutoDLAttemptUpdate(t *testing.T) {
+	current := GenerationTaskRuntimeState{InstanceProfileID: "instance-a", WorkflowProfileID: "zimage-t2i"}
+	task := GenerationTaskRecord{ID: "task-partial", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage, RuntimeState: current}
+
+	got := GenerationTaskWithMessage(task, GenerationMessageResponse{
+		Status:       "running",
+		RuntimeState: GenerationTaskRuntimeState{ComfyPromptID: "prompt-from-unknown-attempt"},
+	})
+	if got.Status != "failed" || got.ErrorCode != generationRuntimeStateConflictCode {
+		t.Fatalf("task status/error = %q/%q, want partial update failure", got.Status, got.ErrorCode)
+	}
+	if got.RuntimeState != current {
+		t.Fatalf("runtime state = %+v, want unchanged %+v", got.RuntimeState, current)
+	}
+}
+
+func TestGenerationTaskWithMessageAcceptsAnchoredLateAutoDLAttemptUpdate(t *testing.T) {
+	current := GenerationTaskRuntimeState{
+		InstanceProfileID:      "instance-a",
+		WorkflowProfileID:      "zimage-t2i",
+		WorkflowProfileVersion: "v1",
+		WorkflowDigest:         "sha256:one",
+	}
+	update := current
+	update.ComfyPromptID = "prompt-1"
+	update.SubmittedAt = "2026-08-30T12:00:00Z"
+	task := GenerationTaskRecord{ID: "task-late", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage, RuntimeState: current}
+
+	got := GenerationTaskWithMessage(task, GenerationMessageResponse{Status: "running", RuntimeState: update})
+	if got.Status != "running" || got.RuntimeState != update {
+		t.Fatalf("task = status %q state %+v, want running %+v", got.Status, got.RuntimeState, update)
+	}
+}
+
+func TestGenerationTaskWithMessageAcceptsFirstCompleteAutoDLAttemptIdentity(t *testing.T) {
+	want := GenerationTaskRuntimeState{
+		InstanceProfileID:      "instance-a",
+		WorkflowProfileID:      "zimage-t2i",
+		WorkflowProfileVersion: "v1",
+		WorkflowDigest:         "sha256:one",
+		ComfyPromptID:          "prompt-1",
+		SubmittedAt:            "2026-08-30T12:00:00Z",
+	}
+	task := GenerationTaskRecord{ID: "task-first-checkpoint", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage}
+	got := GenerationTaskWithMessage(task, GenerationMessageResponse{Status: "running", RuntimeState: want})
+	if got.Status != "running" || got.RuntimeState != want {
+		t.Fatalf("task = status %q state %+v, want first complete identity %+v", got.Status, got.RuntimeState, want)
+	}
+}
+
+func TestGenerationTaskWithMessageRejectsPromptIDWithoutSubmissionTime(t *testing.T) {
+	task := GenerationTaskRecord{ID: "task-incomplete-prompt", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage}
+	got := GenerationTaskWithMessage(task, GenerationMessageResponse{
+		Status:       "running",
+		RuntimeState: GenerationTaskRuntimeState{ComfyPromptID: "prompt-1"},
+	})
+	if got.Status != "failed" || got.ErrorCode != generationRuntimeStateConflictCode {
+		t.Fatalf("task status/error = %q/%q, want incomplete prompt identity failure", got.Status, got.ErrorCode)
+	}
+	if got.RuntimeState != (GenerationTaskRuntimeState{}) {
+		t.Fatalf("runtime state = %+v, want empty after rejected prompt identity", got.RuntimeState)
 	}
 }

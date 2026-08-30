@@ -963,7 +963,7 @@ func (workflow *GenerationService) submitPendingGeneration(
 	messageResponse := generationResponseWithAssetTitle(GenerationResponseFromCore(response, task.Kind), assetTitle)
 	messageResponse.ID = task.ID
 	submittedTask := GenerationTaskWithMessage(submittingTask, messageResponse)
-	if providerTaskID != "" {
+	if providerTaskID != "" && submittedTask.ErrorCode != generationRuntimeStateConflictCode {
 		submittedTask.ProviderTaskID = providerTaskID
 	}
 	submittedExisted, err := workflow.generationTasks.UpsertExisting(submittedTask)
@@ -1082,7 +1082,11 @@ func (workflow *GenerationService) taskWithCodexResponseRuntime(task generationT
 	}
 	state := task.RuntimeState
 	if responseState, ok := response.Metadata["runtime_state"].(GenerationTaskRuntimeState); ok {
-		state = mergeGenerationTaskRuntimeState(state, responseState)
+		var err error
+		state, err = mergeGenerationTaskRuntimeState(state, generationRuntimeStateUpdateForRoute(task.RouteID, responseState))
+		if err != nil {
+			return generationTaskWithRuntimeStateConflict(task, err)
+		}
 	}
 	if strings.EqualFold(strings.TrimSpace(response.Status), "completed") {
 		task.ProviderTaskID = ""
@@ -1118,7 +1122,9 @@ func (workflow *GenerationService) handOffPendingGeneration(
 	}
 	messageResponse.ID = task.ID
 	pendingTask := GenerationTaskWithMessage(runningTask, messageResponse)
-	pendingTask.ProviderTaskID = providerTaskID
+	if pendingTask.ErrorCode != generationRuntimeStateConflictCode {
+		pendingTask.ProviderTaskID = providerTaskID
+	}
 	pendingTask = workflow.taskWithCurrentProgressAssets(task.ID, pendingTask)
 	existed, err := workflow.generationTasks.UpsertExisting(pendingTask)
 	if err != nil {
@@ -1203,10 +1209,9 @@ func (workflow *GenerationService) persistGenerationProgress(
 	}
 
 	progressTask := GenerationTaskWithMessage(task, messageResponse)
-	if providerTaskID != "" {
+	if providerTaskID != "" && progressTask.ErrorCode != generationRuntimeStateConflictCode {
 		progressTask.ProviderTaskID = providerTaskID
 	}
-	progressTask.Status = progressStatus
 	existed, err := workflow.generationTasks.UpsertExisting(progressTask)
 	if err != nil {
 		slog.Warn("generation task progress could not be saved", "task_id", task.ID, "error", err)

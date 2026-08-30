@@ -3,6 +3,7 @@ package generation
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"time"
 
 	coregeneration "github.com/mediago-dev/mediago-drama/packages/core/pkg/generation"
@@ -66,15 +67,33 @@ func filterCatalogRoutes(source coregeneration.ModelCatalog, allowed map[string]
 }
 
 func (providers mediaLinkRouteProviders) providerForRoute(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	var provider coregeneration.Provider
 	switch route.ID {
 	case coregeneration.RouteCodexImage:
-		return providers.codexImage, nil
+		provider = providers.codexImage
 	case coregeneration.RouteAutoDLZImage:
-		return providers.autodlZImage, nil
+		provider = providers.autodlZImage
 	case coregeneration.RouteAutoDLH3:
-		return providers.autodlH3, nil
+		provider = providers.autodlH3
 	default:
 		return nil, fmt.Errorf("MediaLink route %q is not available", route.ID)
+	}
+	if generationProviderIsNil(provider) {
+		return nil, fmt.Errorf("MediaLink route %q provider is not configured", route.ID)
+	}
+	return provider, nil
+}
+
+func generationProviderIsNil(provider coregeneration.Provider) bool {
+	if provider == nil {
+		return true
+	}
+	value := reflect.ValueOf(provider)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
 	}
 }
 
@@ -87,7 +106,16 @@ func isMediaLinkRouteID(routeID string) bool {
 	}
 }
 
-// SetMediaLinkProviders installs the two product providers and their readiness check.
+func isAutoDLGenerationRouteID(routeID string) bool {
+	switch routeID {
+	case coregeneration.RouteAutoDLZImage, coregeneration.RouteAutoDLH3:
+		return true
+	default:
+		return false
+	}
+}
+
+// SetMediaLinkProviders installs the currently wired product providers and their readiness check.
 func (workflow *GenerationService) SetMediaLinkProviders(
 	codexImage coregeneration.Provider,
 	autodlH3 coregeneration.Provider,
@@ -108,6 +136,11 @@ func (workflow *GenerationService) mediaLinkRouteReady(routeID string) (bool, st
 func (workflow *GenerationService) mediaLinkRouteReadyContext(ctx context.Context, routeID string) (bool, string) {
 	if workflow == nil || workflow.mediaLinkReadiness == nil {
 		return false, fmt.Sprintf("MediaLink route %q is not ready", routeID)
+	}
+	if route, ok := coregeneration.FindRoute(routeID); ok && workflow.generationProviderFactory != nil {
+		if _, err := workflow.generationProviderFactory(route); err != nil {
+			return false, err.Error()
+		}
 	}
 	if ctx == nil {
 		ctx = context.Background()

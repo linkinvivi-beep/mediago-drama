@@ -1389,6 +1389,45 @@ func TestGenerationProgressRuntimeStatePersistsBeforeProviderDisconnects(t *test
 	}
 }
 
+func TestGenerationProgressCheckpointRejectsConflictingAutoDLAttemptIdentity(t *testing.T) {
+	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	current := GenerationTaskRuntimeState{
+		InstanceProfileID:      "instance-a",
+		WorkflowProfileID:      "zimage-t2i",
+		WorkflowProfileVersion: "v1",
+		WorkflowDigest:         "sha256:one",
+		ComfyPromptID:          "prompt-1",
+		SubmittedAt:            "2026-08-30T12:00:00Z",
+	}
+	task := GenerationTaskRecord{
+		ID: "task-autodl-conflict", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage,
+		Status: "running", RuntimeState: current,
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	workflow := NewGenerationService(nil, store, nil)
+	conflicting := current
+	conflicting.WorkflowProfileID = "zimage-i2i"
+	workflow.persistGenerationProgress(context.Background(), task, coregeneration.ProgressEvent{
+		Response: coregeneration.Response{
+			Status:   "running",
+			Metadata: map[string]any{"runtime_state": conflicting},
+		},
+	}, "", "", "")
+
+	got, found, err := store.Get(task.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() = found %v, err %v", found, err)
+	}
+	if got.Status != "failed" || got.ErrorCode != generationRuntimeStateConflictCode {
+		t.Fatalf("checkpoint task status/error = %q/%q, want explicit conflict failure", got.Status, got.ErrorCode)
+	}
+	if got.RuntimeState != current {
+		t.Fatalf("checkpoint runtime = %+v, want unchanged %+v", got.RuntimeState, current)
+	}
+}
+
 func TestGenerationProgressRuntimeStateSurvivesReconnectHandoff(t *testing.T) {
 	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
 	task := testCodexGenerationTask("task-progress-handoff", "submitted")
