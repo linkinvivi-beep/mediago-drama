@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io/fs"
 	"mime/multipart"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mediago-dev/mediago-drama/services/server/internal/domain"
 	"github.com/mediago-dev/mediago-drama/services/server/internal/repository"
@@ -323,8 +325,425 @@ func TestDeleteIfUnreferencedRestoresFileWhenConditionalDeleteFails(t *testing.T
 	if _, err := os.Stat(asset.FilePath); err != nil {
 		t.Fatalf("asset file not restored after DB failure: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(mediaDir, ".trash", asset.ID+".json")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("resolved cleanup journal remains: %v", err)
+	journalPath := filepath.Join(mediaDir, ".trash", asset.ID+".json")
+	if _, err := os.Stat(journalPath); err != nil {
+		t.Fatalf("cleanup journal was lost after DB failure: %v", err)
+	}
+
+	store.deleteIfUnreferenced = store.repo.DeleteMediaAssetIfUnreferenced
+	deleted, err = store.DeleteIfUnreferenced(asset.ID)
+	if !deleted || err != nil {
+		t.Fatalf("DeleteIfUnreferenced(retry) = deleted %v err %v", deleted, err)
+	}
+	if _, err := os.Stat(journalPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cleanup journal remains after successful retry: %v", err)
+	}
+}
+
+func TestNewMediaAssetsRetriesConditionalDeleteErrorJournalAfterRestart(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	mediaDir := filepath.Join(root, "media")
+	store := NewMediaAssets(dbPath, mediaDir)
+	asset, err := store.SaveBase64WithOptions(
+		MediaKindImage,
+		"image/png",
+		base64.StdEncoding.EncodeToString([]byte("db-busy-restart-image")),
+		"",
+		MediaAssetSaveOptions{Source: MediaSourceGeneration},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.deleteIfUnreferenced = func(string) (bool, error) {
+		return false, errors.New("database is busy")
+	}
+	if deleted, err := store.DeleteIfUnreferenced(asset.ID); deleted || err == nil {
+		t.Fatalf("DeleteIfUnreferenced() = deleted %v err %v", deleted, err)
+	}
+	journalPath := filepath.Join(mediaDir, ".trash", asset.ID+".json")
+	if _, err := os.Stat(journalPath); err != nil {
+		t.Fatalf("cleanup journal missing before restart: %v", err)
+	}
+
+	restarted := NewMediaAssets(dbPath, mediaDir)
+	if restarted.initErr != nil {
+		t.Fatalf("NewMediaAssets() initErr = %v", restarted.initErr)
+	}
+	if _, found, err := restarted.Get(asset.ID); err != nil || found {
+		t.Fatalf("restart cleanup = found %v err %v", found, err)
+	}
+	if _, err := os.Stat(journalPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("restart cleanup journal remains: %v", err)
+	}
+}
+
+func TestDeleteIfUnreferencedRejectsPathsOutsideManagedMediaRoots(t *testing.T) {
+	tests := []struct {
+		name     string
+		relPath  func(mediaDir string, outsideDir string) string
+		makePath func(t *testing.T, mediaDir string, outsideDir string) string
+	}{
+		{
+			name: "absolute outside root",
+			relPath: func(_ string, outsideDir string) string {
+				return filepath.Join(outsideDir, "secret.png")
+			},
+			makePath: func(t *testing.T, _ string, outsideDir string) string {
+				t.Helper()
+				return filepath.Join(outsideDir, "secret.png")
+			},
+		},
+		{
+			name: "relative traversal",
+			relPath: func(_ string, _ string) string {
+				return filepath.Join("..", "secret.png")
+			},
+			makePath: func(t *testing.T, mediaDir string, _ string) string {
+				t.Helper()
+				return filepath.Join(filepath.Dir(mediaDir), "secret.png")
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			mediaDir := filepath.Join(root, "media")
+			outsideDir := filepath.Join(root, "outside")
+			if err := os.MkdirAll(mediaDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(outsideDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			target := test.makePath(t, mediaDir, outsideDir)
+			if err := os.WriteFile(target, []byte("do-not-touch"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			repo, err := repository.NewMediaAssetRepository(filepath.Join(root, "settings.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := repo.CreateMediaAsset(domain.AssetModel{
+				ID: "asset-unsafe-path", Kind: MediaKindImage, Filename: "secret.png", MIMEType: "image/png",
+				RelPath: test.relPath(mediaDir, outsideDir), Source: MediaSourceGeneration,
+				CreatedAt: domain.TimeFromString("2026-08-30T00:00:00Z"), UpdatedAt: domain.TimeFromString("2026-08-30T00:00:00Z"),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			store := NewMediaAssetsFromRepository(repo, mediaDir, root, nil, nil)
+			if deleted, err := store.DeleteIfUnreferenced("asset-unsafe-path"); deleted || err == nil {
+				t.Fatalf("DeleteIfUnreferenced() = deleted %v err %v", deleted, err)
+			}
+			if data, err := os.ReadFile(target); err != nil || string(data) != "do-not-touch" {
+				t.Fatalf("outside target changed: data %q err %v", data, err)
+			}
+			if _, err := repo.GetMediaAsset("asset-unsafe-path"); err != nil {
+				t.Fatalf("unsafe DB record was deleted: %v", err)
+			}
+		})
+	}
+}
+
+func TestDeleteIfUnreferencedRejectsSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	mediaDir := filepath.Join(root, "media")
+	outsideDir := filepath.Join(root, "outside")
+	if err := os.MkdirAll(mediaDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outsideDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(outsideDir, "secret.png")
+	if err := os.WriteFile(target, []byte("do-not-touch"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideDir, filepath.Join(mediaDir, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := repository.NewMediaAssetRepository(filepath.Join(root, "settings.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateMediaAsset(domain.AssetModel{
+		ID: "asset-symlink", Kind: MediaKindImage, Filename: "secret.png", MIMEType: "image/png",
+		RelPath: filepath.Join("escape", "secret.png"), Source: MediaSourceGeneration,
+		CreatedAt: domain.TimeFromString("2026-08-30T00:00:00Z"), UpdatedAt: domain.TimeFromString("2026-08-30T00:00:00Z"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store := NewMediaAssetsFromRepository(repo, mediaDir, root, nil, nil)
+	if deleted, err := store.DeleteIfUnreferenced("asset-symlink"); deleted || err == nil {
+		t.Fatalf("DeleteIfUnreferenced() = deleted %v err %v", deleted, err)
+	}
+	if data, err := os.ReadFile(target); err != nil || string(data) != "do-not-touch" {
+		t.Fatalf("symlink target changed: data %q err %v", data, err)
+	}
+}
+
+func TestDeleteIfUnreferencedRejectsTrashDirectorySymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	mediaDir := filepath.Join(root, "media")
+	outsideTrash := filepath.Join(root, "outside-trash")
+	store := NewMediaAssets(filepath.Join(root, "settings.db"), mediaDir)
+	asset, err := store.SaveBase64WithOptions(
+		MediaKindImage, "image/png", base64.StdEncoding.EncodeToString([]byte("trash-symlink")), "",
+		MediaAssetSaveOptions{Source: MediaSourceGeneration},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outsideTrash, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideTrash, filepath.Join(mediaDir, ".trash")); err != nil {
+		t.Fatal(err)
+	}
+	if deleted, err := store.DeleteIfUnreferenced(asset.ID); deleted || err == nil {
+		t.Fatalf("DeleteIfUnreferenced() = deleted %v err %v", deleted, err)
+	}
+	if _, err := os.Stat(asset.FilePath); err != nil {
+		t.Fatalf("asset changed through trash symlink: %v", err)
+	}
+	entries, err := os.ReadDir(outsideTrash)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("outside trash entries = %v err %v", entries, err)
+	}
+}
+
+func TestDeleteIfUnreferencedDoesNotGlobThroughTrashSymlinkWhenDBRecordIsMissing(t *testing.T) {
+	root := t.TempDir()
+	mediaDir := filepath.Join(root, "media")
+	outsideTrash := filepath.Join(root, "outside-trash")
+	store := NewMediaAssets(filepath.Join(root, "settings.db"), mediaDir)
+	if err := os.MkdirAll(outsideTrash, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideTrash, filepath.Join(mediaDir, ".trash")); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(outsideTrash, "asset-missing-file.png")
+	if err := os.WriteFile(target, []byte("do-not-touch"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if deleted, err := store.DeleteIfUnreferenced("asset-missing"); deleted || err == nil {
+		t.Fatalf("DeleteIfUnreferenced() = deleted %v err %v", deleted, err)
+	}
+	if data, err := os.ReadFile(target); err != nil || string(data) != "do-not-touch" {
+		t.Fatalf("outside tombstone changed: data %q err %v", data, err)
+	}
+}
+
+func TestDeleteIfUnreferencedDoesNotGlobAnotherAssetsTombstoneWhenDBRecordIsMissing(t *testing.T) {
+	root := t.TempDir()
+	mediaDir := filepath.Join(root, "media")
+	store := NewMediaAssets(filepath.Join(root, "settings.db"), mediaDir)
+	trashDir := filepath.Join(mediaDir, ".trash")
+	if err := os.MkdirAll(trashDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(trashDir, "asset-safe-other-file.png")
+	if err := os.WriteFile(target, []byte("do-not-touch"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if deleted, err := store.DeleteIfUnreferenced("asset-safe"); deleted || err != nil {
+		t.Fatalf("DeleteIfUnreferenced() = deleted %v err %v", deleted, err)
+	}
+	if data, err := os.ReadFile(target); err != nil || string(data) != "do-not-touch" {
+		t.Fatalf("foreign tombstone changed: data %q err %v", data, err)
+	}
+}
+
+func TestDeleteIfUnreferencedRejectsMalformedAssetID(t *testing.T) {
+	root := t.TempDir()
+	mediaDir := filepath.Join(root, "media")
+	store := NewMediaAssets(filepath.Join(root, "settings.db"), mediaDir)
+	asset, err := store.SaveBase64WithOptions(
+		MediaKindImage, "image/png", base64.StdEncoding.EncodeToString([]byte("malformed-id")), "",
+		MediaAssetSaveOptions{Source: MediaSourceGeneration},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, invalidID := range []string{"../" + asset.ID, "bad id", strings.Repeat("a", maxMediaAssetCleanupIDLength+1)} {
+		if deleted, err := store.DeleteIfUnreferenced(invalidID); deleted || err == nil {
+			t.Fatalf("DeleteIfUnreferenced(%q) = deleted %v err %v", invalidID, deleted, err)
+		}
+	}
+	if _, err := os.Stat(asset.FilePath); err != nil {
+		t.Fatalf("valid asset changed through malformed ID: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(mediaDir, asset.ID+".json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unsafe journal path was created: %v", err)
+	}
+}
+
+func TestNewMediaAssetsQuarantinesMalformedIDJournalWithoutTouchingTombstone(t *testing.T) {
+	root := t.TempDir()
+	mediaDir := filepath.Join(root, "media")
+	trashDir := filepath.Join(mediaDir, ".trash")
+	if err := os.MkdirAll(trashDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tombstone := filepath.Join(trashDir, "malicious-file.png")
+	if err := os.WriteFile(tombstone, []byte("do-not-touch"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	journalPath := filepath.Join(trashDir, "bad id.json")
+	journal := `{"assetId":"bad id","files":[{"original":"` + filepath.Join(mediaDir, "image.png") + `","staged":"` + tombstone + `"}]}`
+	if err := os.WriteFile(journalPath, []byte(journal), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := NewMediaAssets(filepath.Join(root, "settings.db"), mediaDir)
+	if store.initErr != nil {
+		t.Fatal(store.initErr)
+	}
+	if data, err := os.ReadFile(tombstone); err != nil || string(data) != "do-not-touch" {
+		t.Fatalf("malformed journal touched tombstone: data %q err %v", data, err)
+	}
+	if _, err := os.Stat(journalPath); err != nil {
+		t.Fatalf("malformed journal was not retained: %v", err)
+	}
+}
+
+func TestNewMediaAssetsQuarantinesJournalThatClaimsAnotherAssetsTombstone(t *testing.T) {
+	root := t.TempDir()
+	mediaDir := filepath.Join(root, "media")
+	trashDir := filepath.Join(mediaDir, ".trash")
+	if err := os.MkdirAll(trashDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tombstone := filepath.Join(trashDir, "asset-safe-other-file.png")
+	if err := os.WriteFile(tombstone, []byte("do-not-touch"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	journalPath := filepath.Join(trashDir, "asset-safe.json")
+	journal := `{"assetId":"asset-safe","files":[{"original":"` + filepath.Join(mediaDir, "image.png") + `","staged":"` + tombstone + `"}]}`
+	if err := os.WriteFile(journalPath, []byte(journal), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := NewMediaAssets(filepath.Join(root, "settings.db"), mediaDir)
+	if store.initErr != nil {
+		t.Fatal(store.initErr)
+	}
+	if data, err := os.ReadFile(tombstone); err != nil || string(data) != "do-not-touch" {
+		t.Fatalf("foreign tombstone changed: data %q err %v", data, err)
+	}
+	if _, err := os.Stat(journalPath); err != nil {
+		t.Fatalf("unsafe journal was not retained: %v", err)
+	}
+}
+
+func TestGenerationAssetClaimRetainsAndRetriesCleanupWhenJournalWriteFails(t *testing.T) {
+	root := t.TempDir()
+	mediaDir := filepath.Join(root, "media")
+	store := NewMediaAssets(filepath.Join(root, "settings.db"), mediaDir)
+	asset, claim, err := store.claimSavedGenerationAsset(func() (MediaAsset, bool, error) {
+		return store.SaveBase64WithOptionsTracked(
+			MediaKindImage,
+			"image/png",
+			base64.StdEncoding.EncodeToString([]byte("journal-write-retry")),
+			"",
+			MediaAssetSaveOptions{Source: MediaSourceGeneration},
+		)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	retryStarted := make(chan struct{})
+	releaseRetry := make(chan struct{})
+	cleanupDone := make(chan struct{})
+	writeCalls := 0
+	store.writeFile = func(path string, data []byte, mode fs.FileMode) error {
+		writeCalls++
+		if writeCalls == 1 {
+			return fs.ErrPermission
+		}
+		close(retryStarted)
+		<-releaseRetry
+		return os.WriteFile(path, data, mode)
+	}
+	store.removeFile = func(path string) error {
+		err := os.Remove(path)
+		if filepath.Base(path) == asset.ID+".json" {
+			close(cleanupDone)
+		}
+		return err
+	}
+	errorsFound := store.CompensateGenerationAssetClaims([]MediaAssetClaim{claim})
+	if len(errorsFound) != 1 {
+		t.Fatalf("CompensateGenerationAssetClaims() errors = %v", errorsFound)
+	}
+	store.generationClaimMu.Lock()
+	retained := store.generationClaims[asset.ID]
+	store.generationClaimMu.Unlock()
+	if retained.count != 0 || !retained.staged {
+		t.Fatalf("retained cleanup responsibility = %+v", retained)
+	}
+	<-retryStarted
+	close(releaseRetry)
+	<-cleanupDone
+	if _, found, err := store.Get(asset.ID); err != nil || found {
+		t.Fatalf("retried cleanup DB state = found %v err %v", found, err)
+	}
+	if _, err := os.Stat(asset.FilePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("retried cleanup file remains: %v", err)
+	}
+}
+
+func TestConstructorCleanupDeadlineReturnsWhileFiniteWorkerProcessesRemainingJournals(t *testing.T) {
+	root := t.TempDir()
+	mediaDir := filepath.Join(root, "media")
+	store := NewMediaAssets(filepath.Join(root, "settings.db"), mediaDir)
+	trashDir := filepath.Join(mediaDir, ".trash")
+	if err := os.MkdirAll(trashDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const journalCount = mediaAssetCleanupStartupLimit + 5
+	for index := 0; index < journalCount; index++ {
+		id := fmt.Sprintf("asset-batch-%02d", index)
+		tombstone := filepath.Join(trashDir, id+"-file.png")
+		if err := os.WriteFile(tombstone, []byte("staged"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		journal := fmt.Sprintf(`{"assetId":%q,"files":[{"original":%q,"staged":%q}]}`, id, filepath.Join(mediaDir, id+".png"), tombstone)
+		if err := os.WriteFile(filepath.Join(trashDir, id+".json"), []byte(journal), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	started := make(chan struct{}, journalCount)
+	permits := make(chan struct{})
+	store.removeFile = func(path string) error {
+		if strings.HasSuffix(path, "-file.png") {
+			started <- struct{}{}
+			<-permits
+		}
+		return os.Remove(path)
+	}
+	deadline := make(chan time.Time, 1)
+	deadline <- time.Unix(1, 0)
+	store.cleanupStartupDeadline = func() <-chan time.Time { return deadline }
+	store.reconcilePendingMediaAssetCleanup()
+	<-started
+	store.cleanupWorkerMu.Lock()
+	done := store.cleanupWorkerDone
+	store.cleanupWorkerMu.Unlock()
+	select {
+	case <-done:
+		t.Fatal("finite worker completed before blocked journals were released")
+	default:
+	}
+	for index := 0; index < journalCount; index++ {
+		permits <- struct{}{}
+		if index+1 < journalCount {
+			<-started
+		}
+	}
+	<-done
+	remaining, err := filepath.Glob(filepath.Join(trashDir, "*.json"))
+	if err != nil || len(remaining) != 0 {
+		t.Fatalf("remaining cleanup journals = %v err %v", remaining, err)
 	}
 }
 
