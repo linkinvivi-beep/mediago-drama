@@ -52,13 +52,28 @@ type Session struct {
 	closeOnce sync.Once
 }
 
+var appServerCommandContext = exec.CommandContext
+
 // Start launches and initializes a Codex app-server session.
 func Start(parent context.Context, binPath string) (*Session, error) {
+	return StartWithInitContext(parent, parent, binPath)
+}
+
+// StartWithInitContext uses parent for the child process lifetime and initCtx
+// only for the initialize handshake. Canceling initCtx after a successful start
+// does not terminate the app-server process.
+func StartWithInitContext(parent context.Context, initCtx context.Context, binPath string) (*Session, error) {
 	if strings.TrimSpace(binPath) == "" {
 		return nil, fmt.Errorf("Codex executable is required")
 	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	if initCtx == nil {
+		initCtx = parent
+	}
 	ctx, cancel := context.WithCancel(parent)
-	cmd := exec.CommandContext(ctx, binPath, "app-server", "--stdio")
+	cmd := appServerCommandContext(ctx, binPath, "app-server", "--stdio")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		cancel()
@@ -83,7 +98,7 @@ func Start(parent context.Context, binPath string) (*Session, error) {
 		readDone: make(chan struct{}),
 	}
 	go session.readLoop(bufio.NewScanner(stdout))
-	if err := session.initialize(ctx); err != nil {
+	if err := session.initialize(initCtx); err != nil {
 		session.Close()
 		return nil, err
 	}

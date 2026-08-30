@@ -4,13 +4,68 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
+
+func TestStartWithInitContextDeadlineReapsSilentChild(t *testing.T) {
+	binPath := writeFakeAppServer(t, `#!/bin/sh
+while IFS= read -r line; do sleep 10; done
+`)
+	originalCommand := appServerCommandContext
+	var command *exec.Cmd
+	appServerCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		command = originalCommand(ctx, name, args...)
+		return command
+	}
+	defer func() { appServerCommandContext = originalCommand }()
+	initCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := StartWithInitContext(context.Background(), initCtx, binPath)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("StartWithInitContext() error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("deadline returned after %v", elapsed)
+	}
+	if command == nil || command.Process == nil {
+		t.Fatal("child process was not started")
+	}
+	if signalErr := command.Process.Signal(syscall.Signal(0)); signalErr == nil {
+		t.Fatalf("silent child %d is still alive", command.Process.Pid)
+	}
+}
+
+func TestStartWithInitContextKeepsProcessAfterSuccessfulInitialization(t *testing.T) {
+	binPath := writeFakeAppServer(t, `#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*) echo '{"id":1,"result":{}}' ;;
+    *'"method":"test/alive"'*) echo '{"id":2,"result":{"alive":true}}' ;;
+  esac
+done
+`)
+	initCtx, cancelInit := context.WithCancel(context.Background())
+	session, err := StartWithInitContext(context.Background(), initCtx, binPath)
+	if err != nil {
+		t.Fatalf("StartWithInitContext() error = %v", err)
+	}
+	defer session.Close()
+	cancelInit()
+	var result struct {
+		Alive bool `json:"alive"`
+	}
+	if err := session.Call(context.Background(), "test/alive", nil, &result); err != nil || !result.Alive {
+		t.Fatalf("Call() = %#v, %v", result, err)
+	}
+}
 
 func TestSessionInitializesCallsAndQueuesNotifications(t *testing.T) {
 	binPath := writeFakeAppServer(t, `#!/bin/sh

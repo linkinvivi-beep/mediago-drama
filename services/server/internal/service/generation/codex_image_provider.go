@@ -59,7 +59,7 @@ type CodexImageProvider struct {
 type managedCodexImageSession struct {
 	parent  context.Context
 	binPath string
-	factory func(context.Context, string) (codexapp.Client, error)
+	factory func(context.Context, context.Context, string) (codexapp.Client, error)
 	gate    *codexImageFIFO
 	stateMu sync.Mutex
 	client  codexapp.Client
@@ -152,8 +152,10 @@ func NewManagedCodexImageProvider(parent context.Context, binPath string, dataRo
 	managed := &managedCodexImageSession{
 		parent:  parent,
 		binPath: strings.TrimSpace(binPath),
-		factory: func(ctx context.Context, path string) (codexapp.Client, error) { return codexapp.Start(ctx, path) },
-		gate:    newCodexImageFIFO(),
+		factory: func(parent context.Context, initCtx context.Context, path string) (codexapp.Client, error) {
+			return codexapp.StartWithInitContext(parent, initCtx, path)
+		},
+		gate: newCodexImageFIFO(),
 	}
 	if parent.Done() != nil {
 		go managed.closeOnShutdown()
@@ -185,7 +187,7 @@ func (session *managedCodexImageSession) Capabilities(ctx context.Context) (code
 		return codexapp.ModelProviderCapabilities{}, err
 	}
 	defer session.gate.release()
-	typed, err := session.ensure()
+	typed, err := session.ensure(ctx)
 	if err != nil {
 		return codexapp.ModelProviderCapabilities{}, err
 	}
@@ -203,7 +205,7 @@ func (session *managedCodexImageSession) GenerateImage(ctx context.Context, requ
 		return codexapp.ImageGenerationResult{}, err
 	}
 	defer session.gate.release()
-	typed, err := session.ensure()
+	typed, err := session.ensure(ctx)
 	if err != nil {
 		return codexapp.ImageGenerationResult{}, err
 	}
@@ -221,7 +223,7 @@ func (session *managedCodexImageSession) ReadImageResult(ctx context.Context, th
 		return codexapp.ImageGenerationResult{}, err
 	}
 	defer session.gate.release()
-	typed, err := session.ensure()
+	typed, err := session.ensure(ctx)
 	if err != nil {
 		return codexapp.ImageGenerationResult{}, err
 	}
@@ -230,14 +232,14 @@ func (session *managedCodexImageSession) ReadImageResult(ctx context.Context, th
 		return result, err
 	}
 	session.invalidate()
-	typed, err = session.ensure()
+	typed, err = session.ensure(ctx)
 	if err != nil {
 		return codexapp.ImageGenerationResult{}, err
 	}
 	return typed.ReadImageResult(ctx, threadID)
 }
 
-func (session *managedCodexImageSession) ensure() (*codexapp.ImageGenerationSession, error) {
+func (session *managedCodexImageSession) ensure(initCtx context.Context) (*codexapp.ImageGenerationSession, error) {
 	session.stateMu.Lock()
 	if session.typed != nil {
 		typed := session.typed
@@ -245,7 +247,7 @@ func (session *managedCodexImageSession) ensure() (*codexapp.ImageGenerationSess
 		return typed, nil
 	}
 	session.stateMu.Unlock()
-	client, err := session.factory(session.parent, session.binPath)
+	client, err := session.factory(session.parent, initCtx, session.binPath)
 	if err != nil {
 		return nil, err
 	}

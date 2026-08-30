@@ -3,9 +3,12 @@ package generation
 import (
 	"context"
 	"fmt"
+	"time"
 
 	coregeneration "github.com/mediago-dev/mediago-drama/packages/core/pkg/generation"
 )
+
+const mediaLinkReadinessTimeout = 2 * time.Second
 
 type mediaLinkRouteProviders struct {
 	codexImage coregeneration.Provider
@@ -95,8 +98,14 @@ func (workflow *GenerationService) SetMediaLinkProviders(
 }
 
 func (workflow *GenerationService) mediaLinkRouteReady(routeID string) (bool, string) {
+	ctx, cancel := context.WithTimeout(context.Background(), mediaLinkReadinessTimeout)
+	defer cancel()
+	return workflow.mediaLinkRouteReadyContext(ctx, routeID)
+}
+
+func (workflow *GenerationService) mediaLinkRouteReadyContext(ctx context.Context, routeID string) (bool, string) {
 	if workflow == nil || workflow.mediaLinkReadiness == nil {
 		return false, fmt.Sprintf("MediaLink route %q is not ready", routeID)
 	}
-	return workflow.mediaLinkReadiness(context.Background(), routeID)
+	return workflow.mediaLinkReadiness(ctx, routeID)
 }

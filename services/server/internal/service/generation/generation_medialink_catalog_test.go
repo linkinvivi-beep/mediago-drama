@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	coregeneration "github.com/mediago-dev/mediago-drama/packages/core/pkg/generation"
 	"github.com/mediago-dev/mediago-drama/services/server/internal/service/settings"
@@ -75,6 +76,24 @@ func TestMediaLinkCatalogVisibleWithoutInjectedReadiness(t *testing.T) {
 		if route.Configured {
 			t.Fatalf("route %q configured = true, want false without injected readiness", route.ID)
 		}
+	}
+}
+
+func TestMediaLinkReadinessHonorsCallerCancellation(t *testing.T) {
+	workflow := NewGenerationService(nil, nil, nil)
+	workflow.SetMediaLinkProviders(&mediaLinkTestProvider{name: "codex"}, &mediaLinkTestProvider{name: "h3"}, func(ctx context.Context, _ string) (bool, string) {
+		<-ctx.Done()
+		return false, ctx.Err().Error()
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	ready, reason := workflow.mediaLinkRouteReadyContext(ctx, coregeneration.RouteCodexImage)
+	if ready || reason != context.DeadlineExceeded.Error() {
+		t.Fatalf("ready/reason = %v/%q", ready, reason)
+	}
+	if time.Since(started) > 250*time.Millisecond {
+		t.Fatal("readiness ignored caller cancellation")
 	}
 }
 

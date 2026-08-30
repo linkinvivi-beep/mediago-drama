@@ -636,7 +636,7 @@ func TestManagedCodexImageSessionGateHonorsDeadlineAndShutdown(t *testing.T) {
 	}}
 	managed := &managedCodexImageSession{
 		parent:  parent,
-		factory: func(context.Context, string) (codexapp.Client, error) { return client, nil },
+		factory: func(context.Context, context.Context, string) (codexapp.Client, error) { return client, nil },
 		gate:    newCodexImageFIFO(),
 	}
 	go managed.closeOnShutdown()
@@ -676,7 +676,7 @@ func TestManagedCodexImageSessionReconnectsReadOnce(t *testing.T) {
 	clients := []codexapp.Client{first, second}
 	managed := &managedCodexImageSession{
 		parent: context.Background(), gate: newCodexImageFIFO(),
-		factory: func(context.Context, string) (codexapp.Client, error) {
+		factory: func(context.Context, context.Context, string) (codexapp.Client, error) {
 			client := clients[0]
 			clients = clients[1:]
 			return client, nil
@@ -691,6 +691,33 @@ func TestManagedCodexImageSessionReconnectsReadOnce(t *testing.T) {
 	}
 	if first.closeCount.Load() != 1 || second.closeCount.Load() != 0 {
 		t.Fatalf("close counts = %d/%d", first.closeCount.Load(), second.closeCount.Load())
+	}
+}
+
+func TestManagedCodexImageSessionColdStartUsesOperationDeadline(t *testing.T) {
+	parent, cancelParent := context.WithCancel(context.Background())
+	defer cancelParent()
+	var parentCanceled bool
+	managed := &managedCodexImageSession{
+		parent: parent, gate: newCodexImageFIFO(),
+		factory: func(processCtx context.Context, initCtx context.Context, _ string) (codexapp.Client, error) {
+			<-initCtx.Done()
+			parentCanceled = processCtx.Err() != nil
+			return nil, initCtx.Err()
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := managed.Capabilities(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Capabilities() error = %v", err)
+	}
+	if time.Since(started) > 250*time.Millisecond {
+		t.Fatal("cold start ignored operation deadline")
+	}
+	if parentCanceled {
+		t.Fatal("operation deadline canceled process lifetime parent")
 	}
 }
 

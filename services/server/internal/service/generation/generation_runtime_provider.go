@@ -11,10 +11,14 @@ import (
 )
 
 func (workflow *GenerationService) newGenerationProvider(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	return workflow.newGenerationProviderContext(context.Background(), route)
+}
+
+func (workflow *GenerationService) newGenerationProviderContext(ctx context.Context, route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 	if route.Status != coregeneration.RouteStatusAvailable {
 		return nil, errors.New(route.StatusReason)
 	}
-	if err := workflow.requireGenerationRouteConfigured(route); err != nil {
+	if err := workflow.requireGenerationRouteConfiguredContext(ctx, route); err != nil {
 		return nil, err
 	}
 	if isMediaLinkRouteID(route.ID) && workflow.generationProviderFactory != nil {
@@ -72,8 +76,12 @@ func (workflow *GenerationService) newGenerationProviderForStoredTask(
 }
 
 func (workflow *GenerationService) requireGenerationRouteConfigured(route coregeneration.ModelRoute) error {
+	return workflow.requireGenerationRouteConfiguredContext(context.Background(), route)
+}
+
+func (workflow *GenerationService) requireGenerationRouteConfiguredContext(ctx context.Context, route coregeneration.ModelRoute) error {
 	if isMediaLinkRouteID(route.ID) {
-		ready, reason := workflow.mediaLinkRouteReady(route.ID)
+		ready, reason := workflow.mediaLinkRouteReadyContext(ctx, route.ID)
 		if ready {
 			return nil
 		}
