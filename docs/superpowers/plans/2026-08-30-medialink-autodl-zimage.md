@@ -32,9 +32,10 @@ This amendment supersedes later text that says “Z-Image only” without requir
 - Public route/adapter: `RouteAutoDLImage = "autodl.image"`, `AdapterAutoDLComfyImage = "autodl.comfyui.image"`.
 - Request adds `WorkflowProfileID`; empty chooses `zimage-t2i` for zero references and `zimage-i2i` for one reference. All non-empty profiles are explicit and persisted with the attempt.
 - Profile kinds: `zimage-t2i`, `zimage-i2i`, `flux-fp8-t2i`, `flux-fp8-i2i`, `flux-lustly-adult-t2i`, `flux-lustly-adult-i2i`, `flux-lustly-adult-portrait`, `flux-lustly-adult-fullbody`, and `zimage-flux-refine`.
+- The seven FLUX/hybrid kinds target filenames ending in `精细控制-v2`, but the user marked the currently observed files as defective. Store their current digests only as rejected observations and force `needs_revalidation`; they cannot satisfy readiness or submit. Re-read the corrected files before Task 6 acceptance. Older retained files are also legacy and cannot satisfy readiness.
 - Adult profiles are never auto-selected and require explicit selection; prompt optimization preserves an explicit 21+ adult boundary.
 - `zimage-flux-refine` returns two assets with semantic output roles: draft/secondary and final/primary.
-- Live workflow SHA256 values and node baselines are authoritative in `docs/superpowers/specs/2026-08-30-medialink-autodl-zimage-design.md`.
+- The two Z-Image SHA256 values are live-validated. The seven current v2 SHA256/node snapshots in the design spec are provisional rejected evidence; profile validation fails closed until the user supplies corrected workflows and a new inspection updates them.
 - Live Z-Image smoke evidence: T2I prompt `8c0cf941-81ad-413e-9bb1-3c0f936e0e07`; I2I prompt `46576aef-b55a-465d-a404-fa58de5856ec`; both completed with empty node errors and valid 1024×1024 PNG outputs.
 
 ---
@@ -80,7 +81,7 @@ This amendment supersedes later text that says “Z-Image only” without requir
 
 ```go
 func TestMediaLinkCatalogIncludesZImageWithOneReference(t *testing.T) {
-	route, ok := FindRoute(RouteAutoDLZImage)
+	route, ok := FindRoute(RouteAutoDLImage)
 	if !ok || route.Kind != KindImage || route.Provider != ProviderAutoDL || route.MaxReferenceURLs != 1 {
 		t.Fatalf("route = %+v, found = %v", route, ok)
 	}
@@ -113,8 +114,8 @@ Expected: FAIL because the route and runtime fields do not exist.
 - [ ] **Step 3: Add the minimal route and DTO contract**
 
 ```go
-const RouteAutoDLZImage = "autodl.zimage"
-const AdapterAutoDLComfyZImage = "autodl.comfyui.z-image"
+const RouteAutoDLImage = "autodl.image"
+const AdapterAutoDLComfyImage = "autodl.comfyui.image"
 
 InstanceProfileID       string `json:"instanceProfileId,omitempty"`
 WorkflowProfileID       string `json:"workflowProfileId,omitempty"`
@@ -443,7 +444,7 @@ git commit -m "feat(comfyui): add bounded loopback client"
 **Interfaces:**
 - Produces: `ValidateWorkflowProfile`, `ValidateWorkflowOnInstance`, and `InstantiateWorkflow`.
 - Produces all nine image kinds from the live scope amendment plus reserved `h3-ref2va` and `h3-fl2va` kinds.
-- Produces semantic bindings for prompt(s), seed, dimensions, reference image, denoise, LoRA strength, output prefix, and one-or-more output roles.
+- Produces semantic bindings for Z prompt, FLUX CLIP-L keywords, FLUX T5-XXL detailed prompt, hybrid shared prompt, seed, dimensions, reference image, denoise, LoRA strength, output prefix, and one-or-more output roles.
 
 - [ ] **Step 1: Write profile validation tests**
 
@@ -458,7 +459,7 @@ type WorkflowBindings struct {
 }
 ```
 
-Test all nine UI-format profile shapes, compile-to-API correctness, missing node/link/input, 0/1-reference rules, adult explicit-selection gate, hybrid two-output roles, workflow immutability, digest stability, and `/object_info` missing-node/model failures.
+Test all nine UI-format profile shapes, compile-to-API correctness, legacy-v1 rejection for the seven FLUX/hybrid kinds, `CLIPTextEncodeFlux` dual-text binding, fixed seed/CFG 1, `--ar` rejection, Lustly 0.5 defaults, denoise binding, hybrid shared-prompt fan-out and two-output roles, missing node/link/input, 0/1-reference rules, adult explicit-selection gate, workflow immutability, digest stability, and `/object_info` missing-node/model failures.
 
 - [ ] **Step 2: Run tests and verify RED**
 
@@ -647,7 +648,7 @@ git commit -m "feat(api): manage AutoDL instance pool"
 - Consumes: scheduler, profile instantiator, ComfyUI client, asset limits, and progress callback.
 - Produces: `AutoDLImageProvider` implementing `coregeneration.Provider` for all nine profiles.
 - Provider task IDs use `autodl.image:<base64url(instanceProfileId)>:<base64url(promptId)>` and are parsed only by one tested helper.
-- Test helpers in `autodl_zimage_provider_test.go`: `newZImageProviderHarness(t) (*AutoDLZImageProvider, *[]string)` and `validT2IRequest() coregeneration.Request` construct deterministic fakes used by the call-order test.
+- Test helpers in `autodl_image_provider_test.go`: `newAutoDLImageProviderHarness(t) (*AutoDLImageProvider, *[]string)` and `validT2IRequest() coregeneration.Request` construct deterministic fakes used by the call-order test.
 
 - [ ] **Step 1: Write provider tests with fake dependencies**
 
@@ -668,7 +669,7 @@ func TestAutoDLZImageCheckpointsBeforePolling(t *testing.T) {
 Run:
 
 ```bash
-cd services/server && go test ./internal/service/generation -run TestAutoDLZImageProvider -count=1
+cd services/server && go test ./internal/service/generation -run TestAutoDLImageProvider -count=1
 ```
 
 Expected: FAIL because the provider does not exist.
@@ -695,7 +696,7 @@ Readiness for `autodl.image` is true only when at least one enabled instance has
 Run:
 
 ```bash
-cd services/server && go test ./internal/service/generation -run TestAutoDLZImageProvider -count=1
+cd services/server && go test ./internal/service/generation -run TestAutoDLImageProvider -count=1
 cd services/server && go test ./internal/service/generation -count=1
 cd services/server && go test -race ./internal/service/generation -run 'TestAutoDL(ZImageProvider|InstanceScheduler)' -count=5
 ```
@@ -782,7 +783,7 @@ git commit -m "fix(generation): recover AutoDL tasks without resubmission"
 - Modify: `packages/mcp/pkg/mcp/generation_prompt_supplements_test.go`
 
 **Interfaces:**
-- Consumes: `RouteAutoDLZImage` and the existing Codex text-completion service.
+- Consumes: `RouteAutoDLImage`, the selected workflow family, and the existing Codex text-completion service.
 - Produces: a Z-Image-specific optimizer instruction while preserving the existing `optimizedPrompt` field.
 - Test helper in the new test file: `captureOptimizerInstruction(t, routeID) string` installs the existing fake text-completion provider and returns its captured system instruction.
 
@@ -790,7 +791,7 @@ git commit -m "fix(generation): recover AutoDL tasks without resubmission"
 
 ```go
 func TestZImagePromptOptimizationUsesRouteSpecificInstruction(t *testing.T) {
-	instruction := captureOptimizerInstruction(t, coregeneration.RouteAutoDLZImage)
+	instruction := captureOptimizerInstruction(t, coregeneration.RouteAutoDLImage)
 	for _, phrase := range []string{"Z-Image", "参考图", "构图", "光线", "负面约束", "保留用户意图"} {
 		if !strings.Contains(instruction, phrase) { t.Fatalf("missing %q in %q", phrase, instruction) }
 	}
@@ -908,7 +909,7 @@ git commit -m "feat(settings): configure AutoDL instance pool"
 - Modify: `apps/workspace/src/domains/generation/components/generationSettingsValue.test.ts`
 
 **Interfaces:**
-- Consumes: Z-Image route metadata, instance summary API, and `GenerationMessageRequest.instanceProfileId`.
+- Consumes: cloud-image route/profile metadata, instance summary API, `GenerationMessageRequest.workflowProfileId`, and `GenerationMessageRequest.instanceProfileId`.
 - Produces: default automatic selection and an advanced manual instance selector only for AutoDL routes.
 
 - [ ] **Step 1: Write generation-form tests**
@@ -917,8 +918,8 @@ Test route selection across every shared image entry through the common form, de
 
 ```tsx
 it("rejects multiple Z-Image references before submit", async () => {
-  const request = buildImageRequest({ routeId: "autodl.zimage", referenceAssetIds: ["a", "b"] });
-  await expect(submit(request)).rejects.toThrow("AutoDL · Z-Image 首版最多支持 1 张参考图");
+  const request = buildImageRequest({ routeId: "autodl.image", workflowProfileId: "zimage-i2i", referenceAssetIds: ["a", "b"] });
+  await expect(submit(request)).rejects.toThrow("AutoDL · 云端生图首版最多支持 1 张参考图");
   expect(api.generate).not.toHaveBeenCalled();
 });
 ```
@@ -971,7 +972,7 @@ git commit -m "feat(generation): select AutoDL instances"
 
 - [ ] **Step 1: Add end-to-end fake tests**
 
-Exercise character, scene, prop, and storyboard image requests through `autodl.zimage`; verify existing asset/document association, two-instance parallelism, one-instance image/video serialization, restart recovery with one submit, and no hidden provider route exposure.
+Exercise character, scene, prop, and storyboard image requests through `autodl.image`; verify profile selection, existing asset/document association, two-instance parallelism, one-instance image/video serialization, restart recovery with one submit, and no hidden provider route exposure.
 
 - [ ] **Step 2: Run backend verification**
 
@@ -1019,14 +1020,14 @@ git commit -m "test: verify MediaLink AutoDL image routing"
 
 ---
 
-### Task 15: Inspect real workflows, then stop at the paid-test gate
+### Task 15: Inspect all real workflows and record the authorized Z-Image smoke tests
 
 **Files:**
-- Modify only after inspection: the two user-imported workflow profile records through the application API/UI; do not commit credentials or instance-specific addresses.
+- Modify only after inspection: the nine user-imported workflow profile records through the application API/UI; do not commit credentials or instance-specific addresses. The seven FLUX/hybrid records must use only `精细控制-v2` files.
 - Update: `docs/superpowers/specs/2026-08-30-medialink-autodl-zimage-design.md` only if inspection proves a previously approved capability assumption false.
 
 **Interfaces:**
-- Consumes: current user-provided SSH login command, password entered through MediaLink, and the two workflow files on AutoDL.
+- Consumes: current user-provided SSH login command, password entered through MediaLink, and the nine workflow files on AutoDL.
 - Produces: verified profile manifests and a read-only readiness report.
 
 - [ ] **Step 1: Obtain current connection data safely**
@@ -1035,12 +1036,12 @@ Ask for the current non-secret SSH command. Have the user enter the password thr
 
 - [ ] **Step 2: Perform read-only inspection**
 
-Connect through the app-managed tunnel, call `/system_stats`, `/object_info`, and `/queue`, retrieve or have the user import both workflow JSON files, and validate their prompt, seed, size, reference, and output bindings. Do not call `/prompt`.
+Connect through the app-managed tunnel, call `/system_stats`, `/object_info`, and `/queue`, retrieve/import all nine workflow JSON files, and validate prompt, seed, size, reference, denoise, LoRA and output bindings. Fail readiness when a legacy FLUX/hybrid file is selected. Read-only validation must not call `/prompt`.
 
 - [ ] **Step 3: Report readiness and stop**
 
 Report instance IDs/names, configurable ComfyUI ports, validated profile versions/digests, missing nodes/models, and whether T2I/I2I instantiation succeeds without submission.
 
-- [ ] **Step 4: Request separate paid-test approval**
+- [ ] **Step 4: Record the separately authorized smoke-test result**
 
-Offer exactly these proposed real tests: one T2I image, one I2I image using one existing asset, optional two-instance parallel generation, and one restart/reconnect recovery. State that they consume GPU time. Do not proceed until the user explicitly approves the listed tests.
+The user separately authorized one Z-Image T2I and one Z-Image I2I smoke test on 2026-08-30; both succeeded and their prompt IDs are recorded in the live amendment. This authorization is exhausted. Do not submit FLUX/Lustly, parallel-instance, or restart/reconnect tests without a new explicit approval. Keep ComfyUIPhotoSync enabled and never pause it from this plan.

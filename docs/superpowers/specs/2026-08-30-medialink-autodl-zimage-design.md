@@ -2,7 +2,7 @@
 
 日期：2026-08-30
 
-状态：设计已确认；2026-08-30 已按真实 AutoDL 实例扩展为九个图片 workflow profiles
+状态：连接池与九 profile 产品范围已确认；七个 FLUX/混合 `精细控制-v2` 文件被用户标记为仍有问题，当前 digest/manifest 仅作观察记录，禁止用于 readiness 或提交
 
 关联规格：`2026-08-30-medialink-codex-autodl-design.md`
 
@@ -78,18 +78,18 @@ MediaLink 的可见图片路由为：
 | --- | --- | --- |
 | `zimage-t2i` | `Z-Image-Turbo-NSFW-BF16-v2-文生图.json` | 0 张参考图 |
 | `zimage-i2i` | `Z-Image-Turbo-NSFW-BF16-v2-普通图生图.json` | 恰好 1 张参考图 |
-| `flux-fp8-t2i` | `FLUX-FP8-普通文生图-质量.json` | 0 张参考图 |
-| `flux-fp8-i2i` | `FLUX-FP8-普通图生图.json` | 恰好 1 张参考图 |
-| `flux-lustly-adult-t2i` | `FLUX-FP8-Lustly-成人文生图.json` | 0 张参考图，必须显式选择成人 profile |
-| `flux-lustly-adult-i2i` | `FLUX-FP8-Lustly-成人图生图.json` | 恰好 1 张参考图，必须显式选择成人 profile |
-| `flux-lustly-adult-portrait` | `FLUX-FP8-Lustly-成人写实人像.json` | 0 张参考图，必须显式选择成人 profile |
-| `flux-lustly-adult-fullbody` | `FLUX-FP8-Lustly-成人全身构图.json` | 0 张参考图，必须显式选择成人 profile |
-| `zimage-flux-refine` | `Z-Image快速打样-FLUX高精重绘.json` | 0 张参考图；输出草图与成片 |
+| `flux-fp8-t2i` | `FLUX-FP8-普通文生图-质量-精细控制-v2.json` | 0 张参考图 |
+| `flux-fp8-i2i` | `FLUX-FP8-普通图生图-精细控制-v2.json` | 恰好 1 张参考图 |
+| `flux-lustly-adult-t2i` | `FLUX-FP8-Lustly-成人文生图-精细控制-v2.json` | 0 张参考图，必须显式选择成人 profile |
+| `flux-lustly-adult-i2i` | `FLUX-FP8-Lustly-成人图生图-精细控制-v2.json` | 恰好 1 张参考图，必须显式选择成人 profile |
+| `flux-lustly-adult-portrait` | `FLUX-FP8-Lustly-成人写实人像-精细控制-v2.json` | 0 张参考图，必须显式选择成人 profile |
+| `flux-lustly-adult-fullbody` | `FLUX-FP8-Lustly-成人全身构图-精细控制-v2.json` | 0 张参考图，必须显式选择成人 profile |
+| `zimage-flux-refine` | `Z-Image快速打样-FLUX高精重绘-精细控制-v2.json` | 0 张参考图；输出草图与成片 |
 
 每个 profile 包含：
 
 - 稳定 ID、名称、kind 和版本
-- 原始 ComfyUI API-format workflow JSON
+- 原始 ComfyUI UI-format workflow JSON，以及由它编译出的 API prompt template
 - prompt、seed、宽高或尺寸、参考图、LoRA 强度、denoise 和输出节点的语义 manifest
 - 所需节点与模型声明
 - workflow 内容摘要
@@ -98,21 +98,37 @@ ComfyUI 用户工作流是 UI-format JSON；应用导入时先验证 `nodes` / `
 
 默认自动 profile 仅按参考图数量选择 Z-Image 快速路线：0 张为 `zimage-t2i`，1 张为 `zimage-i2i`。FLUX、Lustly 和混合 profile 必须由用户显式选择；成人 profile 永不根据提示词自动启用，并要求所有人物明确为 21 岁以上成年人。
 
+七个 FLUX/混合 profile 最终目标名称结尾为 `精细控制-v2`，但 2026-08-30 当前文件被用户明确标记为仍有问题。下表中的 v2 digest、节点和参数仅是当时的只读观察，不是已批准版本；应用必须把这些 records 标记为 `needs_revalidation`，不得满足 readiness、不得提交。用户提供修正版后重新读取并替换观察值。旧文件继续保留为 legacy，也不参与默认选择、实例 readiness 或 provider fallback。最终 v2 的 FLUX prompt manifest 预计分别绑定 `CLIPTextEncodeFlux.clip_l` 和 `CLIPTextEncodeFlux.t5xxl`，但以修正版再次验收为准。
+
 ### 5.1 2026-08-30 真实实例基线
 
-当前 SSH 隧道 `127.0.0.1:6006` 已只读确认 ComfyUI `0.30.0`、RTX 5090、队列为空，九个 JSON 均存在且核心节点/模型可枚举。原始 UI JSON SHA256：
+当前 SSH 隧道 `127.0.0.1:6006` 已只读确认 ComfyUI `0.30.0`、RTX 5090、队列为空，九个 JSON 均存在且核心节点/模型可枚举。两个 Z-Image 值已实测；七个 v2 值是待修正候选快照，不能用于 readiness。原始 UI JSON SHA256：
 
 | Kind | SHA256 |
 | --- | --- |
 | `zimage-t2i` | `ab070442514013c6264947432c9faae6350e9ea4cd15be0949997872b45efffe` |
 | `zimage-i2i` | `f93feb7ebdc55566246af49e2b4a65f677b4893e637ca4072cbc1c936e8f4da1` |
-| `flux-fp8-t2i` | `34c1076b0fc258e046dd510f7a2e90c73dcf9e94c36c6413f20ac1770b5789c6` |
-| `flux-fp8-i2i` | `eddc5ab160db859b1a25bced3112fb473258736394a2086e5db993ed1ae5d8ee` |
-| `flux-lustly-adult-t2i` | `69c53b6272a61b33aa1d05bee2aae9da01747dceb16f4c50b75fd545ab0b0c2c` |
-| `flux-lustly-adult-i2i` | `bcfee777ed826a5cee8128918b0bdacb456485bc87f119a3111bed67d4f4a0b2` |
-| `flux-lustly-adult-portrait` | `6a8f654ebebbc283ebb11a701355b463bfbc762d07fc641fc22afcd738f261a0` |
-| `flux-lustly-adult-fullbody` | `5b7598fd77aaefb56c8e6b0b17b23df25b86e9d6e542f925e6b2aa88b44d8b0a` |
-| `zimage-flux-refine` | `66cb39bc077764bef55b0917c68fdb5ec23b0fab605289ce2e12a65b313a6264` |
+| `flux-fp8-t2i` | `9970e8c3d92c4661a744b046d9f1b96208d875ad557af407f0ba89d656bc8419` |
+| `flux-fp8-i2i` | `1d84021c7f0530d13d914bc982ccf2e8e75200ea433331331f27264a01884462` |
+| `flux-lustly-adult-t2i` | `1ee1ab222cab32acfd6473708b15092356c7438b7fcbc6b58a2f9a903ba0bee8` |
+| `flux-lustly-adult-i2i` | `1f0cbb187d4bb66e4edaab33b42d90aebd342457621bff1c093a21a42db092aa` |
+| `flux-lustly-adult-portrait` | `80a5524712fe07dbc84d2c89558a66381a9bf03b8dba8380bf3dd84e9dcccc8c` |
+| `flux-lustly-adult-fullbody` | `6c3a39a77b7a6a5a13e46c2e2788502be578982fb5727540dceb5e94faf9b4b0` |
+| `zimage-flux-refine` | `cc2ba571bc0bc6c1e7d68b9d4a3b8f1302f999d01c15745867f40e62f6f6f8b2` |
+
+实时节点/模型/输出基线如下；节点 ID 只属于 profile manifest，不进入通用 provider 业务代码：
+
+| Kind | 关键节点 ID:class | 必需模型 | 采样基线 | 输出角色 |
+| --- | --- | --- | --- | --- |
+| `zimage-t2i` | `28:UNETLoader`, `30:CLIPLoader`, `29:VAELoader`, `27:CLIPTextEncode`, `33:ConditioningZeroOut`, `11:ModelSamplingAuraFlow`, `13:EmptySD3LatentImage`, `3:KSampler`, `8:VAEDecode`, `34:SaveImage` | `z_image_turbo_bf16_nsfw_v2.safetensors`, `qwen_3_4b.safetensors`, `ae.safetensors` | UI seed `616984537854174`/randomize；8 steps，CFG 1，`res_multistep/simple`，denoise 1 | `34` primary/final |
+| `zimage-i2i` | `28:UNETLoader`, `30:CLIPLoader`, `29:VAELoader`, `27:CLIPTextEncode`, `33:ConditioningZeroOut`, `11:ModelSamplingAuraFlow`, `35:LoadImage`, `36:VAEEncode`, `3:KSampler`, `8:VAEDecode`, `34:SaveImage` | 同上 | UI seed 0/randomize；8 steps，CFG 1，`res_multistep/simple`，denoise 0.65 | `34` primary/final |
+| `flux-fp8-t2i` | `30:CheckpointLoaderSimple`, `6:CLIPTextEncodeFlux`, `33:ConditioningZeroOut`, `27:EmptySD3LatentImage`, `31:KSampler`, `8:VAEDecode`, `9:SaveImage` | `flux1-dev-fp8.safetensors` | seed `972054013131368`/fixed；24 steps，CFG 1，`euler/simple`，denoise 1 | `9` primary/final |
+| `flux-fp8-i2i` | `30:CheckpointLoaderSimple`, `6:CLIPTextEncodeFlux`, `33:ConditioningZeroOut`, `36:LoadImage`, `37:VAEEncode`, `31:KSampler`, `8:VAEDecode`, `9:SaveImage` | `flux1-dev-fp8.safetensors` | seed `972054013131368`/fixed；24 steps，CFG 1，`euler/simple`，denoise 0.35 | `9` primary/final |
+| `flux-lustly-adult-t2i` | FLUX T2I v2 基线 + `36:LoraLoaderModelOnly` (0.5) | `flux1-dev-fp8.safetensors`, `flux_lustly-ai_v1.safetensors` | seed `972054013131368`/fixed；28 steps，CFG 1，`euler/simple`，denoise 1 | `9` primary/final |
+| `flux-lustly-adult-i2i` | `30:CheckpointLoaderSimple`, `36:LoraLoaderModelOnly` (0.5), `37:LoadImage`, `38:VAEEncode`, `6:CLIPTextEncodeFlux`, `33:ConditioningZeroOut`, `31:KSampler`, `8:VAEDecode`, `9:SaveImage` | 同上 | seed `972054013131368`/fixed；28 steps，CFG 1，`euler/simple`，denoise 0.45 | `9` primary/final |
+| `flux-lustly-adult-portrait` | FLUX T2I v2 基线 + `36:LoraLoaderModelOnly` (0.5); `27` 为 `832×1216` latent | 同上 | seed `972054013131368`/fixed；28 steps，CFG 1，`euler/simple`，denoise 1 | `9` primary/final |
+| `flux-lustly-adult-fullbody` | FLUX T2I v2 基线 + `36:LoraLoaderModelOnly` (0.5); `27` 为 `768×1344` latent | 同上 | seed `972054013131368`/fixed；28 steps，CFG 1，`euler/simple`，denoise 1 | `9` primary/final |
+| `zimage-flux-refine` | Z 支路 `28:UNETLoader`, `30:CLIPLoader`, `29:VAELoader`, `27:CLIPTextEncode`, `33:ConditioningZeroOut`, `11:ModelSamplingAuraFlow`, `13:EmptySD3LatentImage`, `3:KSampler`, `8:VAEDecode`, `34:SaveImage`; shared `47:StringConstantMultiline`; IMAGE 边界 `45:VAEEncode`; FLUX 支路 `38:CheckpointLoaderSimple`, `43:LoraLoaderModelOnly` (0), `35:CLIPTextEncodeFlux`, `40:ConditioningZeroOut`, `39:KSampler`, `36:VAEDecode`, `37:SaveImage` | `z_image_turbo_bf16_nsfw_v2.safetensors`, `qwen_3_4b.safetensors`, `ae.safetensors`, `flux1-dev-fp8.safetensors`, `flux_lustly-ai_v1.safetensors` | Z seed `616984537854174`/fixed、8 steps、CFG 1、`res_multistep/simple`、denoise 1；FLUX seed `972054013131368`/fixed、24 steps、CFG 1、`euler/simple`、denoise 0.30；LoRA 0 | `34` draft/secondary; `37` final/primary |
 
 ## 6. 提示词与参考图
 
