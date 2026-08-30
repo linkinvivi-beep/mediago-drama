@@ -2,11 +2,20 @@ package generation
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 )
 
-const generationOrderedReferencesParam = "_mediago_ordered_references"
+const (
+	generationOrderedReferencesParam       = "_mediago_ordered_references"
+	maxGenerationOrderedReferenceCount     = 32
+	maxGenerationReferenceURLBytes         = 16 << 10
+	maxGenerationReferenceDataURIBytes     = 8 << 20
+	maxGenerationReferenceTotalSourceBytes = 16 << 20
+	maxGenerationReferenceRoleBytes        = 4 << 10
+	maxGenerationOrderedManifestBytes      = maxGenerationReferenceTotalSourceBytes + 256<<10
+)
 
 // generationOrderedReference is the canonical server-owned reference slot.
 // Source is an opaque stable key (url:... or asset:...), never provider data.
@@ -63,6 +72,45 @@ func canonicalOrderedGenerationReferences(payload generationMessageRequest) []ge
 	return ordered
 }
 
+func validateOrderedGenerationReferences(ordered []generationOrderedReference) error {
+	if len(ordered) > maxGenerationOrderedReferenceCount {
+		return fmt.Errorf("reference count exceeds safe limit %d", maxGenerationOrderedReferenceCount)
+	}
+	totalSourceBytes := 0
+	for _, item := range ordered {
+		source := strings.TrimSpace(item.Source)
+		if source == "" {
+			return fmt.Errorf("reference source is empty")
+		}
+		totalSourceBytes += len(source)
+		if totalSourceBytes > maxGenerationReferenceTotalSourceBytes {
+			return fmt.Errorf("reference sources exceed safe total size limit")
+		}
+		if len(item.Role) > maxGenerationReferenceRoleBytes {
+			return fmt.Errorf("reference role exceeds safe size limit")
+		}
+		if !strings.HasPrefix(source, "url:") {
+			if !strings.HasPrefix(source, "asset:") || len(source) > maxGenerationReferenceURLBytes {
+				return fmt.Errorf("reference source is invalid or too large")
+			}
+			continue
+		}
+		value := strings.TrimPrefix(source, "url:")
+		limit := maxGenerationReferenceURLBytes
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(value)), "data:") {
+			limit = maxGenerationReferenceDataURIBytes
+		}
+		if len(value) > limit {
+			return fmt.Errorf("reference value exceeds safe size limit")
+		}
+	}
+	manifest, err := json.Marshal(ordered)
+	if err != nil || len(manifest) > maxGenerationOrderedManifestBytes {
+		return fmt.Errorf("reference manifest exceeds safe size limit")
+	}
+	return nil
+}
+
 func generationParamsWithOrderedReferences(params map[string]any, ordered []generationOrderedReference) map[string]any {
 	next := make(map[string]any, len(params)+1)
 	for key, value := range params {
@@ -107,6 +155,9 @@ func orderedGenerationReferencesFromParams(params map[string]any) []generationOr
 			item.Role = "reference"
 		}
 		ordered = append(ordered, item)
+	}
+	if validateOrderedGenerationReferences(ordered) != nil {
+		return nil
 	}
 	return ordered
 }

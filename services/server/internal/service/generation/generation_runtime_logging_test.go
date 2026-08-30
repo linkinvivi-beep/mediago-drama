@@ -3,6 +3,7 @@ package generation
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -28,6 +29,8 @@ func (provider sensitivePromptErrorProvider) Get(context.Context, string) (coreg
 
 func TestGenerateWithProviderRedactsSensitivePromptAndProviderError(t *testing.T) {
 	const protectedBody = "PROTECTED-REFERENCE-BODY-DO-NOT-LOG"
+	const signedToken = "SIGNED-REFERENCE-TOKEN-DO-NOT-LOG"
+	encodedReference := base64.StdEncoding.EncodeToString([]byte("INLINE-REFERENCE-BYTES-DO-NOT-LOG"))
 	var logs bytes.Buffer
 	previousLogger := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
@@ -38,8 +41,12 @@ func TestGenerateWithProviderRedactsSensitivePromptAndProviderError(t *testing.T
 		context.Background(),
 		sensitivePromptErrorProvider{failure: errors.New("provider echoed " + protectedBody)},
 		coregeneration.Request{
-			Kind:    coregeneration.KindText,
-			Prompt:  "envelope contains " + protectedBody,
+			Kind:   coregeneration.KindText,
+			Prompt: "envelope contains " + protectedBody,
+			ReferenceURLs: []string{
+				"https://example.test/reference.png?token=" + signedToken,
+				"data:image/png;base64," + encodedReference,
+			},
 			Options: map[string]any{generationSensitivePromptRequestOption: true},
 		},
 		generationProviderLogContext{Action: "create", TaskID: "task-sensitive"},
@@ -47,8 +54,10 @@ func TestGenerateWithProviderRedactsSensitivePromptAndProviderError(t *testing.T
 	if err == nil || strings.Contains(err.Error(), protectedBody) {
 		t.Fatalf("generateWithProvider() error = %q, want generic redacted error", err)
 	}
-	if strings.Contains(logs.String(), protectedBody) {
-		t.Fatalf("provider logs leaked protected body: %s", logs.String())
+	for _, forbidden := range []string{protectedBody, signedToken, encodedReference} {
+		if strings.Contains(logs.String(), forbidden) {
+			t.Fatalf("provider logs leaked sensitive value %q: %s", forbidden, logs.String())
+		}
 	}
 	if !strings.Contains(logs.String(), "<protected-prompt-omitted>") {
 		t.Fatalf("provider logs = %q, want explicit prompt omission", logs.String())

@@ -25,6 +25,9 @@ func (workflow *GenerationService) resolveGenerationReferences(
 	if len(ordered) == 0 {
 		ordered = canonicalOrderedGenerationReferences(request)
 	}
+	if err := validateOrderedGenerationReferences(ordered); err != nil {
+		return nil, err
+	}
 	references := make([]string, 0, len(ordered))
 	for _, item := range ordered {
 		if strings.HasPrefix(item.Source, "url:") {

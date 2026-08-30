@@ -207,6 +207,9 @@ func (workflow *GenerationService) StreamGenerationText(
 			}
 		}
 		if event.Delta != "" {
+			if optimization.Enabled && len(event.Delta) > maxPromptOptimizationOutputBytes-builder.Len() {
+				return workflow.finishPromptOptimizationFailure(task, conversation, emit)
+			}
 			builder.WriteString(event.Delta)
 			if !optimization.Enabled {
 				if err := emit(GenerationTextStreamEvent{
@@ -404,24 +407,29 @@ func (workflow *GenerationService) prepareTextPromptOptimization(
 		return promptOptimizationExecution{}, http.StatusBadRequest, err
 	}
 	ordered := orderedGenerationReferencesFromParams(payload.Params)
+	if err := validatePromptOptimizationInput(optimization, payload.Prompt, ordered, protectedBodies); err != nil {
+		return promptOptimizationExecution{}, http.StatusBadRequest, err
+	}
+	executionPrompt, err := promptOptimizationUserPrompt(optimization, payload.Prompt, ordered)
+	if err != nil {
+		return promptOptimizationExecution{}, http.StatusBadRequest, err
+	}
 	execution := promptOptimizationExecution{
 		Enabled:         true,
-		Prompt:          promptOptimizationUserPrompt(optimization, payload.Prompt, ordered),
-		ProtectedBodies: protectedBodies,
+		Prompt:          executionPrompt,
+		ProtectedBodies: promptOptimizationSensitiveBodies(protectedBodies, ordered),
 	}
-	if len(protectedBodies) > 0 {
-		instruction := promptOptimizationSystemInstructionText
-		if strings.Contains(stringGenerationParam(payload.Params, "system_instruction"), "这是图片生成提示词") {
-			instruction = imagePromptOptimizationSystemInstructionText
-		}
-		params := make(map[string]any, len(payload.Params)+1)
-		for key, value := range payload.Params {
-			params[key] = value
-		}
-		params["system_instruction"] = instruction
-		params[generationSensitivePromptParam] = true
-		payload.Params = params
+	instruction := promptOptimizationSystemInstructionText
+	if strings.Contains(stringGenerationParam(payload.Params, "system_instruction"), "这是图片生成提示词") {
+		instruction = imagePromptOptimizationSystemInstructionText
 	}
+	params := make(map[string]any, len(payload.Params)+1)
+	for key, value := range payload.Params {
+		params[key] = value
+	}
+	params["system_instruction"] = instruction
+	params[generationSensitivePromptParam] = true
+	payload.Params = params
 	payload.PromptOptimization = nil
 	return execution, http.StatusOK, nil
 }

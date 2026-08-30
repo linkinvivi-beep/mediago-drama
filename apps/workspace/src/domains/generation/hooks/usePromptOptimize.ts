@@ -134,6 +134,7 @@ export const usePromptOptimize = ({
 							: undefined,
 						sourceRefs: input.sourceRefs,
 						params: {
+							_mediago_sensitive_prompt: true,
 							system_instruction:
 								kind === "image"
 									? imagePromptOptimizeSystemInstruction

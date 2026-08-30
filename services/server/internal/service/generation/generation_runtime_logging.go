@@ -162,7 +162,11 @@ func sanitizedReferenceURL(index int, value string) map[string]any {
 	}
 
 	reference["type"] = "url"
-	reference["value"] = sanitizedLogString(trimmed)
+	if strings.HasPrefix(strings.ToLower(trimmed), "http://") || strings.HasPrefix(strings.ToLower(trimmed), "https://") {
+		reference["value"] = "<remote-url-omitted>"
+	} else {
+		reference["value"] = sanitizedLogString(trimmed)
+	}
 	return reference
 }
 
@@ -187,7 +191,7 @@ func sanitizedLogValue(value any) any {
 	case map[string]any:
 		values := make(map[string]any, len(typed))
 		for key, item := range typed {
-			if generationLogKeyIsInternalAssetSource(key) {
+			if strings.HasPrefix(key, generationInternalParamPrefix) || generationLogKeyIsInternalAssetSource(key) {
 				continue
 			}
 			values[key] = sanitizedLogValue(item)

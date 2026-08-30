@@ -1945,6 +1945,7 @@ describe("MediaGenerationWorkspace", () => {
 			provider: "openai",
 			model: "text-model",
 			params: {
+				_mediago_sensitive_prompt: true,
 				system_instruction: expect.stringContaining("只输出优化后的提示词正文"),
 			},
 		});

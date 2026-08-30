@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"unicode"
@@ -27,6 +28,16 @@ const imagePromptOptimizationSystemInstructionText = promptOptimizationSystemIns
 严格保持参考图的顺序和角色，使参考图1、参考图2等编号与各自用途一一对应。`
 const promptOptimizationConversationKindLabel = "提示词生成"
 
+const (
+	maxPromptOptimizationUserPromptBytes       = 64 << 10
+	maxPromptOptimizationProtectedBodyBytes    = 64 << 10
+	maxPromptOptimizationProtectedContextBytes = 128 << 10
+	maxPromptOptimizationEnvelopeBytes         = 128 << 10
+	maxPromptOptimizationOutputBytes           = 128 << 10
+	minPromptOptimizationNearCopyRunes         = 64
+	promptOptimizationShingleRunes             = 16
+)
+
 var errPromptOptimizationOutputRejected = errors.New("提示词优化结果未通过安全校验")
 
 type promptOptimizationExecution struct {
@@ -40,10 +51,15 @@ func (execution promptOptimizationExecution) validateOutput(value string) (strin
 		return value, nil
 	}
 	raw := strings.TrimSpace(value)
-	if raw == "" || promptOptimizationOutputHasNonPromptStructure(raw) {
+	if raw == "" || len(raw) > maxPromptOptimizationOutputBytes || promptOptimizationOutputHasNonPromptStructure(raw) {
 		return "", errPromptOptimizationOutputRejected
 	}
+	protectedBytes := 0
 	for _, protected := range execution.ProtectedBodies {
+		protectedBytes += len(protected)
+		if len(protected) > maxPromptOptimizationProtectedBodyBytes || protectedBytes > maxPromptOptimizationProtectedContextBytes {
+			return "", errPromptOptimizationOutputRejected
+		}
 		if promptOptimizationOutputReproducesProtectedBody(raw, protected) {
 			return "", errPromptOptimizationOutputRejected
 		}
@@ -56,7 +72,7 @@ func (execution promptOptimizationExecution) validateOutput(value string) (strin
 }
 
 func (execution promptOptimizationExecution) safeFailure(err error) error {
-	if err == nil || len(execution.ProtectedBodies) == 0 {
+	if err == nil || !execution.Enabled {
 		return err
 	}
 	return errors.New("提示词优化执行失败")
@@ -84,24 +100,80 @@ func promptOptimizationOutputReproducesProtectedBody(output string, protected st
 	if strings.Contains(output, protected) {
 		return true
 	}
+	outputRunes := []rune(output)
 	protectedRunes := []rune(protected)
-	threshold := len(protectedRunes) * 3 / 5
-	if threshold < 24 {
-		threshold = 24
-	}
-	if threshold > 256 {
-		threshold = 256
-	}
-	if len(protectedRunes) < threshold {
+	if min(len(outputRunes), len(protectedRunes)) < minPromptOptimizationNearCopyRunes {
 		return false
 	}
-	for start := 0; start+threshold <= len(protectedRunes); start += max(1, threshold/4) {
-		if strings.Contains(output, string(protectedRunes[start:start+threshold])) {
-			return true
+	if promptOptimizationShingleCoveragePercent(protectedRunes, outputRunes) >= 75 ||
+		promptOptimizationShingleCoveragePercent(outputRunes, protectedRunes) >= 75 {
+		return true
+	}
+	matchedProtected := greedyPromptOptimizationSubsequenceMatches(protectedRunes, outputRunes)
+	if matchedProtected*100 >= len(protectedRunes)*85 {
+		return true
+	}
+	matchedOutput := greedyPromptOptimizationSubsequenceMatches(outputRunes, protectedRunes)
+	return matchedOutput*100 >= len(outputRunes)*92
+}
+
+func promptOptimizationShingleCoveragePercent(source []rune, target []rune) int {
+	if len(source) < promptOptimizationShingleRunes || len(target) < promptOptimizationShingleRunes {
+		return 0
+	}
+	targetHashes := promptOptimizationShingleHashes(target, promptOptimizationShingleRunes)
+	matched := 0
+	for _, hash := range promptOptimizationRollingHashes(source, promptOptimizationShingleRunes) {
+		if _, ok := targetHashes[hash]; ok {
+			matched++
 		}
 	}
-	lastStart := len(protectedRunes) - threshold
-	return lastStart > 0 && strings.Contains(output, string(protectedRunes[lastStart:]))
+	return matched * 100 / max(1, len(source)-promptOptimizationShingleRunes+1)
+}
+
+func promptOptimizationShingleHashes(value []rune, size int) map[uint64]struct{} {
+	hashes := promptOptimizationRollingHashes(value, size)
+	result := make(map[uint64]struct{}, len(hashes))
+	for _, hash := range hashes {
+		result[hash] = struct{}{}
+	}
+	return result
+}
+
+func promptOptimizationRollingHashes(value []rune, size int) []uint64 {
+	if size <= 0 || len(value) < size {
+		return nil
+	}
+	const base uint64 = 1099511628211
+	power := uint64(1)
+	for range size - 1 {
+		power *= base
+	}
+	hash := uint64(0)
+	for _, character := range value[:size] {
+		hash = hash*base + uint64(character) + 1
+	}
+	hashes := make([]uint64, 0, len(value)-size+1)
+	hashes = append(hashes, hash)
+	for index := size; index < len(value); index++ {
+		hash -= (uint64(value[index-size]) + 1) * power
+		hash = hash*base + uint64(value[index]) + 1
+		hashes = append(hashes, hash)
+	}
+	return hashes
+}
+
+func greedyPromptOptimizationSubsequenceMatches(needle []rune, haystack []rune) int {
+	matched := 0
+	for _, character := range haystack {
+		if matched == len(needle) {
+			break
+		}
+		if needle[matched] == character {
+			matched++
+		}
+	}
+	return matched
 }
 
 func normalizePromptOptimizationLeakText(value string) string {
@@ -112,6 +184,79 @@ func normalizePromptOptimizationLeakText(value string) string {
 		}
 	}
 	return builder.String()
+}
+
+func validatePromptOptimizationInput(
+	request *GenerationPromptOptimizationRequest,
+	currentPrompt string,
+	ordered []generationOrderedReference,
+	protectedBodies []string,
+) error {
+	if len(currentPrompt) > maxPromptOptimizationUserPromptBytes {
+		return errors.New("提示词优化输入超过安全限制")
+	}
+	if len(ordered) > maxGenerationOrderedReferenceCount {
+		return errors.New("提示词优化参考图数量超过安全限制")
+	}
+	protectedBytes := 0
+	for _, protected := range protectedBodies {
+		protectedBytes += len(protected)
+		if len(protected) > maxPromptOptimizationProtectedBodyBytes || protectedBytes > maxPromptOptimizationProtectedContextBytes {
+			return errors.New("提示词优化参考内容超过安全限制")
+		}
+	}
+	if request != nil {
+		referencePrompt := strings.TrimSpace(request.ReferencePrompt)
+		if len(referencePrompt) > maxPromptOptimizationProtectedBodyBytes {
+			return errors.New("提示词优化参考内容超过安全限制")
+		}
+		if len(strings.TrimSpace(request.ReferenceName)) > maxGenerationReferenceURLBytes {
+			return errors.New("提示词优化参考名称超过安全限制")
+		}
+	}
+	return nil
+}
+
+func promptOptimizationSensitiveBodies(protectedBodies []string, ordered []generationOrderedReference) []string {
+	result := make([]string, 0, len(protectedBodies)+len(ordered))
+	totalBytes := 0
+	appendValue := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" || len(value) > maxPromptOptimizationProtectedBodyBytes || totalBytes+len(value) > maxPromptOptimizationProtectedContextBytes {
+			return
+		}
+		result = append(result, value)
+		totalBytes += len(value)
+	}
+	for _, protected := range protectedBodies {
+		appendValue(protected)
+	}
+	for _, item := range ordered {
+		if strings.HasPrefix(item.Source, "asset:") {
+			appendValue(strings.TrimPrefix(item.Source, "asset:"))
+			continue
+		}
+		referenceURL := strings.TrimPrefix(item.Source, "url:")
+		if strings.HasPrefix(strings.ToLower(referenceURL), "data:") {
+			appendValue(referenceURL[:min(len(referenceURL), 256)])
+			continue
+		}
+		if len(referenceURL) <= maxPromptOptimizationProtectedBodyBytes {
+			appendValue(referenceURL)
+		}
+		parsed, err := url.Parse(referenceURL)
+		if err != nil {
+			continue
+		}
+		for _, values := range parsed.Query() {
+			for _, value := range values {
+				if len(strings.TrimSpace(value)) >= 8 {
+					appendValue(value)
+				}
+			}
+		}
+	}
+	return result
 }
 
 // NormalizeGenerationPromptOptimizationRequest trims prompt optimization settings.
@@ -219,7 +364,11 @@ func (workflow *GenerationService) CreatePromptOptimizedGenerationMessage(
 		payload.Kind = string(coregeneration.KindImage)
 	}
 	payload.Params = NormalizeGenerationParams(payload.Params)
-	payload.Params = generationParamsWithOrderedReferences(payload.Params, canonicalOrderedGenerationReferences(payload))
+	orderedReferences := canonicalOrderedGenerationReferences(payload)
+	if err := validateOrderedGenerationReferences(orderedReferences); err != nil {
+		return GenerationOptimizeAndGenerateResponse{}, http.StatusBadRequest, err
+	}
+	payload.Params = generationParamsWithOrderedReferences(payload.Params, orderedReferences)
 	if payload.Prompt == "" {
 		return GenerationOptimizeAndGenerateResponse{}, http.StatusBadRequest, fmt.Errorf("缺少 prompt")
 	}
@@ -247,6 +396,9 @@ func (workflow *GenerationService) CreatePromptOptimizedGenerationMessage(
 	}
 	if err := workflow.requireGenerationRouteConfigured(route); err != nil {
 		return GenerationOptimizeAndGenerateResponse{}, http.StatusServiceUnavailable, err
+	}
+	if limit := promptOptimizationReferenceLimitForRoute(route); limit > 0 && len(orderedReferences) > limit {
+		return GenerationOptimizeAndGenerateResponse{}, http.StatusBadRequest, fmt.Errorf("generation route supports at most %d reference URLs", limit)
 	}
 	if payload.PromptOptimization.Executor != string(textcompletion.ExecutorCodex) {
 		if _, err := workflow.resolveConfiguredTextRoute(payload.PromptOptimization.RouteID); err != nil {
@@ -287,6 +439,13 @@ func (workflow *GenerationService) CreatePromptOptimizedGenerationMessage(
 		Generation:      generationResponse,
 		OptimizedPrompt: optimizedPrompt,
 	}, http.StatusOK, nil
+}
+
+func promptOptimizationReferenceLimitForRoute(route coregeneration.ModelRoute) int {
+	if route.ID == coregeneration.RouteCodexImage {
+		return maxCodexImageReferences
+	}
+	return route.MaxReferenceURLs
 }
 
 func (workflow *GenerationService) createPromptOptimizationHistoryTask(
@@ -394,25 +553,55 @@ func promptOptimizationConversationTitle(projectID string) string {
 	return projectName + " · " + promptOptimizationConversationKindLabel
 }
 
-func promptOptimizationUserPrompt(request *GenerationPromptOptimizationRequest, currentPrompt string, ordered []generationOrderedReference) string {
+type promptOptimizationReference struct {
+	Index      int    `json:"index"`
+	Label      string `json:"label"`
+	Role       string `json:"role"`
+	SourceKind string `json:"sourceKind"`
+}
+
+func promptOptimizationUserPrompt(request *GenerationPromptOptimizationRequest, currentPrompt string, ordered []generationOrderedReference) (string, error) {
 	envelope := struct {
-		OrderedReferences []generationOrderedReference `json:"orderedReferences"`
-		ReferenceName     string                       `json:"referenceName"`
-		ReferencePrompt   string                       `json:"referencePrompt"`
-		UserPrompt        string                       `json:"userPrompt"`
+		OrderedReferences []promptOptimizationReference `json:"orderedReferences"`
+		ReferenceName     string                        `json:"referenceName"`
+		ReferencePrompt   string                        `json:"referencePrompt"`
+		UserPrompt        string                        `json:"userPrompt"`
 	}{
-		OrderedReferences: ordered,
+		OrderedReferences: promptOptimizationReferences(ordered),
 		UserPrompt:        strings.TrimSpace(currentPrompt),
 	}
 	if envelope.OrderedReferences == nil {
-		envelope.OrderedReferences = []generationOrderedReference{}
+		envelope.OrderedReferences = []promptOptimizationReference{}
 	}
 	if request != nil {
 		envelope.ReferenceName = strings.TrimSpace(request.ReferenceName)
 		envelope.ReferencePrompt = strings.TrimSpace(request.ReferencePrompt)
 	}
-	data, _ := json.Marshal(envelope)
-	return "<medialink_prompt_optimization_data>\n" + string(data) + "\n</medialink_prompt_optimization_data>"
+	data, err := json.Marshal(envelope)
+	if err != nil || len(data) > maxPromptOptimizationEnvelopeBytes {
+		return "", errors.New("提示词优化输入超过安全限制")
+	}
+	return "<medialink_prompt_optimization_data>\n" + string(data) + "\n</medialink_prompt_optimization_data>", nil
+}
+
+func promptOptimizationReferences(ordered []generationOrderedReference) []promptOptimizationReference {
+	if len(ordered) == 0 {
+		return []promptOptimizationReference{}
+	}
+	references := make([]promptOptimizationReference, 0, len(ordered))
+	for _, item := range ordered {
+		sourceKind := "url"
+		if strings.HasPrefix(item.Source, "asset:") {
+			sourceKind = "asset"
+		}
+		references = append(references, promptOptimizationReference{
+			Index:      item.Index,
+			Label:      item.Label,
+			Role:       item.Role,
+			SourceKind: sourceKind,
+		})
+	}
+	return references
 }
 
 func cleanPromptOptimizationOutput(value string) string {

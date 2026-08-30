@@ -120,7 +120,7 @@ func TestCodexImagePromptOptimizationRouting(t *testing.T) {
 }
 
 func TestProtectedImagePromptOptimizationRejectsUntrustedOutputWithoutLeakingBody(t *testing.T) {
-	protectedBody := "PROTECTED-CINEMATIC-SEQUENCE-ALPHA-BRAVO-CHARLIE-DELTA keep identity lighting and composition"
+	protectedBody := strings.Repeat("ProtectedCinematicSequenceAlphaBravoCharlieDelta0123456789", 12)
 	tests := []struct {
 		name   string
 		output string
@@ -128,6 +128,10 @@ func TestProtectedImagePromptOptimizationRejectsUntrustedOutputWithoutLeakingBod
 		{name: "direct protected body", output: protectedBody},
 		{name: "large protected reproduction", output: "portrait, " + protectedBody[:70]},
 		{name: "protected body in think tags", output: "<think>" + protectedBody + "</think>\nsafe portrait"},
+		{name: "sparse insertion", output: insertEveryN(protectedBody, "0", 100)},
+		{name: "sparse deletion", output: deleteEveryN(protectedBody, 100)},
+		{name: "sparse replacement", output: replaceEveryN(protectedBody, 'Z', 100)},
+		{name: "case whitespace punctuation", output: insertEveryN(strings.ToLower(protectedBody), " - \n", 50)},
 		{name: "empty", output: "   "},
 		{name: "json object", output: `{"prompt":"safe portrait"}`},
 		{name: "markdown fence", output: "```text\nsafe portrait\n```"},
@@ -195,6 +199,212 @@ func TestProtectedImagePromptOptimizationRejectsUntrustedOutputWithoutLeakingBod
 	}
 }
 
+func TestProtectedImagePromptOptimizationAllowsShortCommonPhrases(t *testing.T) {
+	execution := promptOptimizationExecution{
+		Enabled:         true,
+		ProtectedBodies: []string{strings.Repeat("cinematic lighting, detailed composition, preserve identity. ", 12)},
+	}
+	got, err := execution.validateOutput("cinematic lighting portrait")
+	if err != nil || got != "cinematic lighting portrait" {
+		t.Fatalf("validateOutput() = %q, %v; want legal short common phrase", got, err)
+	}
+}
+
+func TestPromptOptimizationRejectsReferenceSecretsInOutput(t *testing.T) {
+	const signedToken = "SIGNED-REFERENCE-TOKEN-123456"
+	ordered := []generationOrderedReference{
+		{Index: 1, Label: "参考图1", Role: "reference", Source: "url:https://example.test/image.png?token=" + signedToken},
+		{Index: 2, Label: "参考图2", Role: "reference", Source: "url:data:image/png;base64,INLINE-SECRET-BYTES"},
+	}
+	execution := promptOptimizationExecution{
+		Enabled:         true,
+		ProtectedBodies: promptOptimizationSensitiveBodies(nil, ordered),
+	}
+	for _, output := range []string{
+		"portrait " + signedToken,
+		"portrait data:image/png;base64,INLINE-SECRET-BYTES",
+	} {
+		if _, err := execution.validateOutput(output); err == nil {
+			t.Fatalf("validateOutput(%q) accepted reference secret", output)
+		}
+	}
+}
+
+func TestPromptOptimizationLimitsFailClosedWithoutLeakingBodies(t *testing.T) {
+	secret := "PROTECTED-LIMIT-SECRET"
+	tests := []struct {
+		name    string
+		prompt  string
+		body    string
+		output  string
+		wantRun bool
+	}{
+		{name: "user prompt", prompt: strings.Repeat("u", maxPromptOptimizationUserPromptBytes+1), body: "style"},
+		{name: "protected body", prompt: "portrait", body: secret + strings.Repeat("p", maxPromptOptimizationProtectedBodyBytes+1)},
+		{name: "envelope", prompt: strings.Repeat("u", maxPromptOptimizationUserPromptBytes), body: strings.Repeat("p", maxPromptOptimizationProtectedBodyBytes)},
+		{name: "optimizer output", prompt: "portrait", body: "style", output: strings.Repeat("o", maxPromptOptimizationOutputBytes+1), wantRun: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workflow := newPromptSupplementsTestWorkflow(t)
+			workflow.SetStylePromptLibrary(promptReferenceSourceStub{entries: map[string]promptlibrary.PromptEntry{
+				"protected-limit": {ID: "protected-limit", Name: "protected", Prompt: test.body},
+			}})
+			provider := &imagePromptOptimizationProvider{requests: make(chan coregeneration.Request, 1)}
+			workflow.SetMediaLinkProviders(provider, &mediaLinkTestProvider{name: "h3"}, mediaLinkPromptOptimizationReady)
+			var textCalls atomic.Int32
+			workflow.SetCodexTextBackend(
+				textcompletion.BackendFunc(func(context.Context, textcompletion.Request) (textcompletion.Result, error) {
+					textCalls.Add(1)
+					return textcompletion.Result{Text: test.output, Executor: textcompletion.ExecutorCodex}, nil
+				}),
+				func(context.Context, textcompletion.Request) bool { return true },
+			)
+
+			var logs bytes.Buffer
+			previousLogger := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+			t.Cleanup(func() { slog.SetDefault(previousLogger) })
+			_, status, err := workflow.CreatePromptOptimizedGenerationMessage(context.Background(), GenerationMessageRequest{
+				Kind:    string(coregeneration.KindImage),
+				RouteID: coregeneration.RouteCodexImage,
+				Prompt:  test.prompt,
+				PromptOptimization: &GenerationPromptOptimizationRequest{
+					Executor:    string(textcompletion.ExecutorCodex),
+					ReferenceID: "protected-limit",
+				},
+			})
+			if err == nil || status == http.StatusOK {
+				t.Fatalf("CreatePromptOptimizedGenerationMessage() status = %d error = %v, want fail closed", status, err)
+			}
+			wantCalls := int32(0)
+			if test.wantRun {
+				wantCalls = 1
+			}
+			if textCalls.Load() != wantCalls {
+				t.Fatalf("text calls = %d, want %d", textCalls.Load(), wantCalls)
+			}
+			if strings.Contains(err.Error(), secret) || strings.Contains(logs.String(), secret) {
+				t.Fatalf("limit error/log leaked protected body: error=%q logs=%q", err, logs.String())
+			}
+			select {
+			case request := <-provider.requests:
+				t.Fatalf("image provider received over-limit request: %+v", request)
+			default:
+			}
+		})
+	}
+}
+
+func TestPromptOptimizationRejectsOversizedOrExcessReferencesBeforeModelAndPersistence(t *testing.T) {
+	tests := []struct {
+		name       string
+		references []string
+	}{
+		{
+			name:       "oversized data URI",
+			references: []string{"data:image/png;base64," + strings.Repeat("A", maxGenerationReferenceDataURIBytes+1)},
+		},
+		{
+			name: "route reference count",
+			references: func() []string {
+				values := make([]string, maxCodexImageReferences+1)
+				for index := range values {
+					values[index] = fmt.Sprintf("https://example.test/reference-%d.png", index)
+				}
+				return values
+			}(),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workflow := newPromptSupplementsTestWorkflow(t)
+			provider := &imagePromptOptimizationProvider{requests: make(chan coregeneration.Request, 1)}
+			workflow.SetMediaLinkProviders(provider, &mediaLinkTestProvider{name: "h3"}, mediaLinkPromptOptimizationReady)
+			var textCalls atomic.Int32
+			workflow.SetCodexTextBackend(
+				textcompletion.BackendFunc(func(context.Context, textcompletion.Request) (textcompletion.Result, error) {
+					textCalls.Add(1)
+					return textcompletion.Result{Text: "optimized", Executor: textcompletion.ExecutorCodex}, nil
+				}),
+				func(context.Context, textcompletion.Request) bool { return true },
+			)
+			_, status, err := workflow.CreatePromptOptimizedGenerationMessage(context.Background(), GenerationMessageRequest{
+				Kind:          string(coregeneration.KindImage),
+				RouteID:       coregeneration.RouteCodexImage,
+				Prompt:        "portrait",
+				ReferenceURLs: test.references,
+				PromptOptimization: &GenerationPromptOptimizationRequest{
+					Executor:        string(textcompletion.ExecutorCodex),
+					ReferencePrompt: "style",
+				},
+			})
+			if err == nil || status != http.StatusBadRequest {
+				t.Fatalf("CreatePromptOptimizedGenerationMessage() status = %d error = %v, want bad request", status, err)
+			}
+			if textCalls.Load() != 0 {
+				t.Fatalf("text calls = %d, want rejection before optimizer", textCalls.Load())
+			}
+			tasks, listErr := workflow.generationTasks.List()
+			if listErr != nil {
+				t.Fatal(listErr)
+			}
+			if len(tasks) != 0 {
+				t.Fatalf("persisted tasks = %+v, want none", tasks)
+			}
+		})
+	}
+}
+
+func TestPromptOptimizationStreamBuilderFailsClosedAtOutputLimit(t *testing.T) {
+	workflow := newPromptSupplementsTestWorkflow(t)
+	var providerRequest coregeneration.Request
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+		if route.ID != coregeneration.RouteDMXGPT41MiniText {
+			return nil, fmt.Errorf("unexpected route %q", route.ID)
+		}
+		return fakeTextStreamProvider{
+			request: &providerRequest,
+			events: []coregeneration.TextStreamEvent{
+				{Delta: strings.Repeat("a", maxPromptOptimizationOutputBytes)},
+				{Delta: "overflow"},
+			},
+		}, nil
+	}
+	events := []GenerationTextStreamEvent{}
+	status, err := workflow.StreamGenerationText(context.Background(), GenerationMessageRequest{
+		Kind:         string(coregeneration.KindText),
+		RouteID:      coregeneration.RouteDMXGPT41MiniText,
+		Prompt:       "portrait",
+		TextExecutor: string(textcompletion.ExecutorRoute),
+		PromptOptimization: &GenerationPromptOptimizationRequest{
+			Executor:        string(textcompletion.ExecutorRoute),
+			RouteID:         coregeneration.RouteDMXGPT41MiniText,
+			ReferencePrompt: "style",
+		},
+		Params: map[string]any{"system_instruction": imagePromptOptimizationSystemInstructionText},
+	}, func(event GenerationTextStreamEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("StreamGenerationText() status = %d error = %v", status, err)
+	}
+	if len(events) != 2 || events[0].Type != "start" || events[1].Type != "error" {
+		t.Fatalf("events = %#v, want start then fail-closed error without deltas", events)
+	}
+	if !generationRequestHasSensitivePrompt(providerRequest) {
+		t.Fatalf("optimizer provider request was not marked sensitive: %#v", providerRequest.Options)
+	}
+	tasks, listErr := workflow.generationTasks.List()
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(tasks) != 1 || tasks[0].Status != "failed" || tasks[0].Text != "" {
+		t.Fatalf("persisted optimizer tasks = %+v, want failed task without partial output", tasks)
+	}
+}
+
 func TestCodexImagePromptOptimizationKeepsCanonicalOrderedReferencesAcrossCreateAndRetry(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "settings.db")
 	repo, err := repository.NewGenerationTaskRepository(dbPath)
@@ -220,7 +430,8 @@ func TestCodexImagePromptOptimizationKeepsCanonicalOrderedReferencesAcrossCreate
 		func(context.Context, textcompletion.Request) bool { return true },
 	)
 
-	directOne := "https://example.test/direct-one.png"
+	directOne := "https://example.test/direct-one.png?token=SIGNED-SECRET-TOKEN"
+	inlineReference := "data:image/png;base64," + base64.StdEncoding.EncodeToString(testPNGBytes())
 	directTwo := "https://example.test/direct-two.png"
 	response, status, err := workflow.CreatePromptOptimizedGenerationMessage(context.Background(), GenerationMessageRequest{
 		Kind:    string(coregeneration.KindImage),
@@ -230,7 +441,7 @@ func TestCodexImagePromptOptimizationKeepsCanonicalOrderedReferencesAcrossCreate
 			Executor:        string(textcompletion.ExecutorCodex),
 			ReferencePrompt: "cinematic",
 		},
-		ReferenceURLs: []string{directOne, assetOne.URL, directTwo, assetOne.URL},
+		ReferenceURLs: []string{directOne, assetOne.URL, inlineReference, directTwo, assetOne.URL},
 		ReferenceAssetIDs: []string{
 			assetTwo.ID,
 			assetOne.ID,
@@ -246,17 +457,34 @@ func TestCodexImagePromptOptimizationKeepsCanonicalOrderedReferencesAcrossCreate
 	}
 
 	wantManifest := []map[string]any{
-		{"index": float64(1), "label": "参考图1", "role": "reference", "source": "url:" + directOne},
-		{"index": float64(2), "label": "参考图2", "role": "section:character-doc:hero", "source": "asset:" + assetOne.ID},
-		{"index": float64(3), "label": "参考图3", "role": "section:shot-doc:background", "source": "url:" + directTwo},
-		{"index": float64(4), "label": "参考图4", "role": "document:scene-doc", "source": "asset:" + assetTwo.ID},
+		{"index": float64(1), "label": "参考图1", "role": "reference", "sourceKind": "url"},
+		{"index": float64(2), "label": "参考图2", "role": "section:character-doc:hero", "sourceKind": "asset"},
+		{"index": float64(3), "label": "参考图3", "role": "reference", "sourceKind": "url"},
+		{"index": float64(4), "label": "参考图4", "role": "section:shot-doc:background", "sourceKind": "url"},
+		{"index": float64(5), "label": "参考图5", "role": "document:scene-doc", "sourceKind": "asset"},
 	}
 	assertPromptOptimizationDataEnvelope(t, optimizerRequest.Prompt, "cinematic", "角色站在场景中", wantManifest)
+	for _, secret := range []string{"SIGNED-SECRET-TOKEN", directOne, inlineReference, assetOne.URL, assetOne.ID} {
+		if strings.Contains(optimizerRequest.Prompt, secret) {
+			t.Fatalf("optimizer request leaked reference source %q: %q", secret, optimizerRequest.Prompt)
+		}
+	}
 
 	firstRequest := waitForPromptSupplementsProviderRequest(t, provider.requests)
-	wantReferences := resolvedImageReferencesForTest(t, workflow, []string{directOne, directTwo}, []media.MediaAsset{assetOne, assetTwo})
+	assetOneReference, assetOneErr := workflow.mediaAssets.CompressedImageDataURIValue(assetOne, media.DefaultReferenceImageCompressionOptions())
+	if assetOneErr != nil {
+		t.Fatal(assetOneErr)
+	}
+	assetTwoReference, assetTwoErr := workflow.mediaAssets.CompressedImageDataURIValue(assetTwo, media.DefaultReferenceImageCompressionOptions())
+	if assetTwoErr != nil {
+		t.Fatal(assetTwoErr)
+	}
+	wantReferences := []string{directOne, assetOneReference, inlineReference, directTwo, assetTwoReference}
 	if !reflect.DeepEqual(firstRequest.ReferenceURLs, wantReferences) {
 		t.Fatalf("provider references = %#v, want canonical mixed order %#v", firstRequest.ReferenceURLs, wantReferences)
+	}
+	if _, exists := firstRequest.Params[generationOrderedReferencesParam]; exists {
+		t.Fatalf("provider params exposed internal manifest: %#v", firstRequest.Params)
 	}
 	firstTask := waitForGenerationTask(t, store, response.Generation.ID, func(task GenerationTaskRecord) bool {
 		return task.Status == "completed"
@@ -275,6 +503,9 @@ func TestCodexImagePromptOptimizationKeepsCanonicalOrderedReferencesAcrossCreate
 	if textCalls.Load() != 1 || retryRequest.Prompt != "optimized portrait" || !reflect.DeepEqual(retryRequest.ReferenceURLs, wantReferences) {
 		t.Fatalf("retry text calls/prompt/references = %d/%q/%#v, want no reoptimization and stable slots", textCalls.Load(), retryRequest.Prompt, retryRequest.ReferenceURLs)
 	}
+	waitForGenerationTask(t, store, firstTask.ID, func(task GenerationTaskRecord) bool {
+		return task.Status == "completed"
+	})
 }
 
 func TestCodexImagePromptOptimizationBatchUsesCanonicalOrderedReferences(t *testing.T) {
@@ -313,8 +544,8 @@ func TestCodexImagePromptOptimizationBatchUsesCanonicalOrderedReferences(t *test
 		t.Fatalf("CreateGenerationBatch() status = %d response = %+v error = %v", status, response, err)
 	}
 	assertPromptOptimizationDataEnvelope(t, optimizerRequest.Prompt, "style", "batch portrait", []map[string]any{
-		{"index": float64(1), "label": "参考图1", "role": "reference", "source": "asset:" + asset.ID},
-		{"index": float64(2), "label": "参考图2", "role": "reference", "source": "url:" + direct},
+		{"index": float64(1), "label": "参考图1", "role": "reference", "sourceKind": "asset"},
+		{"index": float64(2), "label": "参考图2", "role": "reference", "sourceKind": "url"},
 	})
 	request := waitForPromptSupplementsProviderRequest(t, provider.requests)
 	assetReference, assetErr := workflow.mediaAssets.CompressedImageDataURIValue(asset, media.DefaultReferenceImageCompressionOptions())
@@ -324,6 +555,23 @@ func TestCodexImagePromptOptimizationBatchUsesCanonicalOrderedReferences(t *test
 	want := []string{assetReference, direct}
 	if !reflect.DeepEqual(request.ReferenceURLs, want) {
 		t.Fatalf("batch provider references = %#v, want %#v", request.ReferenceURLs, want)
+	}
+}
+
+func TestCanonicalReferenceManifestStaysInternalToServer(t *testing.T) {
+	params := generationParamsWithOrderedReferences(map[string]any{"quality": "high"}, []generationOrderedReference{{
+		Index: 1, Label: "参考图1", Role: "reference", Source: "url:https://example.test/private.png?token=secret",
+	}})
+	for name, filtered := range map[string]map[string]any{
+		"client":   generationParamsForClient(params),
+		"provider": providerGenerationParams(params),
+	} {
+		if _, exists := filtered[generationOrderedReferencesParam]; exists {
+			t.Fatalf("%s params exposed internal reference manifest: %#v", name, filtered)
+		}
+		if filtered["quality"] != "high" {
+			t.Fatalf("%s params lost public values: %#v", name, filtered)
+		}
 	}
 }
 
@@ -350,28 +598,38 @@ func assertPromptOptimizationDataEnvelope(t *testing.T, prompt string, reference
 	}
 }
 
-func resolvedImageReferencesForTest(t *testing.T, workflow *GenerationService, direct []string, assets []media.MediaAsset) []string {
-	t.Helper()
-	resolved := make([]string, 0, len(direct)+len(assets))
-	if len(assets) > 0 {
-		first, err := workflow.mediaAssets.CompressedImageDataURIValue(assets[0], media.DefaultReferenceImageCompressionOptions())
-		if err != nil {
-			t.Fatal(err)
+func insertEveryN(value string, inserted string, every int) string {
+	var builder strings.Builder
+	for index, character := range value {
+		if index > 0 && index%every == 0 {
+			builder.WriteString(inserted)
 		}
-		resolved = append(resolved, direct[0], first)
-		if len(direct) > 1 {
-			resolved = append(resolved, direct[1])
-		}
-		for _, asset := range assets[1:] {
-			value, err := workflow.mediaAssets.CompressedImageDataURIValue(asset, media.DefaultReferenceImageCompressionOptions())
-			if err != nil {
-				t.Fatal(err)
-			}
-			resolved = append(resolved, value)
-		}
-		return resolved
+		builder.WriteRune(character)
 	}
-	return append(resolved, direct...)
+	return builder.String()
+}
+
+func deleteEveryN(value string, every int) string {
+	var builder strings.Builder
+	for index, character := range value {
+		if index > 0 && index%every == 0 {
+			continue
+		}
+		builder.WriteRune(character)
+	}
+	return builder.String()
+}
+
+func replaceEveryN(value string, replacement rune, every int) string {
+	var builder strings.Builder
+	for index, character := range value {
+		if index > 0 && index%every == 0 {
+			builder.WriteRune(replacement)
+			continue
+		}
+		builder.WriteRune(character)
+	}
+	return builder.String()
 }
 
 func mediaLinkPromptOptimizationReady(context.Context, string) (bool, string) {

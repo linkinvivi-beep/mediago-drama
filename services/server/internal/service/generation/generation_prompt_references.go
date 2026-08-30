@@ -50,19 +50,22 @@ func (workflow *GenerationService) providerPromptForGeneration(
 }
 
 func (workflow *GenerationService) generationReferenceSlots(payload generationMessageRequest) []generationReferenceSlot {
-	directURLs, referenceAssetIDsFromURLs := splitReferenceURLs(payload.ReferenceURLs)
-	references := make([]generationReferenceSlot, 0, len(directURLs)+len(referenceAssetIDsFromURLs)+len(payload.ReferenceAssetIDs))
-
-	for _, referenceURL := range directURLs {
-		names := generationReferenceNamesFromURL(referenceURL)
-		references = append(references, generationReferenceSlot{
-			Kind:      generationReferenceKindFromURL(referenceURL),
-			Names:     names,
-			SourceKey: "url:" + referenceURL,
-		})
+	ordered := orderedGenerationReferencesFromParams(payload.Params)
+	if len(ordered) == 0 {
+		ordered = canonicalOrderedGenerationReferences(payload)
 	}
-
-	for _, assetID := range uniqueCompactStrings(append(referenceAssetIDsFromURLs, payload.ReferenceAssetIDs...)) {
+	references := make([]generationReferenceSlot, 0, len(ordered))
+	for _, item := range ordered {
+		if strings.HasPrefix(item.Source, "url:") {
+			referenceURL := strings.TrimPrefix(item.Source, "url:")
+			references = append(references, generationReferenceSlot{
+				Kind:      generationReferenceKindFromURL(referenceURL),
+				Names:     generationReferenceNamesFromURL(referenceURL),
+				SourceKey: item.Source,
+			})
+			continue
+		}
+		assetID := strings.TrimPrefix(item.Source, "asset:")
 		if workflow == nil || workflow.mediaAssets == nil {
 			continue
 		}
@@ -78,7 +81,7 @@ func (workflow *GenerationService) generationReferenceSlots(payload generationMe
 		references = append(references, generationReferenceSlot{
 			Kind:      kind,
 			Names:     generationReferenceNamesFromFilename(asset.Filename),
-			SourceKey: "asset:" + asset.ID,
+			SourceKey: item.Source,
 		})
 	}
 

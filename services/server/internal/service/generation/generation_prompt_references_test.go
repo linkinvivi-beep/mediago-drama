@@ -8,6 +8,7 @@ import (
 	"image/color"
 	"image/png"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -113,6 +114,45 @@ func TestProviderPromptForGenerationRewritesBoundSelectedAssetMentions(t *testin
 
 	if prompt != "角色 @图片1 @音频1 冲出雨巷。" {
 		t.Fatalf("provider prompt = %q", prompt)
+	}
+}
+
+func TestVideoPromptSlotsAndProviderReferencesShareCanonicalMixedOrder(t *testing.T) {
+	mediaAssets := media.NewMediaAssets(filepath.Join(t.TempDir(), "settings.db"), t.TempDir())
+	asset := saveNamedPNGReferenceAsset(t, mediaAssets, "本地角色.png")
+	workflow := NewGenerationService(nil, nil, mediaAssets)
+	route, ok := coregeneration.FindRoute(coregeneration.RouteJimengSeedance20Fast)
+	if !ok {
+		t.Fatal("jimeng seedance route is missing")
+	}
+	direct := "https://example.test/background.png?token=secret"
+	payload := generationMessageRequest{
+		ProjectID: "project-a",
+		Prompt: "角色 @[角色文档](mention://character-doc/hero?kind=section) 位于 " +
+			"@[场景文档](mention://scene-doc/background?kind=section)。",
+		ReferenceURLs: []string{asset.URL, direct},
+		ReferenceBindings: []GenerationReferenceBinding{
+			{Kind: "section", DocumentID: "character-doc", BlockID: "hero", AssetID: asset.ID},
+			{Kind: "section", DocumentID: "scene-doc", BlockID: "background", URL: direct},
+		},
+	}
+	payload.Params = generationParamsWithOrderedReferences(payload.Params, canonicalOrderedGenerationReferences(payload))
+
+	prompt := workflow.providerPromptForGeneration(route, payload)
+	if prompt != "角色 @图片1 位于 @图片2。" {
+		t.Fatalf("provider prompt = %q, want canonical image slots", prompt)
+	}
+	references, err := workflow.resolveGenerationReferences(route, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assetReference, err := mediaAssets.DataURIValue(asset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{assetReference, direct}
+	if !reflect.DeepEqual(references, want) {
+		t.Fatalf("provider references = %#v, want canonical slot order %#v", references, want)
 	}
 }
 
