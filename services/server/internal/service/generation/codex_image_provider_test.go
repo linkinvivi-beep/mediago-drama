@@ -176,6 +176,9 @@ func TestCodexImageProviderResultCases(t *testing.T) {
 				if _, exists := response.Assets[0].Metadata["saved_path"]; exists {
 					t.Fatalf("asset metadata = %#v, want no saved path", response.Assets[0].Metadata)
 				}
+				if marked, _ := response.Assets[0].Metadata["_medialink_internal_codex_image_payload"].(bool); !marked {
+					t.Fatalf("asset metadata = %#v, want internal Codex payload marker", response.Assets[0].Metadata)
+				}
 			}
 			if _, marshalErr := json.Marshal(response.Metadata); marshalErr != nil {
 				t.Fatalf("response metadata is not serializable: %v", marshalErr)

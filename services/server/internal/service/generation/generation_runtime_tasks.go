@@ -1187,6 +1187,9 @@ func (workflow *GenerationService) persistGenerationProgress(
 	if len(response.Assets) > 0 {
 		response = workflow.cacheGenerationResponseAssetsWithOptions(ctx, response, generationMediaSaveOptionsWithTitle(projectID, conversationID, task.SectionID, assetTitle))
 	}
+	if strings.EqualFold(strings.TrimSpace(response.Status), "failed") {
+		progressStatus = "failed"
+	}
 
 	messageResponse := generationResponseWithAssetTitle(GenerationResponseFromCore(response, task.Kind), assetTitle)
 	providerTaskID := ""
@@ -1195,7 +1198,9 @@ func (workflow *GenerationService) persistGenerationProgress(
 	}
 	messageResponse.ID = task.ID
 	messageResponse.Status = progressStatus
-	messageResponse.Message = generationProgressMessage(event.Completed, event.Total)
+	if progressStatus != "failed" {
+		messageResponse.Message = generationProgressMessage(event.Completed, event.Total)
+	}
 
 	progressTask := GenerationTaskWithMessage(task, messageResponse)
 	if providerTaskID != "" {

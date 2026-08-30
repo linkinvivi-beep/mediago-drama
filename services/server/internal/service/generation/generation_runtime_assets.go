@@ -204,17 +204,45 @@ func (workflow *GenerationService) cacheGenerationResponseAssetsWithOptions(
 	response coregeneration.Response,
 	options media.MediaAssetSaveOptions,
 ) coregeneration.Response {
-	if workflow.mediaAssets == nil || len(response.Assets) == 0 {
+	if len(response.Assets) == 0 {
 		return response
 	}
 
 	warnings := []string{}
+	codexImportFailed := false
 	for index, asset := range response.Assets {
+		internalCodexPayload, _ := asset.Metadata[codexImageInternalPayloadKey].(bool)
 		asset.Metadata = generationAssetMetadataWithoutInternalSources(asset.Metadata)
 		response.Assets[index].Metadata = asset.Metadata
-		cached, err := workflow.cacheGenerationAsset(ctx, asset, options)
+		var cached media.MediaAsset
+		var err error
+		switch {
+		case workflow.mediaAssets == nil:
+			if !internalCodexPayload {
+				continue
+			}
+			err = fmt.Errorf("MediaLink media asset store is unavailable")
+		case internalCodexPayload && ctx.Err() != nil:
+			err = ctx.Err()
+		default:
+			cached, err = workflow.cacheGenerationAsset(ctx, asset, options)
+		}
+		if internalCodexPayload && err == nil && cached.ID == "" {
+			err = fmt.Errorf("Codex image output did not produce a MediaLink asset")
+		}
+		if internalCodexPayload {
+			response.Assets[index].Base64 = ""
+			if err != nil {
+				response.Assets[index].URL = ""
+				codexImportFailed = true
+			}
+		}
 		if err != nil {
-			warnings = append(warnings, err.Error())
+			warning := err.Error()
+			if internalCodexPayload {
+				warning = "Codex image output could not be imported into MediaLink assets"
+			}
+			warnings = append(warnings, warning)
 			slog.Warn(
 				"generation asset cache failed",
 				"response_id", response.ID,
@@ -242,6 +270,15 @@ func (workflow *GenerationService) cacheGenerationResponseAssetsWithOptions(
 		if cached.PosterURL != "" {
 			response.Assets[index].Metadata["poster_url"] = cached.PosterURL
 		}
+	}
+	if codexImportFailed {
+		if response.Metadata == nil {
+			response.Metadata = map[string]any{}
+		}
+		response.Status = "failed"
+		response.Metadata["error"] = "Codex image output could not be imported into MediaLink assets"
+		response.Metadata["failure_message"] = "图像已生成，但导入 MediaLink 素材库失败。"
+		response.Metadata["retryable"] = true
 	}
 	if len(warnings) > 0 {
 		if response.Metadata == nil {
@@ -307,7 +344,7 @@ func generationAssetMetadataWithoutInternalSources(metadata map[string]any) map[
 	cleaned := make(map[string]any, len(metadata))
 	for key, value := range metadata {
 		switch strings.ToLower(strings.ReplaceAll(strings.TrimSpace(key), "_", "")) {
-		case "savedpath", "localpath":
+		case "savedpath", "localpath", "medialinkinternalcodeximagepayload":
 			continue
 		default:
 			cleaned[key] = value

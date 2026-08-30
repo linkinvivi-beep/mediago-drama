@@ -14,7 +14,7 @@ func TestSanitizedGenerationResponseOmitsSavedPaths(t *testing.T) {
 		Assets: []coregeneration.Asset{{
 			Kind:     coregeneration.KindImage,
 			MIMEType: "image/png",
-			Metadata: map[string]any{"saved_path": path},
+			Metadata: map[string]any{"saved_path": path, "_medialink_internal_codex_image_payload": true},
 		}},
 		Metadata: map[string]any{
 			"runtime_state": GenerationTaskRuntimeState{CodexThreadID: "thread", SavedPath: path},
@@ -25,7 +25,7 @@ func TestSanitizedGenerationResponseOmitsSavedPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, forbidden := range []string{path, "saved_path", "savedPath", "SavedPath"} {
+	for _, forbidden := range []string{path, "saved_path", "savedPath", "SavedPath", "_medialink_internal_codex_image_payload"} {
 		if strings.Contains(string(encoded), forbidden) {
 			t.Fatalf("sanitized response log %s contains %q", encoded, forbidden)
 		}

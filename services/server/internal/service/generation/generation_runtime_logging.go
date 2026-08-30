@@ -172,7 +172,7 @@ func sanitizedLogValue(value any) any {
 	case map[string]any:
 		values := make(map[string]any, len(typed))
 		for key, item := range typed {
-			if generationLogKeyContainsSavedPath(key) {
+			if generationLogKeyIsInternalAssetSource(key) {
 				continue
 			}
 			values[key] = sanitizedLogValue(item)
@@ -200,9 +200,9 @@ func sanitizedLogValue(value any) any {
 	}
 }
 
-func generationLogKeyContainsSavedPath(key string) bool {
+func generationLogKeyIsInternalAssetSource(key string) bool {
 	normalized := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(key), "_", ""))
-	return normalized == "savedpath" || normalized == "localpath"
+	return normalized == "savedpath" || normalized == "localpath" || normalized == "medialinkinternalcodeximagepayload"
 }
 
 func sanitizedLogString(value string) string {

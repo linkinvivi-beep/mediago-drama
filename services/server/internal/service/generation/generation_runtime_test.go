@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -137,6 +138,122 @@ func TestCacheGenerationResponseAssetsDoesNotGrantProvidersLocalFileAccess(t *te
 		}
 		if bytes.Contains(publicJSON, []byte(secretPath)) || bytes.Contains(publicJSON, []byte("file://")) {
 			t.Fatalf("provider local path leaked through public response: %s", publicJSON)
+		}
+	}
+}
+
+func TestCodexImagePayloadIsScrubbedWhenMediaStoreIsUnavailable(t *testing.T) {
+	encoded := base64.StdEncoding.EncodeToString(testPNGBytes())
+	response := NewGenerationService(nil, nil, nil).CacheGenerationResponseAssets(context.Background(), coregeneration.Response{
+		Status: "completed",
+		Assets: []coregeneration.Asset{{
+			Kind:     coregeneration.KindImage,
+			Base64:   encoded,
+			MIMEType: "image/png",
+			Metadata: map[string]any{"_medialink_internal_codex_image_payload": true},
+		}},
+	})
+	assertCodexPayloadScrubbedAfterCacheFailure(t, response, encoded)
+
+	// Unmarked inline results belong to existing providers and retain the
+	// previous no-store behavior.
+	legacy := NewGenerationService(nil, nil, nil).CacheGenerationResponseAssets(context.Background(), coregeneration.Response{
+		Status: "completed",
+		Assets: []coregeneration.Asset{{Kind: coregeneration.KindImage, Base64: encoded, MIMEType: "image/png"}},
+	})
+	if len(legacy.Assets) != 1 || legacy.Assets[0].Base64 != encoded || legacy.Status != "completed" {
+		t.Fatalf("unmarked provider response changed: %+v", legacy)
+	}
+}
+
+func TestCodexImagePayloadIsScrubbedWhenMediaSaveFails(t *testing.T) {
+	encoded := base64.StdEncoding.EncodeToString(testPNGBytes())
+	mediaAssets := media.NewMediaAssetsFromRepository(nil, t.TempDir(), "", nil, errors.New("forced media save failure"))
+	response := NewGenerationService(nil, nil, mediaAssets).CacheGenerationResponseAssets(context.Background(), coregeneration.Response{
+		Status: "completed",
+		Assets: []coregeneration.Asset{{
+			Kind:     coregeneration.KindImage,
+			Base64:   encoded,
+			MIMEType: "image/png",
+			Metadata: map[string]any{"_medialink_internal_codex_image_payload": true},
+		}},
+	})
+	assertCodexPayloadScrubbedAfterCacheFailure(t, response, encoded)
+}
+
+func TestCodexImagePayloadIsScrubbedWhenCacheContextIsCanceled(t *testing.T) {
+	encoded := base64.StdEncoding.EncodeToString(testPNGBytes())
+	mediaAssets := media.NewMediaAssets(filepath.Join(t.TempDir(), "settings.db"), t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	response := NewGenerationService(nil, nil, mediaAssets).CacheGenerationResponseAssets(ctx, coregeneration.Response{
+		Status: "completed",
+		Assets: []coregeneration.Asset{{
+			Kind:     coregeneration.KindImage,
+			Base64:   encoded,
+			MIMEType: "image/png",
+			Metadata: map[string]any{"_medialink_internal_codex_image_payload": true},
+		}},
+	})
+	assertCodexPayloadScrubbedAfterCacheFailure(t, response, encoded)
+	assets, err := mediaAssets.List("")
+	if err != nil || len(assets) != 0 {
+		t.Fatalf("canceled cache stored assets = %+v, err %v", assets, err)
+	}
+}
+
+func TestCodexProgressCacheFailurePersistsNoPayload(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	task := testCodexGenerationTask("task-codex-cache-failure", "running")
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	encoded := base64.StdEncoding.EncodeToString(testPNGBytes())
+	mediaAssets := media.NewMediaAssetsFromRepository(nil, t.TempDir(), "", nil, errors.New("forced progress cache failure"))
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	workflow.persistGenerationProgress(context.Background(), task, coregeneration.ProgressEvent{Response: coregeneration.Response{
+		Status: "importing",
+		Assets: []coregeneration.Asset{{
+			Kind:     coregeneration.KindImage,
+			Base64:   encoded,
+			MIMEType: "image/png",
+			Metadata: map[string]any{"_medialink_internal_codex_image_payload": true},
+		}},
+	}}, "", "", "")
+	stored, found, err := store.Get(task.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() = found %v, err %v", found, err)
+	}
+	if stored.Status != "failed" || len(stored.Assets) != 0 || stored.Error == "" || !strings.Contains(stored.Message, "导入 MediaLink 素材库失败") {
+		t.Fatalf("stored task = %+v, want explicit payload-free cache failure", stored)
+	}
+	publicJSON, err := json.Marshal(GenerationTaskForClient(stored))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{encoded, "_medialink_internal_codex_image_payload"} {
+		if bytes.Contains(publicJSON, []byte(forbidden)) {
+			t.Fatalf("stored public task leaked %q: %s", forbidden, publicJSON)
+		}
+	}
+}
+
+func assertCodexPayloadScrubbedAfterCacheFailure(t *testing.T, response coregeneration.Response, encoded string) {
+	t.Helper()
+	if response.Status != "failed" || len(response.Assets) != 1 || response.Assets[0].Base64 != "" {
+		t.Fatalf("cache response = %+v, want explicit failure with scrubbed payload", response)
+	}
+	if _, exists := response.Assets[0].Metadata["_medialink_internal_codex_image_payload"]; exists {
+		t.Fatalf("cache response retained internal marker: %+v", response.Assets[0].Metadata)
+	}
+	publicJSON, err := json.Marshal(GenerationResponseFromCore(response, string(coregeneration.KindImage)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{encoded, "_medialink_internal_codex_image_payload"} {
+		if bytes.Contains(publicJSON, []byte(forbidden)) {
+			t.Fatalf("public response leaked %q: %s", forbidden, publicJSON)
 		}
 	}
 }

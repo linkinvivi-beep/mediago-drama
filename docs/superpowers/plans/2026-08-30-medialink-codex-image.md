@@ -155,7 +155,7 @@ type CodexImageProvider struct {
 **Files:** `generation_runtime_assets.go`, `generation_runtime_import.go`, `codex_image_provider_test.go`, `generation_runtime_test.go`
 
 - [ ] Write an integration-style service test using a temporary PNG. The provider returns its absolute `savedPath`; the task must finish with one cached MediaLink asset and no external file URI in the public response.
-- [ ] Return the validated file from the provider as a `coregeneration.Asset` with image kind, detected MIME, and local path/URL in the shape already consumed by `cacheGenerationResponseAssetsForTask`.
+- [ ] Security correction from code review: return the immutable bytes obtained by the same secure validation read as an internal-only `coregeneration.Asset` payload with image kind and detected MIME. Pass that payload through `cacheGenerationResponseAssetsForTask`, scrub the payload and its non-path marker on every success, failure, cancellation, nil-store, and progress-reuse branch, and never reopen `savedPath` by pathname. This does not change the user-visible specification.
 - [ ] Preserve `revisedPrompt` in runtime state and preserve the user's original prompt in `GenerationTaskRecord.Prompt`.
 - [ ] Let the existing asset import, selection, storyboard attachment, and project asset APIs operate unchanged.
 - [ ] Delete no Codex output files. Treat the job directory as application-owned recovery evidence; later cleanup is a separate feature.

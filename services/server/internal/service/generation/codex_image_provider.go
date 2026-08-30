@@ -28,6 +28,7 @@ import (
 const (
 	codexImageTaskIDRequestOption = "_medialink_task_id"
 	codexImageResponseIDPrefix    = coregeneration.RouteCodexImage + ":"
+	codexImageInternalPayloadKey  = "_medialink_internal_codex_image_payload"
 
 	// Bounds are intentionally generous for production Codex images while
 	// preventing unbounded allocations from untrusted references/results.
@@ -669,6 +670,7 @@ func (provider *CodexImageProvider) responseForResult(model string, result codex
 			Kind:     coregeneration.KindImage,
 			Base64:   base64.StdEncoding.EncodeToString(data),
 			MIMEType: mimeType,
+			Metadata: map[string]any{codexImageInternalPayloadKey: true},
 		}},
 		Metadata: map[string]any{"runtime_state": state},
 	}, nil
