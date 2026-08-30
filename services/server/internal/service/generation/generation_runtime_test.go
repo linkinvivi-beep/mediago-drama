@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2468,15 +2469,19 @@ type stubImageProvider struct {
 	getResponse      coregeneration.Response
 	getErr           error
 	getID            string
+	generateCalls    atomic.Int32
+	getCalls         atomic.Int32
 }
 
 func (provider *stubImageProvider) Name() string { return "stub-image" }
 
 func (provider *stubImageProvider) Generate(context.Context, coregeneration.Request) (coregeneration.Response, error) {
+	provider.generateCalls.Add(1)
 	return provider.generateResponse, provider.generateErr
 }
 
 func (provider *stubImageProvider) Get(_ context.Context, id string) (coregeneration.Response, error) {
+	provider.getCalls.Add(1)
 	provider.getID = id
 	return provider.getResponse, provider.getErr
 }
@@ -2577,6 +2582,123 @@ func TestCompleteSubmittedGenerationHandsOffPendingImage(t *testing.T) {
 	}
 	if !slicesContainsTaskID(pending, "generation-img-1") {
 		t.Fatalf("ListPending = %+v, want the handed-off image task", pending)
+	}
+}
+
+func TestCompleteSubmittedGenerationHandsOffRecoveryStatusesWithoutAssets(t *testing.T) {
+	for _, status := range []string{"preparing", "importing", "waiting_reconnect"} {
+		t.Run(status, func(t *testing.T) {
+			repo, err := repository.NewGenerationTaskRepository(filepath.Join(t.TempDir(), "settings.db"))
+			if err != nil {
+				t.Fatalf("NewGenerationTaskRepository() error = %v", err)
+			}
+			store := NewGenerationTaskServiceFromRepository(repo, nil, nil)
+			workflow := NewGenerationService(nil, store, nil)
+			providerID := "provider:" + status
+			provider := &stubImageProvider{generateResponse: coregeneration.Response{
+				ID:       providerID,
+				Status:   status,
+				Metadata: map[string]any{"checkpoint": status},
+			}}
+			task := jimengImageTaskRecord("generation-" + status)
+			if err := store.Upsert(task); err != nil {
+				t.Fatalf("Upsert() error = %v", err)
+			}
+
+			workflow.completeSubmittedGeneration(
+				context.Background(),
+				task,
+				provider,
+				coregeneration.Request{Kind: coregeneration.KindImage, Prompt: "a cat"},
+				"create",
+				"",
+				"",
+			)
+
+			stored, ok, err := store.Get(task.ID)
+			if err != nil || !ok {
+				t.Fatalf("Get() ok=%v error=%v", ok, err)
+			}
+			if stored.ProviderTaskID != providerID || stored.Status != "submitted" {
+				t.Fatalf("stored task = %+v, want no-asset %s response handed off", stored, status)
+			}
+		})
+	}
+}
+
+func TestPollPendingGenerationTasksSkipsImageRecoveryWithoutProviderID(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "settings.db")
+	repo, err := repository.NewGenerationTaskRepository(dbPath)
+	if err != nil {
+		t.Fatalf("NewGenerationTaskRepository() error = %v", err)
+	}
+	store := NewGenerationTaskServiceFromRepository(repo, nil, nil)
+	settingsSvc := settings.NewSettings(&generationTestAPIKeyStore{
+		values: map[string]string{coregeneration.ProviderLibTV: "oauth:configured"},
+	})
+	provider := &stubImageProvider{generateResponse: coregeneration.Response{Status: "submitted"}}
+	workflow := NewGenerationService(settingsSvc, store, nil)
+	workflow.legacyProviderFactory = func(coregeneration.ModelRoute) (coregeneration.Provider, error) {
+		return provider, nil
+	}
+
+	statuses := []string{"preparing", "queued", "submitting", "running", "importing", "waiting_reconnect"}
+	for _, status := range statuses {
+		task := libTVImageTaskRecord("generation-no-id-" + status)
+		task.Status = status
+		if err := store.Upsert(task); err != nil {
+			t.Fatalf("Upsert(%s) error = %v", status, err)
+		}
+	}
+
+	workflow.PollPendingGenerationTasks(context.Background(), 20)
+	if provider.generateCalls.Load() != 0 || provider.getCalls.Load() != 0 {
+		t.Fatalf("provider calls generate=%d get=%d, want none for image recovery without provider ID", provider.generateCalls.Load(), provider.getCalls.Load())
+	}
+	for _, status := range statuses {
+		task, ok, err := store.Get("generation-no-id-" + status)
+		if err != nil || !ok {
+			t.Fatalf("Get(%s) ok=%v error=%v", status, ok, err)
+		}
+		if len(task.Attempts) != 0 {
+			t.Fatalf("%s attempts = %+v, want none for skipped image recovery", status, task.Attempts)
+		}
+	}
+}
+
+func TestPollPendingGenerationTasksKeepsImageWithProviderIDPollable(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "settings.db")
+	repo, err := repository.NewGenerationTaskRepository(dbPath)
+	if err != nil {
+		t.Fatalf("NewGenerationTaskRepository() error = %v", err)
+	}
+	store := NewGenerationTaskServiceFromRepository(repo, nil, nil)
+	settingsSvc := settings.NewSettings(&generationTestAPIKeyStore{
+		values: map[string]string{coregeneration.ProviderLibTV: "oauth:configured"},
+	})
+	providerID := coregeneration.RouteLibTVGPTImage2 + ":project:node"
+	provider := &stubImageProvider{getResponse: coregeneration.Response{ID: providerID, Status: "submitted"}}
+	workflow := NewGenerationService(settingsSvc, store, nil)
+	workflow.legacyProviderFactory = func(coregeneration.ModelRoute) (coregeneration.Provider, error) {
+		return provider, nil
+	}
+
+	task := libTVImageTaskRecord("generation-with-provider-id")
+	task.ProviderTaskID = providerID
+	if err := store.Upsert(task); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	pending, err := store.ListPending(10)
+	if err != nil {
+		t.Fatalf("ListPending() error = %v", err)
+	}
+	if !slicesContainsTaskID(pending, task.ID) {
+		t.Fatalf("ListPending() = %+v, want image task with provider ID", pending)
+	}
+
+	workflow.PollPendingGenerationTasks(context.Background(), 10)
+	if provider.generateCalls.Load() != 0 || provider.getCalls.Load() != 1 || provider.getID != providerID {
+		t.Fatalf("provider calls generate=%d get=%d id=%q, want one poll of %q", provider.generateCalls.Load(), provider.getCalls.Load(), provider.getID, providerID)
 	}
 }
 

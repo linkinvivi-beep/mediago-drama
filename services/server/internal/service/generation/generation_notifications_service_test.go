@@ -196,6 +196,14 @@ func TestGenerationTaskStartedTransitionAnnouncesActiveCycles(t *testing.T) {
 	}
 	expectSilence("active-to-active transition")
 
+	for _, status := range []string{"preparing", "importing", "waiting_reconnect", "running"} {
+		task.Status = status
+		if err := tasks.Upsert(task); err != nil {
+			t.Fatalf("Upsert(%s) error = %v", status, err)
+		}
+		expectSilence("active recovery transition " + status)
+	}
+
 	task.Status = "failed"
 	if err := tasks.Upsert(task); err != nil {
 		t.Fatalf("Upsert(failed) error = %v", err)

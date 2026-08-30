@@ -303,6 +303,9 @@ func (service *GenerationTaskService) ListPending(limit int) ([]GenerationTaskRe
 		if len(filtered) >= limit {
 			break
 		}
+		if GenerationTaskProviderPollID(task) == "" {
+			continue
+		}
 		filtered = append(filtered, task)
 	}
 	return filtered, nil

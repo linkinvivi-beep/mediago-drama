@@ -108,6 +108,32 @@ func TestCreateGenerationBatchReportsTrustedPreflightFailurePerItem(t *testing.T
 	}
 }
 
+func TestGetGenerationBatchCountsRecoveryStatusesAsActive(t *testing.T) {
+	workflow, store := newGenerationBatchTestWorkflow(t)
+	statuses := []string{"preparing", "importing", "waiting_reconnect"}
+	for index, status := range statuses {
+		if err := store.Upsert(GenerationTaskRecord{
+			ID:          "task-" + status,
+			BatchID:     "batch-recovery",
+			BatchItemID: status,
+			BatchIndex:  index,
+			Kind:        "image",
+			Prompt:      "portrait",
+			Status:      status,
+		}); err != nil {
+			t.Fatalf("Upsert(%s) error = %v", status, err)
+		}
+	}
+
+	response, ok, err := workflow.GetGenerationBatch("batch-recovery")
+	if err != nil || !ok {
+		t.Fatalf("GetGenerationBatch() ok=%v error=%v", ok, err)
+	}
+	if response.Status != "running" || response.Active != len(statuses) || response.Failed != 0 {
+		t.Fatalf("batch response = %+v, want all recovery states counted active", response)
+	}
+}
+
 func TestCreateGenerationBatchValidatesStructureBeforeSubmission(t *testing.T) {
 	workflow, store := newGenerationBatchTestWorkflow(t)
 

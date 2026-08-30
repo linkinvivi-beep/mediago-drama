@@ -836,9 +836,12 @@ func GenerationTaskProviderPollID(task GenerationTaskRecord) string {
 
 // activeGenerationStatuses contains statuses that mean a task is still in progress.
 var activeGenerationStatuses = []string{
+	"preparing",
 	"submitting",
 	"submitted",
 	"running",
+	"importing",
+	"waiting_reconnect",
 	"pending",
 	"processing",
 	"queued",

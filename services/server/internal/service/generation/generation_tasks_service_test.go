@@ -230,11 +230,16 @@ func TestGenerationTaskServiceListPendingImageRuntimeStatuses(t *testing.T) {
 	service := NewGenerationTaskService(dbPath, nil)
 	pendingStatuses := []string{"preparing", "queued", "submitting", "submitted", "running", "importing", "waiting_reconnect"}
 	for _, status := range append(append([]string{}, pendingStatuses...), "pending", "processing", "completed") {
+		providerTaskID := ""
+		if status != "pending" && status != "processing" && status != "completed" {
+			providerTaskID = "provider:" + status
+		}
 		if err := service.Upsert(GenerationTaskRecord{
-			ID:     "image-" + status,
-			Kind:   "image",
-			Prompt: "portrait",
-			Status: status,
+			ID:             "image-" + status,
+			ProviderTaskID: providerTaskID,
+			Kind:           "image",
+			Prompt:         "portrait",
+			Status:         status,
 		}); err != nil {
 			t.Fatalf("Upsert(%s) error = %v", status, err)
 		}
