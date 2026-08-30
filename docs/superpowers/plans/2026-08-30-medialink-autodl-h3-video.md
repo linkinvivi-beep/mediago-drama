@@ -8,10 +8,12 @@
 
 **Tech Stack:** Go, `golang.org/x/crypto/ssh`, `github.com/coder/websocket`, macOS Keychain `security`, ComfyUI HTTP/WebSocket APIs, GORM task state, React/SWR, Go `testing`, Vitest.
 
+> **Multi-instance dependency (2026-08-30):** The approved `2026-08-30-medialink-autodl-zimage.md` plan replaces this plan's single-instance Keychain, SSH tunnel, ComfyUI HTTP client, AutoDL settings/API, and connection-UI tasks. Execute the shared instance-pool Tasks 2-8 there first. Then adapt only the H3-specific workflow, provider, recovery, prompt, and UI work to `AutoDLInstanceScheduler`; do not implement the duplicate single-instance files listed below.
+
 ## Global Constraints
 
 - MediaLink does not start, stop, rent, bill, or manage AutoDL instances.
-- Connect only through a local SSH tunnel to remote `127.0.0.1:6006`; do not expose or persist a public ComfyUI URL.
+- Connect each configured instance only through a local SSH tunnel to remote `127.0.0.1:<that instance's configurable ComfyUI port>`; do not expose or persist a public ComfyUI URL.
 - Store passwords, private keys, and private-key passphrases only in macOS Keychain; persist opaque credential references elsewhere.
 - Pin the SSH host-key fingerprint after explicit first-use confirmation; mismatch is a hard failure.
 - Accept ComfyUI API-format workflow JSON only; reject UI workflow JSON containing top-level `nodes`/`links`.
