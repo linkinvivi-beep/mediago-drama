@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -45,6 +46,7 @@ func TestCacheGenerationResponseAssetsSavesBase64Locally(t *testing.T) {
 				Kind:     coregeneration.KindImage,
 				Base64:   base64.StdEncoding.EncodeToString([]byte("image-bytes")),
 				MIMEType: "image/png",
+				Metadata: map[string]any{"saved_path": "/private/codex/output.png"},
 			},
 		},
 	})
@@ -57,6 +59,9 @@ func TestCacheGenerationResponseAssetsSavesBase64Locally(t *testing.T) {
 	}
 	if response.Assets[0].Base64 != "" {
 		t.Fatalf("asset base64 should be cleared after local cache")
+	}
+	if _, exists := response.Assets[0].Metadata["saved_path"]; exists {
+		t.Fatalf("asset metadata = %+v, want internal saved path cleared", response.Assets[0].Metadata)
 	}
 
 	files, err := os.ReadDir(mediaDir)
@@ -94,6 +99,45 @@ func TestCacheGenerationResponseAssetsRecordsWarnings(t *testing.T) {
 	warnings := StringSliceFromMetadata(response.Metadata, "asset_cache_warnings")
 	if len(warnings) != 1 || !strings.Contains(warnings[0], "unsupported generated asset url") {
 		t.Fatalf("warnings = %#v, want unsupported url warning", warnings)
+	}
+}
+
+func TestCacheGenerationResponseAssetsDoesNotGrantProvidersLocalFileAccess(t *testing.T) {
+	secretPath := filepath.Join(t.TempDir(), "secret.png")
+	if err := os.WriteFile(secretPath, testPNGBytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mediaAssets := media.NewMediaAssets(filepath.Join(t.TempDir(), "settings.db"), t.TempDir())
+	workflow := NewGenerationService(nil, nil, mediaAssets)
+	asset := coregeneration.Asset{Kind: coregeneration.KindImage, MIMEType: "image/png"}
+	// This catches any generic server-only path capability accidentally exposed
+	// on core assets without coupling the test to a permanent field.
+	if field := reflect.ValueOf(&asset).Elem().FieldByName("LocalPath"); field.IsValid() && field.CanSet() {
+		field.SetString(secretPath)
+	}
+	response := workflow.CacheGenerationResponseAssets(context.Background(), coregeneration.Response{Assets: []coregeneration.Asset{asset}})
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 0 || len(response.Assets) != 1 || response.Assets[0].URL != "" {
+		t.Fatalf("provider local path imported: response=%+v assets=%+v", response, assets)
+	}
+	for _, value := range []string{secretPath, "file://" + secretPath} {
+		result := workflow.CacheGenerationResponseAssets(context.Background(), coregeneration.Response{Assets: []coregeneration.Asset{{Kind: coregeneration.KindImage, URL: value, MIMEType: "image/png", Metadata: map[string]any{"saved_path": secretPath}}}})
+		if warnings := StringSliceFromMetadata(result.Metadata, "asset_cache_warnings"); len(warnings) != 1 {
+			t.Fatalf("path %q warnings = %v, want rejected", value, warnings)
+		}
+		if _, exists := result.Assets[0].Metadata["saved_path"]; exists {
+			t.Fatalf("failed cache retained internal metadata: %+v", result.Assets[0].Metadata)
+		}
+		publicJSON, err := json.Marshal(GenerationResponseFromCore(result, string(coregeneration.KindImage)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(publicJSON, []byte(secretPath)) || bytes.Contains(publicJSON, []byte("file://")) {
+			t.Fatalf("provider local path leaked through public response: %s", publicJSON)
+		}
 	}
 }
 
@@ -1640,7 +1684,7 @@ func TestCodexImageImportCachesValidatedFileWithoutLeakingItsPath(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(publicJSON, []byte("file://")) {
+	if bytes.Contains(publicJSON, []byte("file://")) || bytes.Contains(publicJSON, []byte(savedPath)) || bytes.Contains(publicJSON, []byte(`"savedPath"`)) {
 		t.Fatalf("public response leaked Codex output path: %s", publicJSON)
 	}
 
@@ -1672,7 +1716,7 @@ func TestCodexImageImportCachesValidatedFileWithoutLeakingItsPath(t *testing.T) 
 	}
 }
 
-func TestCodexImageImportReusesProgressAssetWithoutReopeningLocalOutput(t *testing.T) {
+func TestCodexImageImportReusesProgressAssetWithoutInternalSource(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "settings.db")
 	seedGenerationTaskAsset(t, dbPath, "asset-progress", "image", "")
 	store := NewGenerationTaskService(dbPath, nil)
@@ -1683,11 +1727,12 @@ func TestCodexImageImportReusesProgressAssetWithoutReopeningLocalOutput(t *testi
 	}
 	workflow := NewGenerationService(nil, store, nil)
 	response := workflow.responseWithCachedProgressAssets(task.ID, coregeneration.Response{Assets: []coregeneration.Asset{{
-		Kind:      coregeneration.KindImage,
-		MIMEType:  "image/png",
-		LocalPath: "/validated/codex/output.png",
+		Kind:     coregeneration.KindImage,
+		MIMEType: "image/png",
+		Base64:   base64.StdEncoding.EncodeToString(testPNGBytes()),
+		Metadata: map[string]any{"saved_path": "/validated/codex/output.png"},
 	}}})
-	if len(response.Assets) != 1 || response.Assets[0].URL != task.Assets[0].URL || response.Assets[0].LocalPath != "" {
+	if len(response.Assets) != 1 || response.Assets[0].URL != task.Assets[0].URL || response.Assets[0].Base64 != "" || len(response.Assets[0].Metadata) != 0 {
 		t.Fatalf("response assets = %+v, want cached URL with consumed local handoff", response.Assets)
 	}
 }

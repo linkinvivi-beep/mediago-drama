@@ -184,7 +184,7 @@ func TestGenerationTaskServiceRuntimeStateRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("json.Marshal() error = %v", err)
 	}
-	for _, forbidden := range []string{"credential", "privateKey", "tunnelEndpoint", "rawCodexEvents", "metadata"} {
+	for _, forbidden := range []string{"credential", "privateKey", "tunnelEndpoint", "rawCodexEvents", "metadata", "savedPath", want.SavedPath} {
 		if strings.Contains(string(publicJSON), forbidden) {
 			t.Fatalf("public task JSON %s contains forbidden field %q", publicJSON, forbidden)
 		}

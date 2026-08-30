@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -211,6 +210,8 @@ func (workflow *GenerationService) cacheGenerationResponseAssetsWithOptions(
 
 	warnings := []string{}
 	for index, asset := range response.Assets {
+		asset.Metadata = generationAssetMetadataWithoutInternalSources(asset.Metadata)
+		response.Assets[index].Metadata = asset.Metadata
 		cached, err := workflow.cacheGenerationAsset(ctx, asset, options)
 		if err != nil {
 			warnings = append(warnings, err.Error())
@@ -219,7 +220,7 @@ func (workflow *GenerationService) cacheGenerationResponseAssetsWithOptions(
 				"response_id", response.ID,
 				"model", response.Model,
 				"asset_kind", asset.Kind,
-				"asset_url", asset.URL,
+				"asset_url", sanitizedLogString(asset.URL),
 				"error", err,
 			)
 			continue
@@ -266,28 +267,6 @@ func (workflow *GenerationService) cacheGenerationAsset(
 	options media.MediaAssetSaveOptions,
 ) (media.MediaAsset, error) {
 	kind := string(asset.Kind)
-	if localPath := strings.TrimSpace(asset.LocalPath); localPath != "" {
-		if asset.Base64 != "" || strings.TrimSpace(asset.URL) != "" {
-			return media.MediaAsset{}, fmt.Errorf("local generated asset has ambiguous content sources")
-		}
-		file, err := os.Open(localPath)
-		if err != nil {
-			return media.MediaAsset{}, fmt.Errorf("opening local generated asset")
-		}
-		defer file.Close()
-		cached, err := workflow.mediaAssets.SaveReaderWithOptions(
-			ctx,
-			file,
-			filepath.Base(localPath),
-			asset.MIMEType,
-			"",
-			options,
-		)
-		if err != nil {
-			return media.MediaAsset{}, fmt.Errorf("saving local generated asset: %w", err)
-		}
-		return cached, nil
-	}
 	if asset.Base64 != "" {
 		cached, err := workflow.mediaAssets.SaveBase64WithOptions(kind, asset.MIMEType, asset.Base64, "", options)
 		if err != nil {
@@ -309,7 +288,7 @@ func (workflow *GenerationService) cacheGenerationAsset(
 	}
 	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(asset.URL)), "http://") &&
 		!strings.HasPrefix(strings.ToLower(strings.TrimSpace(asset.URL)), "https://") {
-		return media.MediaAsset{}, fmt.Errorf("unsupported generated asset url %q", asset.URL)
+		return media.MediaAsset{}, fmt.Errorf("unsupported generated asset url scheme")
 	}
 
 	cached, err := workflow.mediaAssets.SaveRemoteAssetWithOptions(ctx, kind, asset.URL, options)
@@ -319,6 +298,25 @@ func (workflow *GenerationService) cacheGenerationAsset(
 
 	cached = workflow.renameCachedGenerationAsset(cached, options, asset.URL)
 	return cached, nil
+}
+
+func generationAssetMetadataWithoutInternalSources(metadata map[string]any) map[string]any {
+	if len(metadata) == 0 {
+		return nil
+	}
+	cleaned := make(map[string]any, len(metadata))
+	for key, value := range metadata {
+		switch strings.ToLower(strings.ReplaceAll(strings.TrimSpace(key), "_", "")) {
+		case "savedpath", "localpath":
+			continue
+		default:
+			cleaned[key] = value
+		}
+	}
+	if len(cleaned) == 0 {
+		return nil
+	}
+	return cleaned
 }
 
 func (workflow *GenerationService) renameCachedGenerationAsset(

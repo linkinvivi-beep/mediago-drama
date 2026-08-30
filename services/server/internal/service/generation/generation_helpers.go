@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -24,13 +25,14 @@ var generationConversationIDPartPattern = regexp.MustCompile(`[^a-z0-9_-]+`)
 func GenerationResponseFromCore(response coregeneration.Response, kind string) GenerationMessageResponse {
 	assets := make([]GenerationAsset, 0, len(response.Assets))
 	for _, asset := range response.Assets {
-		if asset.URL == "" && asset.Base64 == "" {
+		publicURL := generationAssetURLForClient(asset.URL)
+		if publicURL == "" && asset.Base64 == "" {
 			continue
 		}
 		assets = append(assets, GenerationAsset{
 			AssetID:      libraryAssetIDFromGenerationAssetURL(asset.URL),
 			Kind:         string(asset.Kind),
-			URL:          asset.URL,
+			URL:          publicURL,
 			PosterURL:    firstNonEmptyMetadataString(asset.Metadata, "poster_url", "posterUrl"),
 			Base64:       asset.Base64,
 			MIMEType:     asset.MIMEType,
@@ -86,6 +88,7 @@ func GenerationResponseFromCore(response coregeneration.Response, kind string) G
 	}
 
 	runtimeState, _ := response.Metadata["runtime_state"].(GenerationTaskRuntimeState)
+	runtimeState = generationTaskRuntimeStateForClient(runtimeState)
 	return GenerationMessageResponse{
 		ID:      ValueOrFallback(response.ID, shared.MustRandomID("generation")),
 		Role:    "assistant",
@@ -106,6 +109,17 @@ func GenerationResponseFromCore(response coregeneration.Response, kind string) G
 		ErrorType:    StringFromMetadata(response.Metadata, "error_type"),
 		Retryable:    BoolFromMetadata(response.Metadata, "retryable"),
 	}
+}
+
+func generationAssetURLForClient(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if isLocalMediaAssetURL(trimmed) {
+		return value
+	}
+	if filepath.IsAbs(trimmed) || strings.HasPrefix(strings.ToLower(trimmed), "file://") {
+		return ""
+	}
+	return value
 }
 
 func generationResponseWithAssetTitle(response GenerationMessageResponse, assetTitle string) GenerationMessageResponse {
@@ -249,12 +263,17 @@ func GenerationResponseFromTask(task GenerationTaskRecord) GenerationMessageResp
 		Text:         task.Text,
 		Assets:       task.Assets,
 		Usage:        task.Usage,
-		RuntimeState: task.RuntimeState,
+		RuntimeState: generationTaskRuntimeStateForClient(task.RuntimeState),
 		Error:        task.Error,
 		ErrorCode:    task.ErrorCode,
 		ErrorType:    task.ErrorType,
 		Retryable:    task.Retryable,
 	}
+}
+
+func generationTaskRuntimeStateForClient(state GenerationTaskRuntimeState) GenerationTaskRuntimeState {
+	state.SavedPath = ""
+	return state
 }
 
 // ResolveGenerationRoute resolves a route from a generation API request.

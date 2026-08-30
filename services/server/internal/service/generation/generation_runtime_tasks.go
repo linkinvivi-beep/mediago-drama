@@ -1236,7 +1236,7 @@ func (workflow *GenerationService) responseWithCachedProgressAssets(
 		response.Assets[index].URL = asset.URL
 		response.Assets[index].Base64 = asset.Base64
 		response.Assets[index].MIMEType = asset.MIMEType
-		response.Assets[index].LocalPath = ""
+		response.Assets[index].Metadata = generationAssetMetadataWithoutInternalSources(response.Assets[index].Metadata)
 	}
 	return response
 }

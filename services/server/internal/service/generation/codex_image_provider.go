@@ -656,20 +656,19 @@ func (provider *CodexImageProvider) responseForResult(model string, result codex
 	if !codexImageItemCompleted(result.Item) {
 		return codexImageProgressResponse(model, "waiting_reconnect", state), nil
 	}
-	path, mimeType, _, err := readValidatedCodexImage(*result.Item.SavedPath, allowedRoot, maxCodexImageOutputBytes, "Codex image job directory")
+	_, mimeType, data, err := readValidatedCodexImage(*result.Item.SavedPath, allowedRoot, maxCodexImageOutputBytes, "Codex image job directory")
 	if err != nil {
 		return coregeneration.Response{}, err
 	}
-	state.SavedPath = path
+	state.SavedPath = ""
 	return coregeneration.Response{
 		ID:     codexImageResponseIDPrefix + strings.TrimSpace(result.ThreadID),
 		Status: "completed",
 		Model:  model,
 		Assets: []coregeneration.Asset{{
-			Kind:      coregeneration.KindImage,
-			MIMEType:  mimeType,
-			LocalPath: path,
-			Metadata:  map[string]any{"saved_path": path},
+			Kind:     coregeneration.KindImage,
+			Base64:   base64.StdEncoding.EncodeToString(data),
+			MIMEType: mimeType,
 		}},
 		Metadata: map[string]any{"runtime_state": state},
 	}, nil

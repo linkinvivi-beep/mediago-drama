@@ -3,6 +3,7 @@ package generation
 import (
 	"context"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -171,6 +172,9 @@ func sanitizedLogValue(value any) any {
 	case map[string]any:
 		values := make(map[string]any, len(typed))
 		for key, item := range typed {
+			if generationLogKeyContainsSavedPath(key) {
+				continue
+			}
 			values[key] = sanitizedLogValue(item)
 		}
 		return values
@@ -182,15 +186,35 @@ func sanitizedLogValue(value any) any {
 		return values
 	case coregeneration.ProgressCallback:
 		return "<progress-callback>"
+	case GenerationTaskRuntimeState:
+		return map[string]any{
+			"codexThreadId": typed.CodexThreadID,
+			"codexTurnId":   typed.CodexTurnID,
+			"codexItemId":   typed.CodexItemID,
+			"revisedPrompt": typed.RevisedPrompt,
+			"comfyPromptId": typed.ComfyPromptID,
+			"submittedAt":   typed.SubmittedAt,
+		}
 	default:
 		return value
 	}
+}
+
+func generationLogKeyContainsSavedPath(key string) bool {
+	normalized := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(key), "_", ""))
+	return normalized == "savedpath" || normalized == "localpath"
 }
 
 func sanitizedLogString(value string) string {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
 		return value
+	}
+	if strings.HasPrefix(trimmed, "/api/") {
+		return value
+	}
+	if filepath.IsAbs(trimmed) || strings.HasPrefix(strings.ToLower(trimmed), "file://") {
+		return "<local-path-omitted>"
 	}
 	metadata, encoded, ok := strings.Cut(trimmed, ",")
 	if ok && strings.HasPrefix(strings.ToLower(metadata), "data:") {

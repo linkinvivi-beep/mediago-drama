@@ -386,28 +386,13 @@ func (store *MediaAssets) SaveMultipartFile(header *multipart.FileHeader, projec
 }
 
 func (store *MediaAssets) SaveReader(ctx context.Context, reader io.Reader, filename string, contentType string, sourceURL string) (MediaAsset, error) {
-	return store.SaveReaderWithOptions(ctx, reader, filename, contentType, sourceURL, MediaAssetSaveOptions{Source: MediaSourceUpload})
-}
-
-// SaveReaderWithOptions stores streamed media bytes with explicit generation
-// placement metadata such as project, conversation, and section ownership.
-func (store *MediaAssets) SaveReaderWithOptions(ctx context.Context, reader io.Reader, filename string, contentType string, sourceURL string, options MediaAssetSaveOptions) (MediaAsset, error) {
-	if err := ctx.Err(); err != nil {
-		return MediaAsset{}, err
-	}
+	_ = ctx
 	data, err := shared.ReadLimited(reader, MaxMediaAssetUploadSize)
 	if err != nil {
 		return MediaAsset{}, err
 	}
-	mimeType := strings.TrimSpace(strings.Split(contentType, ";")[0])
-	if mimeType == "" || mimeType == "application/octet-stream" {
-		mimeType = http.DetectContentType(data)
-	}
-	kind := shared.KindFromMIMEType(mimeType)
-	if !isSupportedMediaAssetKind(kind) {
-		return MediaAsset{}, unsupportedMediaAssetKindError()
-	}
-	return store.saveBytesWithKind(data, kind, filename, mimeType, sourceURL, options)
+
+	return store.saveBytesForProject(data, filename, contentType, sourceURL, "", MediaSourceUpload)
 }
 
 func (store *MediaAssets) SaveBase64(kind string, mimeType string, value string, sourceURL string, projectID string) (MediaAsset, error) {

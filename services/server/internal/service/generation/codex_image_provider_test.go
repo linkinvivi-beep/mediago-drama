@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -19,6 +20,7 @@ import (
 
 	coregeneration "github.com/mediago-dev/mediago-drama/packages/core/pkg/generation"
 	"github.com/mediago-dev/mediago-drama/services/server/internal/platform/codexapp"
+	"github.com/mediago-dev/mediago-drama/services/server/internal/service/media"
 )
 
 type codexImageSessionStub struct {
@@ -168,17 +170,58 @@ func TestCodexImageProviderResultCases(t *testing.T) {
 				t.Fatalf("runtime_state = %#v, want typed state with thread id", response.Metadata["runtime_state"])
 			}
 			if response.Status == "completed" {
-				if len(response.Assets) != 1 || response.Assets[0].MIMEType != "image/png" || response.Assets[0].Base64 != "" {
-					t.Fatalf("assets = %#v, want one local-file PNG without an inline payload", response.Assets)
+				if len(response.Assets) != 1 || response.Assets[0].MIMEType != "image/png" || response.Assets[0].Base64 == "" {
+					t.Fatalf("assets = %#v, want one immutable in-memory PNG payload", response.Assets)
 				}
-				if got, _ := response.Assets[0].Metadata["saved_path"].(string); !filepath.IsAbs(got) {
-					t.Fatalf("saved_path = %q, want validated absolute local path", got)
+				if _, exists := response.Assets[0].Metadata["saved_path"]; exists {
+					t.Fatalf("asset metadata = %#v, want no saved path", response.Assets[0].Metadata)
 				}
 			}
 			if _, marshalErr := json.Marshal(response.Metadata); marshalErr != nil {
 				t.Fatalf("response metadata is not serializable: %v", marshalErr)
 			}
 		})
+	}
+}
+
+func TestCodexImageProviderOutputCannotBeSwappedBeforeAssetImport(t *testing.T) {
+	root := t.TempDir()
+	jobDir := filepath.Join(root, "generation", "codex-image", "task-swap", "attempt-0123456789abcdef0123456789abcdef")
+	savedPath := writeTestPNG(t, jobDir, "generated.png")
+	want := append([]byte(nil), testPNGBytes()...)
+	outside := filepath.Join(t.TempDir(), "outside.png")
+	if err := os.WriteFile(outside, []byte("outside-file-must-not-be-imported"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	provider := NewCodexImageProvider(&codexImageSessionStub{read: func(_ context.Context, threadID string) (codexapp.ImageGenerationResult, error) {
+		return completedCodexImageResult(threadID, "turn-swap", "item-swap", savedPath), nil
+	}}, root)
+	response, err := provider.Get(context.Background(), codexImageResponseIDPrefix+"thread-swap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(savedPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, savedPath); err != nil {
+		t.Fatal(err)
+	}
+
+	mediaAssets := media.NewMediaAssets(filepath.Join(t.TempDir(), "settings.db"), t.TempDir())
+	cached := NewGenerationService(nil, nil, mediaAssets).CacheGenerationResponseAssets(context.Background(), response)
+	if len(cached.Assets) != 1 || !strings.HasPrefix(cached.Assets[0].URL, "/api/v1/media-assets/") {
+		t.Fatalf("cached assets = %+v", cached.Assets)
+	}
+	assets, err := mediaAssets.List("")
+	if err != nil || len(assets) != 1 {
+		t.Fatalf("List() = %+v, err %v", assets, err)
+	}
+	got, err := os.ReadFile(assets[0].FilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("imported bytes = %q, want originally validated PNG", got)
 	}
 }
 
