@@ -640,7 +640,11 @@ func GenerationTaskFromMessage(
 	if instanceProfileID := strings.TrimSpace(request.InstanceProfileID); isAutoDLGenerationRouteID(route.ID) && instanceProfileID != "" {
 		runtimeState.InstanceProfileID = instanceProfileID
 	}
-	runtimeState, runtimeErr := mergeGenerationTaskRuntimeState(runtimeState, generationRuntimeStateUpdateForRoute(route.ID, response.RuntimeState))
+	runtimeState, runtimeErr := mergeGenerationTaskRuntimeState(
+		runtimeState,
+		generationRuntimeStateUpdateForRoute(route.ID, response.RuntimeState),
+		isAutoDLGenerationRouteID(route.ID),
+	)
 	task := GenerationTaskRecord{
 		ID:                response.ID,
 		BatchID:           strings.TrimSpace(request.BatchID),
@@ -808,7 +812,11 @@ func normalizeGenerationConversationIDPart(value string) string {
 
 // GenerationTaskWithMessage applies response fields to a task record.
 func GenerationTaskWithMessage(task GenerationTaskRecord, response GenerationMessageResponse) GenerationTaskRecord {
-	runtimeState, runtimeErr := mergeGenerationTaskRuntimeState(task.RuntimeState, generationRuntimeStateUpdateForRoute(task.RouteID, response.RuntimeState))
+	runtimeState, runtimeErr := mergeGenerationTaskRuntimeState(
+		task.RuntimeState,
+		generationRuntimeStateUpdateForRoute(task.RouteID, response.RuntimeState),
+		isAutoDLGenerationRouteID(task.RouteID),
+	)
 	if runtimeErr != nil {
 		return generationTaskWithRuntimeStateConflict(task, runtimeErr)
 	}
@@ -992,10 +1000,6 @@ func (identity autoDLAttemptIdentity) isZero() bool {
 func validateAutoDLAttemptIdentityMerge(current GenerationTaskRuntimeState, update GenerationTaskRuntimeState) error {
 	currentIdentity := autoDLAttemptIdentityFromRuntimeState(current)
 	updateIdentity := autoDLAttemptIdentityFromRuntimeState(update)
-	if updateIdentity.isZero() {
-		return nil
-	}
-
 	currentValues := currentIdentity.values()
 	updateValues := updateIdentity.values()
 	extendsIdentity := false
@@ -1016,23 +1020,39 @@ func validateAutoDLAttemptIdentityMerge(current GenerationTaskRuntimeState, upda
 		}
 	}
 
-	mergedComfyPromptID := currentIdentity.comfyPromptID
-	if updateIdentity.comfyPromptID != "" {
-		mergedComfyPromptID = updateIdentity.comfyPromptID
+	candidateValues := append([]string(nil), currentValues...)
+	for index, updateValue := range updateValues {
+		if updateValue != "" {
+			candidateValues[index] = updateValue
+		}
 	}
-	mergedSubmittedAt := currentIdentity.submittedAt
-	if updateIdentity.submittedAt != "" {
-		mergedSubmittedAt = updateIdentity.submittedAt
+	candidate := autoDLAttemptIdentity{
+		instanceProfileID:      candidateValues[0],
+		workflowProfileID:      candidateValues[1],
+		workflowProfileVersion: candidateValues[2],
+		workflowDigest:         candidateValues[3],
+		comfyPromptID:          candidateValues[4],
+		submittedAt:            candidateValues[5],
 	}
-	if (mergedComfyPromptID == "") != (mergedSubmittedAt == "") {
+	if (candidate.comfyPromptID == "") != (candidate.submittedAt == "") {
 		return fmt.Errorf("AutoDL generation prompt identity must include both prompt ID and submission time")
+	}
+	if candidate.comfyPromptID != "" && (candidate.instanceProfileID == "" ||
+		candidate.workflowProfileID == "" || candidate.workflowProfileVersion == "" || candidate.workflowDigest == "") {
+		return fmt.Errorf("AutoDL generation prompt identity is missing its instance or workflow checkpoint")
 	}
 	return nil
 }
 
-func mergeGenerationTaskRuntimeState(current GenerationTaskRuntimeState, update GenerationTaskRuntimeState) (GenerationTaskRuntimeState, error) {
-	if err := validateAutoDLAttemptIdentityMerge(current, update); err != nil {
-		return current, err
+func mergeGenerationTaskRuntimeState(
+	current GenerationTaskRuntimeState,
+	update GenerationTaskRuntimeState,
+	validateAutoDLIdentity bool,
+) (GenerationTaskRuntimeState, error) {
+	if validateAutoDLIdentity {
+		if err := validateAutoDLAttemptIdentityMerge(current, update); err != nil {
+			return current, err
+		}
 	}
 	if update.CodexThreadID != "" {
 		current.CodexThreadID = update.CodexThreadID

@@ -380,3 +380,35 @@ func TestGenerationTaskWithMessageRejectsPromptIDWithoutSubmissionTime(t *testin
 		t.Fatalf("runtime state = %+v, want empty after rejected prompt identity", got.RuntimeState)
 	}
 }
+
+func TestGenerationTaskWithMessageRejectsPromptPairWithoutAutoDLAnchors(t *testing.T) {
+	task := GenerationTaskRecord{ID: "task-unanchored-prompt", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage}
+	got := GenerationTaskWithMessage(task, GenerationMessageResponse{
+		Status: "running",
+		RuntimeState: GenerationTaskRuntimeState{
+			ComfyPromptID: "prompt-1",
+			SubmittedAt:   "2026-08-30T12:00:00Z",
+		},
+	})
+	if got.Status != "failed" || got.ErrorCode != generationRuntimeStateConflictCode {
+		t.Fatalf("task status/error = %q/%q, want unanchored prompt pair failure", got.Status, got.ErrorCode)
+	}
+}
+
+func TestGenerationTaskWithMessageEmptyUpdateDetectsMalformedStoredAutoDLIdentity(t *testing.T) {
+	malformed := GenerationTaskRuntimeState{
+		ComfyPromptID: "prompt-1",
+		SubmittedAt:   "2026-08-30T12:00:00Z",
+	}
+	task := GenerationTaskRecord{
+		ID: "task-malformed-current", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage,
+		Status: "running", RuntimeState: malformed,
+	}
+	got := GenerationTaskWithMessage(task, GenerationMessageResponse{Status: "running"})
+	if got.Status != "failed" || got.ErrorCode != generationRuntimeStateConflictCode {
+		t.Fatalf("task status/error = %q/%q, want malformed stored identity failure", got.Status, got.ErrorCode)
+	}
+	if got.RuntimeState != malformed {
+		t.Fatalf("runtime state = %+v, want malformed checkpoint preserved for diagnosis", got.RuntimeState)
+	}
+}

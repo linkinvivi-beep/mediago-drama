@@ -2,6 +2,7 @@ package generation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -997,7 +998,7 @@ func (workflow *GenerationService) completeSubmittedGeneration(
 	runningTask.Status = "running"
 	runningTask.Message = "生成请求正在服务器上运行，可以安全刷新页面。"
 	runningTask.Error = ""
-	runExisted, err := workflow.generationTasks.UpsertExisting(runningTask)
+	runExisted, err := workflow.generationTasks.UpsertExistingActive(runningTask)
 	if err != nil {
 		slog.Error("generation task running state could not be saved", "task_id", task.ID, "error", err)
 		return
@@ -1046,6 +1047,16 @@ func (workflow *GenerationService) completeSubmittedGeneration(
 		return
 	}
 
+	latestTask, active, latestErr := workflow.latestActiveGenerationTask(task.ID)
+	if latestErr != nil {
+		slog.Error("generation task completion state could not be loaded", "task_id", task.ID, "error", latestErr)
+		return
+	}
+	if !active {
+		return
+	}
+	runningTask = latestTask
+
 	response = workflow.responseWithCachedProgressAssets(task.ID, response)
 	// The provider ran out of its inline poll budget while still generating (e.g. jimeng
 	// image still "querying"). Don't fail the task — hand it off to the background poller,
@@ -1060,13 +1071,25 @@ func (workflow *GenerationService) completeSubmittedGeneration(
 	messageResponse.ID = task.ID
 	completedTask := GenerationTaskWithMessage(runningTask, messageResponse)
 	completedTask = workflow.taskWithCodexResponseRuntime(completedTask, response)
-	completedExisted, err := workflow.generationTasks.UpsertExisting(completedTask)
+	completedExisted, err := workflow.generationTasks.UpsertExistingActive(completedTask)
 	if err != nil {
 		slog.Error("generation task completion could not be saved", "task_id", task.ID, "error", err)
 		return
 	}
 	if !completedExisted {
 		// The task was deleted before it completed; drop the result instead of recreating it.
+		return
+	}
+	if completedTask.ErrorCode == generationRuntimeStateConflictCode {
+		workflow.cancelGenerationTask(task.ID)
+		workflow.syncGenerationNotificationTask(completedTask)
+		_ = workflow.generationTasks.RecordAttempt(
+			task.ID,
+			action,
+			completedTask.Status,
+			completedTask.Message,
+			errors.New(completedTask.Error),
+		)
 		return
 	}
 	workflow.syncGenerationNotificationTask(completedTask)
@@ -1083,7 +1106,11 @@ func (workflow *GenerationService) taskWithCodexResponseRuntime(task generationT
 	state := task.RuntimeState
 	if responseState, ok := response.Metadata["runtime_state"].(GenerationTaskRuntimeState); ok {
 		var err error
-		state, err = mergeGenerationTaskRuntimeState(state, generationRuntimeStateUpdateForRoute(task.RouteID, responseState))
+		state, err = mergeGenerationTaskRuntimeState(
+			state,
+			generationRuntimeStateUpdateForRoute(task.RouteID, responseState),
+			false,
+		)
 		if err != nil {
 			return generationTaskWithRuntimeStateConflict(task, err)
 		}
@@ -1126,7 +1153,7 @@ func (workflow *GenerationService) handOffPendingGeneration(
 		pendingTask.ProviderTaskID = providerTaskID
 	}
 	pendingTask = workflow.taskWithCurrentProgressAssets(task.ID, pendingTask)
-	existed, err := workflow.generationTasks.UpsertExisting(pendingTask)
+	existed, err := workflow.generationTasks.UpsertExistingActive(pendingTask)
 	if err != nil {
 		slog.Error("pending generation handoff could not be saved", "task_id", task.ID, "error", err)
 		return false
@@ -1134,6 +1161,18 @@ func (workflow *GenerationService) handOffPendingGeneration(
 	if !existed {
 		// The task was deleted while generating; let the caller stop without recreating it.
 		return false
+	}
+	if pendingTask.ErrorCode == generationRuntimeStateConflictCode {
+		workflow.cancelGenerationTask(task.ID)
+		workflow.syncGenerationNotificationTask(pendingTask)
+		_ = workflow.generationTasks.RecordAttempt(
+			task.ID,
+			action,
+			pendingTask.Status,
+			pendingTask.Message,
+			errors.New(pendingTask.Error),
+		)
+		return true
 	}
 	workflow.syncGenerationNotificationTask(pendingTask)
 	_ = workflow.generationTasks.RecordAttempt(task.ID, action, pendingTask.Status, pendingTask.Message, nil)
@@ -1183,6 +1222,15 @@ func (workflow *GenerationService) persistGenerationProgress(
 	if workflow.generationTasks == nil {
 		return
 	}
+	latestTask, active, err := workflow.latestActiveGenerationTask(task.ID)
+	if err != nil {
+		slog.Warn("generation task progress state could not be loaded", "task_id", task.ID, "error", err)
+		return
+	}
+	if !active {
+		return
+	}
+	task = latestTask
 
 	response := event.Response
 	progressStatus := strings.ToLower(strings.TrimSpace(response.Status))
@@ -1212,7 +1260,7 @@ func (workflow *GenerationService) persistGenerationProgress(
 	if providerTaskID != "" && progressTask.ErrorCode != generationRuntimeStateConflictCode {
 		progressTask.ProviderTaskID = providerTaskID
 	}
-	existed, err := workflow.generationTasks.UpsertExisting(progressTask)
+	existed, err := workflow.generationTasks.UpsertExistingActive(progressTask)
 	if err != nil {
 		slog.Warn("generation task progress could not be saved", "task_id", task.ID, "error", err)
 		return
@@ -1221,7 +1269,21 @@ func (workflow *GenerationService) persistGenerationProgress(
 		// The task was deleted mid-generation; stop persisting progress for it.
 		return
 	}
+	if progressTask.ErrorCode == generationRuntimeStateConflictCode {
+		workflow.cancelGenerationTask(task.ID)
+	}
 	workflow.syncGenerationNotificationTask(progressTask)
+}
+
+func (workflow *GenerationService) latestActiveGenerationTask(id string) (generationTaskRecord, bool, error) {
+	if workflow == nil || workflow.generationTasks == nil {
+		return generationTaskRecord{}, false, nil
+	}
+	task, found, err := workflow.generationTasks.Get(id)
+	if err != nil || !found {
+		return task, false, err
+	}
+	return task, IsActiveGenerationStatus(task.Status), nil
 }
 
 func (workflow *GenerationService) responseWithCachedProgressAssets(

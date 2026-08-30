@@ -1428,6 +1428,136 @@ func TestGenerationProgressCheckpointRejectsConflictingAutoDLAttemptIdentity(t *
 	}
 }
 
+func TestAutoDLRuntimeConflictCannotBeRevivedByEmptyProgress(t *testing.T) {
+	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	current := completeAutoDLRuntimeIdentity("zimage-t2i")
+	task := GenerationTaskRecord{
+		ID: "task-conflict-empty-progress", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage,
+		Status: "running", RuntimeState: current,
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	workflow := NewGenerationService(nil, store, nil)
+	conflicting := current
+	conflicting.WorkflowDigest = "sha256:conflict"
+	workflow.persistGenerationProgress(context.Background(), task, coregeneration.ProgressEvent{
+		Response: coregeneration.Response{Status: "running", Metadata: map[string]any{"runtime_state": conflicting}},
+	}, "", "", "")
+	workflow.persistGenerationProgress(context.Background(), task, coregeneration.ProgressEvent{
+		Response: coregeneration.Response{Status: "running"},
+	}, "", "", "")
+
+	got, found, err := store.Get(task.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() = found %v, err %v", found, err)
+	}
+	if got.Status != "failed" || got.ErrorCode != generationRuntimeStateConflictCode || got.RuntimeState != current {
+		t.Fatalf("task revived after empty progress: status %q error %q state %+v", got.Status, got.ErrorCode, got.RuntimeState)
+	}
+}
+
+func TestAutoDLRuntimeConflictCancelsOwnerAndCannotBeRevivedByCompletedFinal(t *testing.T) {
+	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	current := completeAutoDLRuntimeIdentity("zimage-t2i")
+	task := GenerationTaskRecord{
+		ID: "task-conflict-completed-final", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage,
+		Status: "submitted", RuntimeState: current,
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	workflow := NewGenerationService(nil, store, nil)
+	provider := &conflictThenCompletedAutoDLProvider{conflicting: current}
+	provider.conflicting.WorkflowProfileID = "zimage-i2i"
+	ownerCtx, release := workflow.generationTaskContext(task.ID)
+	defer release()
+	workflow.completeSubmittedGeneration(ownerCtx, task, provider, coregeneration.Request{Kind: coregeneration.KindImage}, "create", "", "")
+
+	got, found, err := store.Get(task.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() = found %v, err %v", found, err)
+	}
+	if !provider.ownerCancelled {
+		t.Fatal("runtime conflict did not cancel the registered local owner")
+	}
+	if got.Status != "failed" || got.ErrorCode != generationRuntimeStateConflictCode || got.RuntimeState != current {
+		t.Fatalf("task revived by completed final: status %q error %q state %+v", got.Status, got.ErrorCode, got.RuntimeState)
+	}
+}
+
+func TestCompletedAutoDLTaskIgnoresLateConflictingProgress(t *testing.T) {
+	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	current := completeAutoDLRuntimeIdentity("zimage-t2i")
+	completed := GenerationTaskRecord{
+		ID: "task-completed-late-conflict", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage,
+		Status: "completed", RuntimeState: current,
+	}
+	if err := store.Upsert(completed); err != nil {
+		t.Fatal(err)
+	}
+	workflow := NewGenerationService(nil, store, nil)
+	staleRunning := completed
+	staleRunning.Status = "running"
+	conflicting := current
+	conflicting.InstanceProfileID = "instance-b"
+	workflow.persistGenerationProgress(context.Background(), staleRunning, coregeneration.ProgressEvent{
+		Response: coregeneration.Response{Status: "running", Metadata: map[string]any{"runtime_state": conflicting}},
+	}, "", "", "")
+
+	got, found, err := store.Get(completed.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() = found %v, err %v", found, err)
+	}
+	if got.Status != "completed" || got.ErrorCode != "" || got.RuntimeState != current {
+		t.Fatalf("completed task overwritten by late conflict: status %q error %q state %+v", got.Status, got.ErrorCode, got.RuntimeState)
+	}
+}
+
+func completeAutoDLRuntimeIdentity(workflowProfileID string) GenerationTaskRuntimeState {
+	return GenerationTaskRuntimeState{
+		InstanceProfileID:      "instance-a",
+		WorkflowProfileID:      workflowProfileID,
+		WorkflowProfileVersion: "v1",
+		WorkflowDigest:         "sha256:one",
+		ComfyPromptID:          "prompt-1",
+		SubmittedAt:            "2026-08-30T12:00:00Z",
+	}
+}
+
+type conflictThenCompletedAutoDLProvider struct {
+	conflicting    GenerationTaskRuntimeState
+	ownerCancelled bool
+}
+
+func (*conflictThenCompletedAutoDLProvider) Name() string { return "autodl-conflict-final" }
+
+func (provider *conflictThenCompletedAutoDLProvider) Generate(ctx context.Context, request coregeneration.Request) (coregeneration.Response, error) {
+	callback, ok := coregeneration.ProgressCallbackFromOptions(request.Options)
+	if !ok {
+		return coregeneration.Response{}, fmt.Errorf("missing progress callback")
+	}
+	callback(ctx, coregeneration.ProgressEvent{
+		Response: coregeneration.Response{Status: "running", Metadata: map[string]any{"runtime_state": provider.conflicting}},
+	})
+	select {
+	case <-ctx.Done():
+		provider.ownerCancelled = true
+	default:
+	}
+	return coregeneration.Response{
+		Status: "completed",
+		Assets: []coregeneration.Asset{{
+			Kind: coregeneration.KindImage, MIMEType: "image/png",
+			Base64: base64.StdEncoding.EncodeToString(testPNGBytes()),
+		}},
+	}, nil
+}
+
+func (*conflictThenCompletedAutoDLProvider) Get(context.Context, string) (coregeneration.Response, error) {
+	return coregeneration.Response{}, nil
+}
+
 func TestGenerationProgressRuntimeStateSurvivesReconnectHandoff(t *testing.T) {
 	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
 	task := testCodexGenerationTask("task-progress-handoff", "submitted")
