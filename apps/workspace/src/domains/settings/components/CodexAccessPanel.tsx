@@ -39,17 +39,33 @@ export const CodexAccessPanel: React.FC = () => {
 	const [attempt, setAttempt] = useState<CodexLoginAttempt>();
 	const [busy, setBusy] = useState("");
 	const [refreshError, setRefreshError] = useState("");
+	const [manualBusyGeneration, setManualBusyGeneration] = useState<number>();
 	const mountedRef = useRef(true);
-	const manualRefreshRequestRef = useRef(0);
-	const accountChangeRequestRef = useRef(0);
+	const refreshGenerationRef = useRef(0);
+	const manualBusyGenerationRef = useRef<number | undefined>(undefined);
 
 	useEffect(() => {
 		mountedRef.current = true;
 		return () => {
 			mountedRef.current = false;
-			manualRefreshRequestRef.current += 1;
-			accountChangeRequestRef.current += 1;
+			refreshGenerationRef.current += 1;
+			manualBusyGenerationRef.current = undefined;
 		};
+	}, []);
+
+	const beginReadinessRefresh = useCallback((manual: boolean) => {
+		const generation = ++refreshGenerationRef.current;
+		manualBusyGenerationRef.current = manual ? generation : undefined;
+		setManualBusyGeneration(manual ? generation : undefined);
+		setRefreshError("");
+		return generation;
+	}, []);
+
+	const finishManualRefresh = useCallback((generation: number) => {
+		if (!currentRefresh(mountedRef, refreshGenerationRef, generation)) return;
+		if (manualBusyGenerationRef.current !== generation) return;
+		manualBusyGenerationRef.current = undefined;
+		setManualBusyGeneration(undefined);
 	}, []);
 
 	const refreshRuntimeCache = useCallback(() => {
@@ -65,25 +81,25 @@ export const CodexAccessPanel: React.FC = () => {
 	);
 
 	const refreshReadiness = async () => {
-		const requestID = ++manualRefreshRequestRef.current;
-		setBusy("refresh");
-		setRefreshError("");
+		if (manualBusyGenerationRef.current !== undefined) return;
+		const generation = beginReadinessRefresh(true);
 		try {
 			const [nextAccount, nextPreflight] = await Promise.all([
 				getCodexAccount(),
 				getCodexImagePreflight(),
 			]);
-			if (!currentRequest(mountedRef, manualRefreshRequestRef, requestID)) return;
+			if (!currentRefresh(mountedRef, refreshGenerationRef, generation)) return;
 			await Promise.all([mutate(nextAccount, false), mutatePreflight(nextPreflight, false)]);
+			if (!currentRefresh(mountedRef, refreshGenerationRef, generation)) return;
 			refreshRuntimeCache();
 			toast.success("Codex 生图检查完成");
 		} catch (error) {
-			if (!currentRequest(mountedRef, manualRefreshRequestRef, requestID)) return;
+			if (!currentRefresh(mountedRef, refreshGenerationRef, generation)) return;
 			const message = errorMessage(error);
 			setRefreshError(message);
 			toast.error("Codex 生图检查失败", { description: message });
 		} finally {
-			if (currentRequest(mountedRef, manualRefreshRequestRef, requestID)) setBusy("");
+			finishManualRefresh(generation);
 		}
 	};
 
@@ -96,14 +112,13 @@ export const CodexAccessPanel: React.FC = () => {
 				if (disposed || !mountedRef.current) return;
 				setAttempt(next);
 				if (next.status === "completed") {
-					manualRefreshRequestRef.current += 1;
-					const requestID = ++accountChangeRequestRef.current;
+					const generation = beginReadinessRefresh(false);
 					toast.success("ChatGPT 登录成功", { description: "已复用全局 Codex 登录态。" });
 					const [accountResult, preflightResult] = await Promise.allSettled([
 						getCodexAccount(),
 						getCodexImagePreflight(),
 					]);
-					if (!currentRequest(mountedRef, accountChangeRequestRef, requestID)) return;
+					if (!currentRefresh(mountedRef, refreshGenerationRef, generation)) return;
 					refreshRuntimeCache();
 					let accountRefreshError =
 						accountResult.status === "rejected" ? accountResult.reason : undefined;
@@ -123,7 +138,7 @@ export const CodexAccessPanel: React.FC = () => {
 							preflightRefreshError = error;
 						}
 					}
-					if (!currentRequest(mountedRef, accountChangeRequestRef, requestID)) return;
+					if (!currentRefresh(mountedRef, refreshGenerationRef, generation)) return;
 					if (accountRefreshError) {
 						toast.warning("ChatGPT 账号状态刷新失败", {
 							description: errorMessage(accountRefreshError),
@@ -151,6 +166,7 @@ export const CodexAccessPanel: React.FC = () => {
 	}, [
 		attempt?.loginId,
 		attempt?.status,
+		beginReadinessRefresh,
 		mutate,
 		mutatePreflight,
 		refreshRuntimeCache,
@@ -217,31 +233,30 @@ export const CodexAccessPanel: React.FC = () => {
 			return false;
 		}
 
-		manualRefreshRequestRef.current += 1;
-		const requestID = ++accountChangeRequestRef.current;
+		const generation = beginReadinessRefresh(false);
 		try {
 			await mutate(next, false);
 		} catch (error) {
-			if (currentRequest(mountedRef, accountChangeRequestRef, requestID)) {
+			if (currentRefresh(mountedRef, refreshGenerationRef, generation)) {
 				toast.warning("ChatGPT 账号状态刷新失败", { description: errorMessage(error) });
 			}
 		}
-		if (currentRequest(mountedRef, accountChangeRequestRef, requestID)) {
+		if (currentRefresh(mountedRef, refreshGenerationRef, generation)) {
 			toast.success("已退出全局 Codex 账号");
 		}
 
 		try {
 			await mutatePreflight(loggedOutPreflight, false);
 			const nextPreflight = await getCodexImagePreflight();
-			if (currentRequest(mountedRef, accountChangeRequestRef, requestID)) {
+			if (currentRefresh(mountedRef, refreshGenerationRef, generation)) {
 				await mutatePreflight(nextPreflight, false);
 			}
 		} catch (error) {
-			if (currentRequest(mountedRef, accountChangeRequestRef, requestID)) {
+			if (currentRefresh(mountedRef, refreshGenerationRef, generation)) {
 				warnPreflightRefresh(error);
 			}
 		}
-		if (currentRequest(mountedRef, accountChangeRequestRef, requestID)) setBusy("");
+		if (currentRefresh(mountedRef, refreshGenerationRef, generation)) setBusy("");
 		return true;
 	};
 
@@ -259,6 +274,7 @@ export const CodexAccessPanel: React.FC = () => {
 	const pending = attempt?.status === "pending";
 	const readiness = codexImageReadiness(preflight?.reason, preflight?.ready);
 	const readinessError = refreshError || (preflightError ? errorMessage(preflightError) : "");
+	const manualRefreshing = manualBusyGeneration !== undefined;
 
 	return (
 		<SettingsPanelLayout
@@ -270,10 +286,12 @@ export const CodexAccessPanel: React.FC = () => {
 					type="button"
 					variant="outline"
 					size="sm"
-					disabled={(busy !== "" && busy !== "refresh") || preflightLoading || preflightValidating}
+					disabled={busy !== "" || manualRefreshing || preflightLoading || preflightValidating}
+					aria-busy={manualRefreshing}
+					aria-label={manualRefreshing ? "正在刷新并测试" : "刷新并测试"}
 					onClick={() => void refreshReadiness()}
 				>
-					{busy === "refresh" || preflightValidating ? (
+					{manualRefreshing || preflightValidating ? (
 						<Loader2 className="animate-spin" />
 					) : (
 						<RefreshCw />
@@ -351,7 +369,12 @@ export const CodexAccessPanel: React.FC = () => {
 				</section>
 
 				<section className="rounded-lg border border-border bg-card p-4">
-					<div className="flex items-start gap-3" role="status" aria-live="polite">
+					<div
+						className="flex items-start gap-3"
+						role="status"
+						aria-live="polite"
+						aria-busy={manualRefreshing || preflightLoading || preflightValidating}
+					>
 						{preflightLoading ? (
 							<Loader2 className="mt-0.5 size-5 animate-spin text-muted-foreground" />
 						) : readiness.ready ? (
@@ -386,11 +409,11 @@ const loggedOutPreflight = {
 	reason: "not_logged_in",
 };
 
-const currentRequest = (
+const currentRefresh = (
 	mountedRef: React.RefObject<boolean>,
-	requestRef: React.RefObject<number>,
-	requestID: number,
-) => mountedRef.current && requestRef.current === requestID;
+	generationRef: React.RefObject<number>,
+	generation: number,
+) => mountedRef.current && generationRef.current === generation;
 
 const codexImageReadiness = (reason?: string, ready?: boolean) => {
 	if (ready || reason === "ready") return { ready: true, label: "Codex 生图已就绪" };
