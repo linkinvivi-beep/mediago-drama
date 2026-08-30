@@ -16,6 +16,10 @@ const promptOptimizationSystemInstructionText = `你是提示词优化助手，�
 保留“用户的输入”中的主体、动作、场景等核心内容，不要引入无关的新主体。
 严格保持原有媒介与画风（如 2D 动漫、插画、写实摄影等），不得改成另一种风格方向。
 只输出优化后的提示词正文，不要任何解释、标题、寒暄、标签、Markdown、代码块、JSON、思考过程或额外信息。`
+const imagePromptOptimizationSystemInstructionText = promptOptimizationSystemInstructionText + `
+这是图片生成提示词。必须保持人物、场景和道具的身份及连续性，不得擅自替换、合并或新增。
+明确并保留构图、媒介、光线和宽高比；输入未指定时不要用无关细节覆盖原意。
+严格保持参考图的顺序和角色，使参考图1、参考图2等编号与各自用途一一对应。`
 const promptOptimizationConversationKindLabel = "提示词生成"
 
 // NormalizeGenerationPromptOptimizationRequest trims prompt optimization settings.
@@ -245,7 +249,7 @@ func (workflow *GenerationService) createPromptOptimizationHistoryTask(
 		RouteID:           optimization.RouteID,
 		Model:             optimization.Model,
 		Prompt:            promptOptimizationUserPrompt(optimization, generationPayload.Prompt),
-		Params:            promptOptimizationParams(optimization.Params),
+		Params:            promptOptimizationParams(optimization.Params, coregeneration.Kind(generationPayload.Kind)),
 		ReferenceURLs:     []string{},
 		ReferenceAssetIDs: []string{},
 		SourceRefs:        generationPayload.SourceRefs,
@@ -357,17 +361,20 @@ func stripPromptOptimizationLabel(value string) string {
 	}
 }
 
-func promptOptimizationParams(params map[string]any) map[string]any {
+func promptOptimizationParams(params map[string]any, kind coregeneration.Kind) map[string]any {
 	next := make(map[string]any, len(params)+1)
 	for key, value := range params {
 		next[key] = value
 	}
-	if instruction := promptOptimizationSystemInstruction(); instruction != "" {
+	if instruction := promptOptimizationSystemInstruction(kind); instruction != "" {
 		next["system_instruction"] = instruction
 	}
 	return next
 }
 
-func promptOptimizationSystemInstruction() string {
+func promptOptimizationSystemInstruction(kind coregeneration.Kind) string {
+	if kind == coregeneration.KindImage {
+		return imagePromptOptimizationSystemInstructionText
+	}
 	return promptOptimizationSystemInstructionText
 }

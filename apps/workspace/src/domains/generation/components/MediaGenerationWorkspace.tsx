@@ -511,6 +511,7 @@ export const MediaGenerationWorkspace: React.FC<MediaGenerationWorkspaceProps> =
 		conversationId: promptOptimizeConversationId,
 		conversationScopeId: promptOptimizeConversationScopeId,
 		conversationTitle: promptOptimizeConversationTitle,
+		kind: ws.kind,
 		onSuccess: refreshPromptOptimizeHistory,
 		preferCodex: codexAvailable && !selectedPromptOptimizeModel,
 		projectId: resolvedMediaAssetProjectId || projectId,

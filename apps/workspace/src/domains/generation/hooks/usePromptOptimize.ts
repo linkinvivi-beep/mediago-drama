@@ -37,6 +37,7 @@ export interface UsePromptOptimizeOptions {
 	conversationId?: string | null;
 	conversationScopeId?: string | null;
 	conversationTitle?: string | null;
+	kind?: GenerationRoute["kind"];
 	onOptimized: (prompt: string) => void;
 	onSuccess?: () => void;
 	projectId?: string | null;
@@ -52,12 +53,20 @@ const promptOptimizeSystemInstruction = [
 	"只输出优化后的提示词正文，不要任何解释、标题、寒暄、标签、Markdown、代码块、JSON、思考过程或额外信息。",
 ].join("\n");
 
+const imagePromptOptimizeSystemInstruction = [
+	promptOptimizeSystemInstruction,
+	"这是图片生成提示词。必须保持人物、场景和道具的身份及连续性，不得擅自替换、合并或新增。",
+	"明确并保留构图、媒介、光线和宽高比；输入未指定时不要用无关细节覆盖原意。",
+	"严格保持参考图的顺序和角色，使参考图1、参考图2等编号与各自用途一一对应。",
+].join("\n");
+
 export const usePromptOptimize = ({
 	capabilityId,
 	catalog,
 	conversationId,
 	conversationScopeId,
 	conversationTitle,
+	kind,
 	onSuccess,
 	preferCodex = false,
 	projectId,
@@ -123,7 +132,10 @@ export const usePromptOptimize = ({
 							: undefined,
 						sourceRefs: input.sourceRefs,
 						params: {
-							system_instruction: promptOptimizeSystemInstruction,
+							system_instruction:
+								kind === "image"
+									? imagePromptOptimizeSystemInstruction
+									: promptOptimizeSystemInstruction,
 						},
 						referenceUrls: [],
 						referenceAssetIds: [],
@@ -172,6 +184,7 @@ export const usePromptOptimize = ({
 			conversationId,
 			conversationScopeId,
 			conversationTitle,
+			kind,
 			onOptimized,
 			onSuccess,
 			projectId,

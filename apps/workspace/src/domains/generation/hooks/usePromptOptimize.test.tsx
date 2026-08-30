@@ -21,6 +21,7 @@ vi.mock("@/domains/generation/api/generation", async (importOriginal) => {
 const Harness = () => {
 	const optimizer = usePromptOptimize({
 		catalog: { families: [], models: [], providers: [], routes: [], versions: [] },
+		kind: "image",
 		onOptimized: vi.fn(),
 	});
 	return (
@@ -125,6 +126,20 @@ describe("usePromptOptimize", () => {
 			routeId: "",
 			textExecutor: "codex",
 		});
+		const instruction = String(
+			mocks.streamGenerationText.mock.calls[0]?.[0].params?.system_instruction,
+		);
+		for (const required of [
+			"人物、场景和道具的身份",
+			"构图",
+			"媒介",
+			"光线",
+			"宽高比",
+			"参考图的顺序和角色",
+			"只输出优化后的提示词正文",
+		]) {
+			expect(instruction).toContain(required);
+		}
 	});
 
 	it("uses Codex when it is preferred even if a configured text route exists", async () => {

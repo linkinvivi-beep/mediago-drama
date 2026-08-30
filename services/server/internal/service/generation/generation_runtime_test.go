@@ -2045,7 +2045,7 @@ func TestCreatePromptOptimizedGenerationMessageUsesCodexWithoutTextRoute(t *test
 		t.Fatalf("response = %+v, want completed Codex optimization", response)
 	}
 	if codexRequest.Executor != textcompletion.ExecutorCodex ||
-		codexRequest.SystemInstruction != promptOptimizationSystemInstructionText ||
+		codexRequest.SystemInstruction != imagePromptOptimizationSystemInstructionText ||
 		!strings.Contains(codexRequest.Prompt, "原始角色提示词") {
 		t.Fatalf("codex request = %#v", codexRequest)
 	}
