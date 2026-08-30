@@ -268,6 +268,97 @@ func TestCodexImageProviderResumesExistingThread(t *testing.T) {
 	}
 }
 
+func TestCodexImageProviderResumeJobRootBoundary(t *testing.T) {
+	tests := []struct {
+		name    string
+		arrange func(t *testing.T, dataRoot string, taskA string, taskB string, outside string) (string, string)
+		wantErr string
+	}{
+		{
+			name: "valid resumed output",
+			arrange: func(t *testing.T, _ string, taskA string, _ string, _ string) (string, string) {
+				return taskA, writeTestPNG(t, taskA, "result.png")
+			},
+		},
+		{
+			name: "sibling task output",
+			arrange: func(t *testing.T, _ string, taskA string, taskB string, _ string) (string, string) {
+				if err := os.MkdirAll(taskA, 0o700); err != nil {
+					t.Fatalf("MkdirAll() error = %v", err)
+				}
+				return taskA, writeTestPNG(t, taskB, "sibling.png")
+			},
+			wantErr: "outside Codex image job directory",
+		},
+		{
+			name: "missing cwd",
+			arrange: func(t *testing.T, _ string, taskA string, _ string, _ string) (string, string) {
+				return "", writeTestPNG(t, taskA, "result.png")
+			},
+			wantErr: "job directory is missing",
+		},
+		{
+			name: "cwd is provider root",
+			arrange: func(t *testing.T, dataRoot string, taskA string, _ string, _ string) (string, string) {
+				return filepath.Join(dataRoot, "generation", "codex-image"), writeTestPNG(t, taskA, "result.png")
+			},
+			wantErr: "immediate task directory",
+		},
+		{
+			name: "cwd outside provider root",
+			arrange: func(t *testing.T, _ string, taskA string, _ string, outside string) (string, string) {
+				return outside, writeTestPNG(t, taskA, "result.png")
+			},
+			wantErr: "outside Codex image jobs directory",
+		},
+		{
+			name: "symlinked cwd escape",
+			arrange: func(t *testing.T, dataRoot string, taskA string, _ string, outside string) (string, string) {
+				jobsRoot := filepath.Join(dataRoot, "generation", "codex-image")
+				if err := os.MkdirAll(jobsRoot, 0o700); err != nil {
+					t.Fatalf("MkdirAll() error = %v", err)
+				}
+				link := filepath.Join(jobsRoot, "task-link")
+				if err := os.Symlink(outside, link); err != nil {
+					t.Fatalf("Symlink() error = %v", err)
+				}
+				return link, writeTestPNG(t, taskA, "result.png")
+			},
+			wantErr: "outside Codex image jobs directory",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dataRoot := t.TempDir()
+			jobsRoot := filepath.Join(dataRoot, "generation", "codex-image")
+			taskA := filepath.Join(jobsRoot, "task-a")
+			taskB := filepath.Join(jobsRoot, "task-b")
+			outside := t.TempDir()
+			jobDir, savedPath := test.arrange(t, dataRoot, taskA, taskB, outside)
+			stub := &codexImageSessionStub{read: func(_ context.Context, threadID string) (codexapp.ImageGenerationResult, error) {
+				result := completedCodexImageResult(threadID, "turn", "item", savedPath)
+				result.JobDir = jobDir
+				return result, nil
+			}}
+			provider := NewCodexImageProvider(stub, dataRoot)
+			response, err := provider.Get(context.Background(), "codex.imagegen:thread-boundary")
+			if test.wantErr != "" {
+				if err == nil || !contains(err.Error(), test.wantErr) {
+					t.Fatalf("Get() error = %v, want containing %q", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Get() error = %v", err)
+			}
+			if response.Status != "completed" || len(response.Assets) != 1 {
+				t.Fatalf("Get() response = %#v", response)
+			}
+		})
+	}
+}
+
 func TestCodexImageProviderGetKeepsSameIDForNonterminalThread(t *testing.T) {
 	stub := &codexImageSessionStub{read: func(_ context.Context, threadID string) (codexapp.ImageGenerationResult, error) {
 		return codexapp.ImageGenerationResult{ThreadID: threadID, TurnID: "turn-running", Item: codexapp.ImageGenerationThreadItem{ID: "item-running", Type: "imageGeneration", Status: "inProgress"}}, nil
@@ -345,6 +436,7 @@ func completedCodexImageResult(threadID string, turnID string, itemID string, pa
 	return codexapp.ImageGenerationResult{
 		ThreadID: threadID,
 		TurnID:   turnID,
+		JobDir:   filepath.Dir(path),
 		Item: codexapp.ImageGenerationThreadItem{
 			ID: itemID, Type: "imageGeneration", Status: "completed", SavedPath: &path, RevisedPrompt: &revised,
 		},

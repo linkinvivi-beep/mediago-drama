@@ -62,6 +62,7 @@ type ImageGenerationCheckpoint struct {
 type ImageGenerationResult struct {
 	ThreadID string
 	TurnID   string
+	JobDir   string
 	Item     ImageGenerationThreadItem
 }
 
@@ -174,7 +175,7 @@ func (session *ImageGenerationSession) GenerateImage(
 			if completed == nil {
 				return ImageGenerationResult{}, invalidImageGenerationItemError(rejected)
 			}
-			return ImageGenerationResult{ThreadID: threadID, TurnID: turnID, Item: *completed}, nil
+			return ImageGenerationResult{ThreadID: threadID, TurnID: turnID, JobDir: jobDir, Item: *completed}, nil
 		}
 	}
 }
@@ -192,6 +193,7 @@ func (session *ImageGenerationSession) ReadImageResult(ctx context.Context, thre
 	var response struct {
 		Thread struct {
 			ID    string `json:"id"`
+			Cwd   string `json:"cwd"`
 			Turns []struct {
 				ID    string            `json:"id"`
 				Items []json.RawMessage `json:"items"`
@@ -204,10 +206,10 @@ func (session *ImageGenerationSession) ReadImageResult(ctx context.Context, thre
 	}, &response); err != nil {
 		return ImageGenerationResult{}, fmt.Errorf("reading Codex image thread: %w", err)
 	}
-	if got := strings.TrimSpace(response.Thread.ID); got != "" && got != threadID {
+	if got := strings.TrimSpace(response.Thread.ID); got != threadID {
 		return ImageGenerationResult{}, fmt.Errorf("Codex image thread id mismatch")
 	}
-	result := ImageGenerationResult{ThreadID: threadID}
+	result := ImageGenerationResult{ThreadID: threadID, JobDir: strings.TrimSpace(response.Thread.Cwd)}
 	for turnIndex := len(response.Thread.Turns) - 1; turnIndex >= 0; turnIndex-- {
 		turn := response.Thread.Turns[turnIndex]
 		if result.TurnID == "" {

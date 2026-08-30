@@ -277,7 +277,11 @@ func (provider *CodexImageProvider) Get(ctx context.Context, id string) (coregen
 		}
 		return codexImageProgressResponse("", "waiting_reconnect", state), nil
 	}
-	return provider.responseForResult("", result, provider.root, state)
+	jobDir, err := provider.recoveredJobDir(result.JobDir)
+	if err != nil {
+		return coregeneration.Response{}, err
+	}
+	return provider.responseForResult("", result, jobDir, state)
 }
 
 func codexImageTaskID(request coregeneration.Request) (string, error) {
@@ -337,6 +341,40 @@ func (provider *CodexImageProvider) createJobDir(taskID string) (string, error) 
 	}
 	if err := requirePathWithin(canonicalRoot, canonicalJobDir, "Codex image jobs directory"); err != nil {
 		return "", err
+	}
+	return canonicalJobDir, nil
+}
+
+func (provider *CodexImageProvider) recoveredJobDir(value string) (string, error) {
+	value = filepath.Clean(strings.TrimSpace(value))
+	if value == "." || !filepath.IsAbs(value) {
+		return "", fmt.Errorf("Codex image thread job directory is missing or not absolute")
+	}
+	root := filepath.Clean(strings.TrimSpace(provider.root))
+	if root == "." || !filepath.IsAbs(root) {
+		return "", fmt.Errorf("Codex image jobs directory must be absolute")
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("canonicalizing Codex image jobs directory: %w", err)
+	}
+	canonicalJobDir, err := filepath.EvalSymlinks(value)
+	if err != nil {
+		return "", fmt.Errorf("canonicalizing Codex image thread job directory: %w", err)
+	}
+	if err := requirePathWithin(canonicalRoot, canonicalJobDir, "Codex image jobs directory"); err != nil {
+		return "", err
+	}
+	relative, err := filepath.Rel(canonicalRoot, canonicalJobDir)
+	if err != nil || relative == "." || filepath.IsAbs(relative) || strings.Contains(relative, string(filepath.Separator)) || !safeCodexImageTaskID.MatchString(relative) {
+		return "", fmt.Errorf("Codex image thread cwd must be an immediate task directory")
+	}
+	info, err := os.Stat(canonicalJobDir)
+	if err != nil {
+		return "", fmt.Errorf("checking Codex image thread job directory: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("Codex image thread cwd is not a directory")
 	}
 	return canonicalJobDir, nil
 }

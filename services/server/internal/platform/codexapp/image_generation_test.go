@@ -73,6 +73,9 @@ func TestImageGenerationStartsWorkspaceWriteTurnWithOrderedLocalImages(t *testin
 	if result.ThreadID != "thread-1" || result.TurnID != "turn-1" || result.Item.ID != "item-1" {
 		t.Fatalf("GenerateImage() = %#v", result)
 	}
+	if result.JobDir != jobDir {
+		t.Fatalf("GenerateImage() JobDir = %q, want %q", result.JobDir, jobDir)
+	}
 	if len(client.calls) != 2 {
 		t.Fatalf("calls = %#v, want thread/start then turn/start", client.calls)
 	}
@@ -203,6 +206,7 @@ func TestReadImageResultReadsLatestStructuredItemWithoutStartingTurn(t *testing.
 	client := &recordingClient{callResult: json.RawMessage(`{
 		"thread": {
 			"id": "thread-existing",
+			"cwd": "` + filepath.Dir(savedPath) + `",
 			"turns": [
 				{"id":"turn-old","status":"completed","items":[]},
 				{"id":"turn-existing","status":"completed","items":[
@@ -219,6 +223,9 @@ func TestReadImageResultReadsLatestStructuredItemWithoutStartingTurn(t *testing.
 	}
 	if result.ThreadID != "thread-existing" || result.TurnID != "turn-existing" || result.Item.ID != "item-existing" {
 		t.Fatalf("ReadImageResult() = %#v", result)
+	}
+	if result.JobDir != filepath.Dir(savedPath) {
+		t.Fatalf("ReadImageResult() JobDir = %q, want %q", result.JobDir, filepath.Dir(savedPath))
 	}
 	if len(client.calls) != 1 || client.calls[0].method != "thread/read" {
 		t.Fatalf("calls = %#v, want one thread/read", client.calls)
@@ -238,6 +245,18 @@ func TestReadImageResultReturnsNonterminalLatestTurn(t *testing.T) {
 	}
 	if result.ThreadID != "thread-running" || result.TurnID != "turn-running" || result.Item.ID != "" {
 		t.Fatalf("ReadImageResult() = %#v", result)
+	}
+}
+
+func TestReadImageResultRejectsMismatchedThreadID(t *testing.T) {
+	client := &recordingClient{callResult: json.RawMessage(`{"thread":{"id":"thread-other","cwd":"/tmp/job","turns":[]}}`)}
+
+	_, err := NewImageGenerationSession(client).ReadImageResult(context.Background(), "thread-requested")
+	if err == nil || !strings.Contains(err.Error(), "thread id mismatch") {
+		t.Fatalf("ReadImageResult() error = %v, want thread id mismatch", err)
+	}
+	if len(client.calls) != 1 || client.calls[0].method != "thread/read" {
+		t.Fatalf("calls = %#v, want only thread/read", client.calls)
 	}
 }
 
