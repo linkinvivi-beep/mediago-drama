@@ -198,6 +198,49 @@ func TestImageGenerationThreadItemDecodesExactSchemaFields(t *testing.T) {
 	}
 }
 
+func TestReadImageResultReadsLatestStructuredItemWithoutStartingTurn(t *testing.T) {
+	savedPath := filepath.Join(t.TempDir(), "result.png")
+	client := &recordingClient{callResult: json.RawMessage(`{
+		"thread": {
+			"id": "thread-existing",
+			"turns": [
+				{"id":"turn-old","status":"completed","items":[]},
+				{"id":"turn-existing","status":"completed","items":[
+					{"id":"prose","type":"agentMessage","text":"ignore me"},
+					{"id":"item-existing","type":"imageGeneration","result":"success","status":"completed","failure":null,"savedPath":"` + savedPath + `"}
+				]}
+			]
+		}
+	}`)}
+
+	result, err := NewImageGenerationSession(client).ReadImageResult(context.Background(), "thread-existing")
+	if err != nil {
+		t.Fatalf("ReadImageResult() error = %v", err)
+	}
+	if result.ThreadID != "thread-existing" || result.TurnID != "turn-existing" || result.Item.ID != "item-existing" {
+		t.Fatalf("ReadImageResult() = %#v", result)
+	}
+	if len(client.calls) != 1 || client.calls[0].method != "thread/read" {
+		t.Fatalf("calls = %#v, want one thread/read", client.calls)
+	}
+	wantParams := map[string]any{"threadId": "thread-existing", "includeTurns": true}
+	if !reflect.DeepEqual(client.calls[0].params, wantParams) {
+		t.Fatalf("thread/read params = %#v, want %#v", client.calls[0].params, wantParams)
+	}
+}
+
+func TestReadImageResultReturnsNonterminalLatestTurn(t *testing.T) {
+	client := &recordingClient{callResult: json.RawMessage(`{"thread":{"id":"thread-running","turns":[{"id":"turn-running","status":"inProgress","items":[]}]}}`)}
+
+	result, err := NewImageGenerationSession(client).ReadImageResult(context.Background(), "thread-running")
+	if err != nil {
+		t.Fatalf("ReadImageResult() error = %v", err)
+	}
+	if result.ThreadID != "thread-running" || result.TurnID != "turn-running" || result.Item.ID != "" {
+		t.Fatalf("ReadImageResult() = %#v", result)
+	}
+}
+
 func imageGenerationClient(threadID string, turnID string) *recordingClient {
 	client := &recordingClient{}
 	client.call = func(method string, _ any, output any) error {

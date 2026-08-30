@@ -15,6 +15,7 @@ import (
 	"strings"
 	"unicode/utf16"
 
+	coregeneration "github.com/mediago-dev/mediago-drama/packages/core/pkg/generation"
 	corepricing "github.com/mediago-dev/mediago-drama/packages/core/pkg/pricing"
 	draftlib "github.com/mediago-dev/mediago-drama/packages/jianyingdraft/pkg/jianyingdraft"
 	appagent "github.com/mediago-dev/mediago-drama/services/server/internal/app/agent"
@@ -38,6 +39,7 @@ import (
 	serviceprompttemplates "github.com/mediago-dev/mediago-drama/services/server/internal/service/prompttemplates"
 	serviceselection "github.com/mediago-dev/mediago-drama/services/server/internal/service/selection"
 	servicesettings "github.com/mediago-dev/mediago-drama/services/server/internal/service/settings"
+	serviceshared "github.com/mediago-dev/mediago-drama/services/server/internal/service/shared"
 	serviceskill "github.com/mediago-dev/mediago-drama/services/server/internal/service/skill"
 	servicetextcompletion "github.com/mediago-dev/mediago-drama/services/server/internal/service/textcompletion"
 	serviceworkspaceevent "github.com/mediago-dev/mediago-drama/services/server/internal/service/workspaceevent"
@@ -236,7 +238,9 @@ func newAPIHandler(config Config) *apiHandler {
 		draftlib.FFProbeReader{BinDir: config.FFmpegBinDir},
 	)
 	generationService := servicegeneration.NewGenerationService(settings, generationTasks, mediaAssets, generationPreferences)
+	var codexImageProvider *servicegeneration.CodexImageProvider
 	if codexPath != "" {
+		codexImageProvider = servicegeneration.NewManagedCodexImageProvider(shutdownCtx, codexPath, serviceshared.DefaultUserDataDir())
 		generationService.SetCodexTextBackend(
 			servicetextcompletion.NewCodexBackend(codexPath, workspaceState.Dir()),
 			func(ctx context.Context, _ servicetextcompletion.Request) bool {
@@ -245,6 +249,19 @@ func newAPIHandler(config Config) *apiHandler {
 			},
 		)
 	}
+	generationService.SetMediaLinkProviders(codexImageProvider, nil, func(ctx context.Context, routeID string) (bool, string) {
+		switch routeID {
+		case coregeneration.RouteCodexImage:
+			if codexImageProvider == nil {
+				return false, "Codex executable is unavailable"
+			}
+			return codexImageProvider.Ready(ctx)
+		case coregeneration.RouteAutoDLH3:
+			return false, "AutoDL MiniMax H3 is not configured"
+		default:
+			return false, fmt.Sprintf("MediaLink route %q is not available", routeID)
+		}
+	})
 	generationService.SetJimengCLIPaths(config.JimengBinPath, config.JimengBinDir)
 	generationService.SetLibTVCLIConfig(config.LibTVBinPath, config.LibTVBinDir, config.LibTVProjectID)
 	generationService.SetPippitCLIPaths(config.PippitBinPath, config.PippitBinDir)

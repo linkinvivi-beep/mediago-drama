@@ -179,6 +179,53 @@ func (session *ImageGenerationSession) GenerateImage(
 	}
 }
 
+// ReadImageResult reloads an existing thread and returns its latest structured
+// image-generation item. It never starts or resumes a turn.
+func (session *ImageGenerationSession) ReadImageResult(ctx context.Context, threadID string) (ImageGenerationResult, error) {
+	if session == nil || session.client == nil {
+		return ImageGenerationResult{}, fmt.Errorf("Codex image session client is required")
+	}
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" {
+		return ImageGenerationResult{}, fmt.Errorf("Codex image thread id is required")
+	}
+	var response struct {
+		Thread struct {
+			ID    string `json:"id"`
+			Turns []struct {
+				ID    string            `json:"id"`
+				Items []json.RawMessage `json:"items"`
+			} `json:"turns"`
+		} `json:"thread"`
+	}
+	if err := session.client.Call(ctx, "thread/read", map[string]any{
+		"threadId":     threadID,
+		"includeTurns": true,
+	}, &response); err != nil {
+		return ImageGenerationResult{}, fmt.Errorf("reading Codex image thread: %w", err)
+	}
+	if got := strings.TrimSpace(response.Thread.ID); got != "" && got != threadID {
+		return ImageGenerationResult{}, fmt.Errorf("Codex image thread id mismatch")
+	}
+	result := ImageGenerationResult{ThreadID: threadID}
+	for turnIndex := len(response.Thread.Turns) - 1; turnIndex >= 0; turnIndex-- {
+		turn := response.Thread.Turns[turnIndex]
+		if result.TurnID == "" {
+			result.TurnID = strings.TrimSpace(turn.ID)
+		}
+		for itemIndex := len(turn.Items) - 1; itemIndex >= 0; itemIndex-- {
+			var item ImageGenerationThreadItem
+			if json.Unmarshal(turn.Items[itemIndex], &item) != nil || item.Type != "imageGeneration" {
+				continue
+			}
+			result.TurnID = strings.TrimSpace(turn.ID)
+			result.Item = item
+			return result, nil
+		}
+	}
+	return result, nil
+}
+
 func validateImageGenerationRequest(request ImageGenerationRequest) (string, []ImageGenerationInput, error) {
 	jobDir := filepath.Clean(strings.TrimSpace(request.JobDir))
 	if jobDir == "." || !filepath.IsAbs(jobDir) {

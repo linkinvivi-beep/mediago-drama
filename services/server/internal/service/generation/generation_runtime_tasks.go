@@ -872,6 +872,9 @@ func (workflow *GenerationService) completeSubmittedGeneration(
 	generationCtx, cancel := context.WithTimeout(ctx, generationRequestTimeout)
 	defer cancel()
 
+	if task.RouteID == coregeneration.RouteCodexImage {
+		request = requestWithCodexImageTaskID(request, task.ID)
+	}
 	request = workflow.requestWithGenerationProgressCallback(request, runningTask, projectID, conversationID)
 	response, err := workflow.generateWithProvider(
 		generationCtx,
