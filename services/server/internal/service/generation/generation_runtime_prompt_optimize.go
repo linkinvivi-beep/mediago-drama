@@ -34,7 +34,9 @@ const (
 	maxPromptOptimizationProtectedContextBytes = 128 << 10
 	maxPromptOptimizationEnvelopeBytes         = 128 << 10
 	maxPromptOptimizationOutputBytes           = 128 << 10
+	minPromptOptimizationProtectedRunes        = 4
 	minPromptOptimizationNearCopyRunes         = 64
+	maxPromptOptimizationShortNearCopyRunes    = 64
 	promptOptimizationShingleRunes             = 16
 )
 
@@ -102,6 +104,9 @@ func promptOptimizationOutputReproducesProtectedBody(output string, protected st
 	}
 	outputRunes := []rune(output)
 	protectedRunes := []rune(protected)
+	if promptOptimizationShortNearCopy(protectedRunes, outputRunes) {
+		return true
+	}
 	if min(len(outputRunes), len(protectedRunes)) < minPromptOptimizationNearCopyRunes {
 		return false
 	}
@@ -115,6 +120,45 @@ func promptOptimizationOutputReproducesProtectedBody(output string, protected st
 	}
 	matchedOutput := greedyPromptOptimizationSubsequenceMatches(outputRunes, protectedRunes)
 	return matchedOutput*100 >= len(outputRunes)*92
+}
+
+func promptOptimizationShortNearCopy(protected []rune, output []rune) bool {
+	if len(protected) < minPromptOptimizationProtectedRunes ||
+		len(protected) > maxPromptOptimizationShortNearCopyRunes {
+		return false
+	}
+	maxEdits := max(1, len(protected)/10)
+	if len(output) < len(protected)-maxEdits {
+		return false
+	}
+
+	// This is Sellers' approximate-substring recurrence. Both dimensions are
+	// strictly bounded: protected is at most 64 runes and output is capped before
+	// validation, so the scan uses O(64) memory and bounded O(64 * output) time.
+	previous := make([]int, len(protected)+1)
+	current := make([]int, len(protected)+1)
+	for index := range previous {
+		previous[index] = index
+	}
+	for _, outputRune := range output {
+		current[0] = 0
+		for index, protectedRune := range protected {
+			cost := 0
+			if protectedRune != outputRune {
+				cost = 1
+			}
+			current[index+1] = min(
+				previous[index+1]+1,
+				current[index]+1,
+				previous[index]+cost,
+			)
+		}
+		if current[len(protected)] <= maxEdits {
+			return true
+		}
+		previous, current = current, previous
+	}
+	return false
 }
 
 func promptOptimizationShingleCoveragePercent(source []rune, target []rune) int {
@@ -203,6 +247,10 @@ func validatePromptOptimizationInput(
 		protectedBytes += len(protected)
 		if len(protected) > maxPromptOptimizationProtectedBodyBytes || protectedBytes > maxPromptOptimizationProtectedContextBytes {
 			return errors.New("提示词优化参考内容超过安全限制")
+		}
+		normalizedRunes := []rune(normalizePromptOptimizationLeakText(protected))
+		if strings.TrimSpace(protected) != "" && len(normalizedRunes) < minPromptOptimizationProtectedRunes {
+			return errors.New("提示词优化参考内容低于安全检测长度")
 		}
 	}
 	if request != nil {

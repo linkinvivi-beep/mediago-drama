@@ -210,6 +210,49 @@ func TestProtectedImagePromptOptimizationAllowsShortCommonPhrases(t *testing.T) 
 	}
 }
 
+func TestProtectedPromptOptimizationRejectsShortNearCopies(t *testing.T) {
+	english := strings.Repeat("abcdef", 10)
+	chinese := strings.Repeat("天地玄黄宇宙洪荒", 7) + "天地玄黄"
+	chineseRunes := []rune(chinese)
+	chineseSubstitution := append([]rune(nil), chineseRunes...)
+	chineseSubstitution[30] = '新'
+	tests := []struct {
+		name      string
+		protected string
+		output    string
+	}{
+		{name: "english insertion", protected: english, output: insertEveryN(english, "x", 30)},
+		{name: "english deletion", protected: english, output: deleteEveryN(english, 30)},
+		{name: "english substitution", protected: english, output: replaceEveryN(english, 'x', 30)},
+		{name: "chinese insertion", protected: chinese, output: string(chineseRunes[:30]) + "新" + string(chineseRunes[30:])},
+		{name: "chinese deletion", protected: chinese, output: string(chineseRunes[:30]) + string(chineseRunes[31:])},
+		{name: "chinese substitution", protected: chinese, output: string(chineseSubstitution)},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			execution := promptOptimizationExecution{Enabled: true, ProtectedBodies: []string{test.protected}}
+			if got, err := execution.validateOutput(test.output); err == nil || got != "" {
+				t.Fatalf("validateOutput() = %q, %v; want short near-copy rejection", got, err)
+			}
+		})
+	}
+
+	execution := promptOptimizationExecution{Enabled: true, ProtectedBodies: []string{english}}
+	const legalPrompt = "soft watercolor portrait, quiet garden, diffuse morning light"
+	if got, err := execution.validateOutput(legalPrompt); err != nil || got != legalPrompt {
+		t.Fatalf("validateOutput() = %q, %v; want unrelated legal prompt", got, err)
+	}
+}
+
+func TestPromptOptimizationRejectsProtectedBodiesBelowDetectionBoundary(t *testing.T) {
+	for _, protected := range []string{"abc", "油画", "---"} {
+		if err := validatePromptOptimizationInput(nil, "portrait", nil, []string{protected}); err == nil {
+			t.Fatalf("validatePromptOptimizationInput(%q) error = nil, want fail-closed boundary", protected)
+		}
+	}
+}
+
 func TestPromptOptimizationRejectsReferenceSecretsInOutput(t *testing.T) {
 	const signedToken = "SIGNED-REFERENCE-TOKEN-123456"
 	ordered := []generationOrderedReference{
