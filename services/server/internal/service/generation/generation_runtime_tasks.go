@@ -84,6 +84,13 @@ func (workflow *GenerationService) RetryGenerationTask(ctx context.Context, id s
 		return generationMessageResponse{}, http.StatusNotFound, fmt.Errorf("generation task not found")
 	}
 	projectID := workflow.projectIDForTask(task)
+	if pollID := GenerationTaskProviderPollID(task); task.RouteID == coregeneration.RouteCodexImage && pollID != "" {
+		if !strings.EqualFold(strings.TrimSpace(task.Status), "failed") {
+			return workflow.GetGenerationVideo(ctx, task.ID)
+		}
+		task.ProviderTaskID = ""
+		task.RuntimeState = GenerationTaskRuntimeState{}
+	}
 
 	payload := generationMessageRequest{
 		BatchID:           task.BatchID,
@@ -201,7 +208,7 @@ func (workflow *GenerationService) RetryGenerationTask(ctx context.Context, id s
 		}
 		workflow.syncGenerationNotificationTask(nextTask)
 		_ = workflow.generationTasks.RecordAttempt(task.ID, "retry", messageResponse.Status, messageResponse.Message, nil)
-		go workflow.completeSubmittedGeneration(context.Background(), nextTask, provider, generationRequest, "retry", projectID, nextTask.ConversationID)
+		workflow.launchSubmittedGeneration(nextTask, provider, generationRequest, "retry", projectID, nextTask.ConversationID)
 		return messageResponse, http.StatusOK, nil
 	}
 
@@ -582,6 +589,7 @@ func (workflow *GenerationService) DeleteGenerationTaskAsset(id string, assetInd
 
 // DeleteGenerationTask deletes a generation task and returns the updated task list.
 func (workflow *GenerationService) DeleteGenerationTask(id string) (generationTasksResponse, bool, error) {
+	workflow.cancelGenerationTask(id)
 	deleted, err := workflow.generationTasks.Delete(id)
 	if err != nil || !deleted {
 		return generationTasksResponse{}, deleted, err

@@ -828,6 +828,11 @@ func GenerationTaskProviderPollID(task GenerationTaskRecord) string {
 	if value := strings.TrimSpace(task.ProviderTaskID); value != "" {
 		return value
 	}
+	if task.RouteID == coregeneration.RouteCodexImage {
+		if threadID := strings.TrimSpace(task.RuntimeState.CodexThreadID); threadID != "" {
+			return codexImageResponseIDPrefix + threadID
+		}
+	}
 	if strings.Contains(strings.TrimSpace(task.ID), ":") {
 		return strings.TrimSpace(task.ID)
 	}

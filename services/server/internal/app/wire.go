@@ -238,6 +238,7 @@ func newAPIHandler(config Config) *apiHandler {
 		draftlib.FFProbeReader{BinDir: config.FFmpegBinDir},
 	)
 	generationService := servicegeneration.NewGenerationService(settings, generationTasks, mediaAssets, generationPreferences)
+	generationService.SetGenerationRuntimeContext(shutdownCtx)
 	var codexImageProvider *servicegeneration.CodexImageProvider
 	if codexPath != "" {
 		codexImageProvider = servicegeneration.NewManagedCodexImageProvider(shutdownCtx, codexPath, serviceshared.DefaultUserDataDir())

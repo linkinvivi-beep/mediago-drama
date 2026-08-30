@@ -45,6 +45,14 @@ type GenerationService struct {
 	pippitBinPath                 string
 	pippitBinDir                  string
 	jimengSeedanceQueueMu         sync.Mutex
+	generationRootCtx             context.Context
+	generationRootCancel          context.CancelFunc
+	generationCancelMu            sync.Mutex
+	generationCancels             map[string]*generationTaskCancellation
+}
+
+type generationTaskCancellation struct {
+	cancel context.CancelFunc
 }
 
 // SetTextCompletionService configures executor-neutral internal text completion.
@@ -64,6 +72,7 @@ func NewGenerationService(settings *settings.Settings, generationTasks *Generati
 	if len(generationPreferences) > 0 {
 		preferences = generationPreferences[0]
 	}
+	rootCtx, rootCancel := context.WithCancel(context.Background())
 	return &GenerationService{
 		settings:                      settings,
 		generationPreferences:         preferences,
@@ -72,7 +81,64 @@ func NewGenerationService(settings *settings.Settings, generationTasks *Generati
 		multimodalTextProviderFactory: defaultMultimodalTextProviderFactory,
 		voicePreviews:                 NewVoicePreviewStore(configassets.VoicePreviews),
 		stylePreviews:                 NewStylePreviewStore(configassets.StylePresets),
+		generationRootCtx:             rootCtx,
+		generationRootCancel:          rootCancel,
+		generationCancels:             map[string]*generationTaskCancellation{},
 	}
+}
+
+// SetGenerationRuntimeContext binds background generation jobs to app shutdown.
+func (workflow *GenerationService) SetGenerationRuntimeContext(parent context.Context) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	workflow.generationCancelMu.Lock()
+	oldCancel := workflow.generationRootCancel
+	workflow.generationRootCtx, workflow.generationRootCancel = context.WithCancel(parent)
+	workflow.generationCancelMu.Unlock()
+	if oldCancel != nil {
+		oldCancel()
+	}
+}
+
+func (workflow *GenerationService) launchSubmittedGeneration(task generationTaskRecord, provider coregeneration.Provider, request coregeneration.Request, action string, projectID string, conversationID string) {
+	ctx, done := workflow.generationTaskContext(task.ID)
+	go func() {
+		defer done()
+		workflow.completeSubmittedGeneration(ctx, task, provider, request, action, projectID, conversationID)
+	}()
+}
+
+func (workflow *GenerationService) generationTaskContext(taskID string) (context.Context, func()) {
+	workflow.generationCancelMu.Lock()
+	parent := workflow.generationRootCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
+	entry := &generationTaskCancellation{cancel: cancel}
+	if previous := workflow.generationCancels[taskID]; previous != nil {
+		previous.cancel()
+	}
+	workflow.generationCancels[taskID] = entry
+	workflow.generationCancelMu.Unlock()
+	return ctx, func() {
+		cancel()
+		workflow.generationCancelMu.Lock()
+		if workflow.generationCancels[taskID] == entry {
+			delete(workflow.generationCancels, taskID)
+		}
+		workflow.generationCancelMu.Unlock()
+	}
+}
+
+func (workflow *GenerationService) cancelGenerationTask(taskID string) {
+	workflow.generationCancelMu.Lock()
+	entry := workflow.generationCancels[strings.TrimSpace(taskID)]
+	if entry != nil {
+		entry.cancel()
+	}
+	workflow.generationCancelMu.Unlock()
 }
 
 // SetStylePromptLibrary wires the prompt library that owns style presets.
@@ -286,7 +352,7 @@ func (workflow *GenerationService) CreateGenerationMessage(ctx context.Context, 
 		workflow.trackGenerationNotificationTarget(task, payload.NotificationTarget)
 		workflow.syncGenerationNotificationTask(task)
 		_ = workflow.generationTasks.RecordAttempt(task.ID, "create", messageResponse.Status, messageResponse.Message, nil)
-		go workflow.completeSubmittedGeneration(context.Background(), task, provider, generationRequest, "create", projectID, payload.ConversationID)
+		workflow.launchSubmittedGeneration(task, provider, generationRequest, "create", projectID, payload.ConversationID)
 		return messageResponse, http.StatusOK, nil
 	}
 
