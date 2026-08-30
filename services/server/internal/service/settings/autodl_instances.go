@@ -380,7 +380,8 @@ func (service *Settings) SaveAutoDLWorkflowProfile(ctx context.Context, mutation
 	if index < 0 {
 		document.WorkflowProfiles = append(document.WorkflowProfiles, profile)
 	} else {
-		if document.WorkflowProfiles[index].WorkflowDigest != profile.WorkflowDigest {
+		if document.WorkflowProfiles[index].WorkflowDigest != profile.WorkflowDigest ||
+			document.WorkflowProfiles[index].APITemplateDigest != profile.APITemplateDigest {
 			for instanceIndex := range document.Instances {
 				for validationIndex := range document.Instances[instanceIndex].WorkflowValidations {
 					validation := &document.Instances[instanceIndex].WorkflowValidations[validationIndex]
@@ -565,7 +566,20 @@ func buildAutoDLSettingsResponse(ctx context.Context, passwordStore autoDLPasswo
 		Instances:        make([]AutoDLInstanceResponse, 0, len(document.Instances)),
 		WorkflowProfiles: make([]AutoDLWorkflowProfileResponse, 0, len(document.WorkflowProfiles)),
 	}
+	rejectedProfileIDs := make(map[string]struct{})
+	for _, profile := range document.WorkflowProfiles {
+		if isRejectedAutoDLWorkflowDigest(profile.WorkflowDigest) {
+			rejectedProfileIDs[profile.ID] = struct{}{}
+		}
+	}
 	for _, profile := range document.Instances {
+		profile.WorkflowValidations = append([]AutoDLWorkflowValidation(nil), profile.WorkflowValidations...)
+		for index := range profile.WorkflowValidations {
+			if _, rejected := rejectedProfileIDs[profile.WorkflowValidations[index].WorkflowProfileID]; rejected {
+				profile.WorkflowValidations[index].Status = AutoDLWorkflowStatusNeedsRevalidation
+				profile.WorkflowValidations[index].Reason = "profile_needs_revalidation"
+			}
+		}
 		hasPassword := false
 		if passwordStore != nil {
 			_, err := passwordStore.Get(ctx, autoDLKeychainService, profile.CredentialRef)
@@ -632,12 +646,19 @@ func normalizeAutoDLWorkflowProfile(mutation AutoDLWorkflowProfileMutation) (Aut
 }
 
 func normalizeStoredAutoDLWorkflowStatus(profile AutoDLWorkflowProfile) string {
-	digest := strings.ToLower(strings.TrimSpace(profile.WorkflowDigest))
-	digest = strings.TrimPrefix(digest, "sha256:")
-	if _, rejected := rejectedAutoDLWorkflowDigests[digest]; rejected {
+	if isRejectedAutoDLWorkflowDigest(profile.WorkflowDigest) {
 		return AutoDLWorkflowStatusNeedsRevalidation
 	}
 	return profile.Status
+}
+
+func isRejectedAutoDLWorkflowDigest(workflowDigest string) bool {
+	digest := strings.ToLower(strings.TrimSpace(workflowDigest))
+	digest = strings.TrimPrefix(digest, "sha256:")
+	if _, rejected := rejectedAutoDLWorkflowDigests[digest]; rejected {
+		return true
+	}
+	return false
 }
 
 func autoDLWorkflowResponse(profile AutoDLWorkflowProfile) AutoDLWorkflowProfileResponse {

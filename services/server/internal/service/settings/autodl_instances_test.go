@@ -277,6 +277,61 @@ func TestAutoDLWorkflowProfileRejectedFluxDigestNeedsRevalidation(t *testing.T) 
 	}
 }
 
+func TestAutoDLStoredRejectedFluxValidationCannotRemainReady(t *testing.T) {
+	testCases := []struct {
+		kind   string
+		digest string
+	}{
+		{kind: "flux-fp8-t2i", digest: "9970e8c3d92c4661a744b046d9f1b96208d875ad557af407f0ba89d656bc8419"},
+		{kind: "flux-fp8-i2i", digest: "1d84021c7f0530d13d914bc982ccf2e8e75200ea433331331f27264a01884462"},
+		{kind: "flux-lustly-adult-t2i", digest: "1ee1ab222cab32acfd6473708b15092356c7438b7fcbc6b58a2f9a903ba0bee8"},
+		{kind: "flux-lustly-adult-i2i", digest: "1f0cbb187d4bb66e4edaab33b42d90aebd342457621bff1c093a21a42db092aa"},
+		{kind: "flux-lustly-adult-portrait", digest: "80a5524712fe07dbc84d2c89558a66381a9bf03b8dba8380bf3dd84e9dcccc8c"},
+		{kind: "flux-lustly-adult-fullbody", digest: "6c3a39a77b7a6a5a13e46c2e2788502be578982fb5727540dceb5e94faf9b4b0"},
+		{kind: "zimage-flux-refine", digest: "cc2ba571bc0bc6c1e7d68b9d4a3b8f1302f999d01c15745867f40e62f6f6f8b2"},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.kind, func(t *testing.T) {
+			service, appStore, _ := newAutoDLSettingsForTest()
+			document := autoDLSettingsDocument{
+				Version: autoDLSettingsVersion,
+				Instances: []AutoDLInstanceProfile{{
+					ID: "autodl-safe", Name: "GPU A", Host: "gpu-a.example.com", SSHPort: 22, SSHUser: "root", ComfyPort: 6006, CredentialRef: "autodl-safe", Enabled: true,
+					WorkflowValidations: []AutoDLWorkflowValidation{
+						{WorkflowProfileID: testCase.kind, Status: AutoDLWorkflowStatusReady, WorkflowDigest: testCase.digest, Reason: "previous_success"},
+						{WorkflowProfileID: "zimage-t2i", Status: AutoDLWorkflowStatusReady, WorkflowDigest: "sha256:z-valid", Reason: "verified"},
+					},
+				}},
+				WorkflowProfiles: []AutoDLWorkflowProfile{
+					{ID: testCase.kind, Name: "Rejected candidate", Kind: testCase.kind, Version: "precision-v2", Status: AutoDLWorkflowStatusReady, WorkflowDigest: testCase.digest},
+					{ID: "zimage-t2i", Name: "Z T2I", Kind: "zimage-t2i", Version: "v1", Status: AutoDLWorkflowStatusReady, WorkflowDigest: "sha256:z-valid"},
+				},
+			}
+			raw, err := json.Marshal(document)
+			if err != nil {
+				t.Fatal(err)
+			}
+			appStore.values[autoDLSettingsKey] = string(raw)
+
+			response, err := service.GetAutoDLSettings(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			validations := response.Instances[0].WorkflowValidations
+			if len(validations) != 2 {
+				t.Fatalf("validations = %#v, want rejected and Z-Image records", validations)
+			}
+			if validations[0].WorkflowProfileID != testCase.kind || validations[0].Status != AutoDLWorkflowStatusNeedsRevalidation || validations[0].Reason != "profile_needs_revalidation" {
+				t.Fatalf("rejected validation = %#v, want forced needs_revalidation", validations[0])
+			}
+			if validations[1].WorkflowProfileID != "zimage-t2i" || validations[1].Status != AutoDLWorkflowStatusReady || validations[1].Reason != "verified" {
+				t.Fatalf("unrelated validation = %#v, want unchanged ready Z-Image", validations[1])
+			}
+		})
+	}
+}
+
 func TestAutoDLSaveWorkflowValidationCannotReadyRejectedProfile(t *testing.T) {
 	service, _, _ := newAutoDLSettingsForTest()
 	instance, err := service.SaveAutoDLInstance(context.Background(), AutoDLInstanceMutation{
@@ -383,6 +438,40 @@ func TestAutoDLWorkflowProfileReplacementKeepsStableIDAndInstanceValidations(t *
 	}
 	if response.Instances[0].WorkflowValidations[0].Status != AutoDLWorkflowStatusNeedsRevalidation {
 		t.Fatalf("validation = %#v, want changed workflow digest to require revalidation", response.Instances[0].WorkflowValidations[0])
+	}
+}
+
+func TestAutoDLWorkflowAPITemplateDigestChangeRequiresInstanceRevalidation(t *testing.T) {
+	service, _, _ := newAutoDLSettingsForTest()
+	instance, err := service.SaveAutoDLInstance(context.Background(), AutoDLInstanceMutation{
+		Name: "GPU A", SSHCommand: "ssh root@gpu-a.example.com", ComfyPort: 6006,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial := AutoDLWorkflowProfileMutation{
+		ID: "zimage-t2i", Name: "Z Image", Kind: "zimage-t2i", Version: "v1", WorkflowDigest: "sha256:same-workflow", APITemplateDigest: "sha256:api-v1", Status: AutoDLWorkflowStatusReady,
+	}
+	if _, err := service.SaveAutoDLWorkflowProfile(context.Background(), initial); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SaveAutoDLWorkflowValidation(context.Background(), instance.ID, AutoDLWorkflowValidation{
+		WorkflowProfileID: "zimage-t2i", Status: AutoDLWorkflowStatusReady, WorkflowDigest: "sha256:same-workflow", Reason: "verified",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	initial.APITemplateDigest = "sha256:api-v2"
+	if _, err := service.SaveAutoDLWorkflowProfile(context.Background(), initial); err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := service.GetAutoDLSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	validation := response.Instances[0].WorkflowValidations[0]
+	if validation.Status != AutoDLWorkflowStatusNeedsRevalidation || validation.Reason != "workflow_changed" {
+		t.Fatalf("validation = %#v, want API template digest change to require revalidation", validation)
 	}
 }
 
