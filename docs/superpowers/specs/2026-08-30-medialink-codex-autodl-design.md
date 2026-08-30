@@ -1,4 +1,4 @@
-# MediaLink：Codex 生图与 AutoDL MiniMax H3 视频设计
+# MediaLink：Codex / AutoDL 生图与 AutoDL MiniMax H3 视频设计
 
 日期：2026-08-30
 
@@ -10,8 +10,9 @@
 
 MediaLink 是 MediaGo Drama 的 macOS Apple Silicon 定向分支。它完整保留原项目的漫剧生产工作流与核心数据关系，只替换视觉生成引擎，并完成必要的外部品牌更名：
 
-- 图片统一使用 Codex 内置的 `$imagegen` 能力，共享用户当前 Codex/ChatGPT 登录与 Codex 使用额度，不调用 OpenAI Image API，也不要求 OpenAI API Key。
-- 视频统一使用用户手动启动的 AutoDL 云 GPU，通过 SSH 隧道连接 ComfyUI MiniMax H3 工作流。
+- 图片可显式选择 Codex 内置 `$imagegen` 或 AutoDL ComfyUI Z-Image；Codex 路线共享当前 Codex/ChatGPT 登录与使用额度，不调用 OpenAI Image API，也不要求 OpenAI API Key。
+- 视频使用用户手动启动的 AutoDL 云 GPU，通过 SSH 隧道连接 ComfyUI MiniMax H3 工作流。
+- AutoDL 连接支持多个动态实例；详细的 Z-Image、多实例调度和登录指令设计见 `2026-08-30-medialink-autodl-zimage-design.md`。
 - 保留原项目的原文、剧本、人物、场景、道具、分镜、素材库、任务历史、剧集预览、Skills 和提示词模板工作流。
 - 保留现有“优化提示词”开关、交互和历史记录；图片与视频根据目标引擎采用不同优化策略。
 - 只交付 macOS Apple Silicon（arm64）版本。
@@ -37,7 +38,7 @@ MediaLink 是 MediaGo Drama 的 macOS Apple Silicon 定向分支。它完整保�
 1. **工作流不变，引擎可替换。** 所有原有资源卡片和生成入口继续调用统一生成服务，差异收敛到路由与执行器。
 2. **一次提交只有一个身份。** Codex item ID 和 ComfyUI `prompt_id` 都必须持久化；断线恢复查询原任务，不重复提交。
 3. **生成结果进入正式素材库。** Codex 临时文件和 AutoDL 远程文件都不是最终数据源，结果必须校验并导入 MediaLink 管理的资产目录。
-4. **能力先检查，再开放按钮。** Codex 生图能力、SSH/ComfyUI 状态以及 H3 工作流节点都要通过预检。
+4. **能力先检查，再开放按钮。** Codex 生图能力、每个 SSH/ComfyUI 实例状态以及 Z-Image/H3 工作流节点都要通过预检。
 5. **错误透明。** 登录、额度、策略、网络、节点、模型、显存和输出错误分别呈现，不用模糊的“生成失败”掩盖原因。
 6. **秘密不落普通数据库和日志。** SSH 私钥、密码或私钥口令交给 macOS Keychain；任务日志只保留脱敏后的连接信息。
 7. **旧实例信息不可信。** 每次连接按当前设置建立并验证 SSH/ComfyUI；历史 SSH 别名、端口和运行日志不能作为当前实例在线的证据。
@@ -79,15 +80,16 @@ React 现有资源/分镜界面
           +--------------------+
           |                    |
           v                    v
- CodexImageJobRunner     ComfyH3VideoRunner
-          |                    |
-          v                    v
- Codex app-server       AutoDL SSH Tunnel
- imageGeneration item          |
-          |                    v
-          |              ComfyUI REST + WS
-          |                    |
-          +----------+---------+
+ CodexImageJobRunner    ComfyZImageRunner / ComfyH3VideoRunner
+          |                           |
+          v                           v
+ Codex app-server             AutoDL Instance Pool
+ imageGeneration item          SSH Tunnels + Scheduler
+          |                           |
+          |                           v
+          |                     ComfyUI REST + WS
+          |                           |
+          +-------------+-------------+
                      v
          现有素材导入 / 文档关联 / 任务历史
 ```
@@ -96,11 +98,12 @@ React 现有资源/分镜界面
 
 ## 6. 生成目录与供应商可见性
 
-前端生成目录只暴露两条产品路由：
+前端生成目录只暴露三条产品路由：
 
 | 类型 | 显示名称 | 执行器 | 用户凭据 |
 | --- | --- | --- | --- |
 | 图片 | `Codex 生图` | `CodexImageJobRunner` | 当前 Codex/ChatGPT 登录 |
+| 图片 | `AutoDL · Z-Image` | `ComfyZImageRunner` | AutoDL SSH + macOS Keychain |
 | 视频 | `AutoDL · MiniMax H3` | `ComfyH3VideoRunner` | AutoDL SSH + macOS Keychain |
 
 原有供应商实现先保留在源码中，避免无意义删除和回归风险，但从 MediaLink 的目录、模型选择器、设置页和默认路由中隐藏。任何故障都不能自动切换到隐藏供应商。
@@ -172,12 +175,12 @@ React 现有资源/分镜界面
 
 ### 8.1 设置
 
-用户可配置：
+用户可配置多个命名实例，每个实例包含：
 
-- SSH 主机、端口和用户名
+- 标准 OpenSSH 登录指令解析出的主机、端口和用户名
 - 认证类型和 macOS Keychain 中的秘密引用
 - ComfyUI 远程端口，默认 `6006`
-- REF2VA / FL2VA 工作流配置
+- Z-Image 与 REF2VA / FL2VA 工作流在该实例上的验证状态
 
 普通设置数据库只保存非秘密字段和 Keychain opaque reference。私钥、密码或私钥口令不能出现在数据库、API 响应、前端状态、命令行参数和日志中。
 
@@ -188,14 +191,14 @@ React 现有资源/分镜界面
 MediaLink 通过系统 OpenSSH 建立仅本机可访问的转发：
 
 ```text
-127.0.0.1:<动态本地端口> -> AutoDL 127.0.0.1:6006
+127.0.0.1:<动态本地端口> -> 当前 AutoDL 实例 127.0.0.1:<可配置远程端口>
 ```
 
 - 不要求 AutoDL 对公网开放 ComfyUI。
 - 首次连接记录 SSH host fingerprint；后续 fingerprint 变化必须硬失败并提示用户确认，不能自动忽略。
 - 采用有限指数退避重连，状态显示为离线、连接中、可用、等待重连或配置错误。
 - AutoDL 实例关机时只显示“云 GPU 离线”；MediaLink 不尝试开机。
-- 本地端口动态选择，避免占用用户已有的 `6006`。
+- 每个实例独立选择本地动态端口，允许多个实例同时连接。
 
 ### 8.3 ComfyUI 预检
 
@@ -206,7 +209,7 @@ MediaLink 通过系统 OpenSSH 建立仅本机可访问的转发：
 - `/queue`
 - 当前启用工作流所需节点和模型
 
-只有 ComfyUI 在线且至少一个工作流 profile 验证通过，视频生成按钮才可提交。历史日志、旧 SSH alias 或“端口曾监听”都不能代替本次健康检查。
+只有 ComfyUI 在线且目标工作流 profile 在该实例验证通过，实例才可参与相应任务调度。历史日志、旧 SSH alias 或“端口曾监听”都不能代替本次健康检查。
 
 ## 9. MiniMax H3 工作流配置
 
@@ -373,12 +376,12 @@ queued -> preparing -> submitted -> running -> importing -> completed
 - 不生成图片的“测试连接”
 - 无 API Key 输入框
 
-### 12.2 AutoDL 云 GPU
+### 12.2 AutoDL 云 GPU 实例池
 
-- SSH 非秘密字段
-- Keychain 凭据创建、替换和清除
-- ComfyUI 远程端口
-- 实时连接与健康状态
+- 多个实例的名称与 OpenSSH 登录指令
+- 每个实例的 Keychain 凭据创建、替换和清除
+- 每个实例可配置的 ComfyUI 远程端口
+- 每个实例独立的连接、工作流能力与健康状态
 - 手动“重新连接”和“测试连接”
 - 明确提示实例需要用户在 AutoDL 手动开机
 
@@ -389,6 +392,13 @@ queued -> preparing -> submitted -> running -> importing -> completed
 - 保存 REF2VA / FL2VA profile
 - 验证节点、模型和输出
 - 展示 profile 版本、最近验证时间和失败原因
+
+### 12.4 Z-Image 工作流与调度
+
+- 导入并验证文生图和普通图生图 API Workflow
+- 0 张参考图走文生图，1 张走图生图，多张在首版拒绝
+- 默认自动分配兼容空闲实例，高级设置可固定实例
+- 不同实例可并行；单个实例内的图片和视频任务串行
 
 批量图片显示队列位置。视频断线显示“等待重连”，不把等待状态显示成新提交按钮。
 
@@ -443,12 +453,14 @@ queued -> preparing -> submitted -> running -> importing -> completed
 
 真实验收至少覆盖：
 
-1. 人物、场景、道具、分镜各一张 Codex 图片，自动落入正确素材与文档关系。
+1. 人物、场景、道具、分镜各一张图片，分别覆盖 Codex 与 Z-Image 路线并自动落入正确素材与文档关系。
 2. 一组 Codex 批量图片按顺序执行。
-3. 一条 REF2VA 视频。
-4. 一条 FL2VA 视频。
-5. 一次视频生成中的 SSH 断线与同 `prompt_id` 恢复。
-6. 一次应用重启后的未完成任务恢复。
+3. Z-Image 文生图与单参考图图生图各一张。
+4. 两个 AutoDL 实例并行执行独立任务。
+5. 一条 REF2VA 视频。
+6. 一条 FL2VA 视频。
+7. 一次 ComfyUI 任务中的 SSH 断线与同实例、同 `prompt_id` 恢复。
+8. 一次应用重启后的未完成任务恢复。
 
 真实生成会消耗 Codex 使用额度和 AutoDL GPU 时间。执行前必须再次向用户说明测试项并取得单独确认；没有确认时只完成无消耗的连接、模拟和构建测试。
 
@@ -460,14 +472,15 @@ queued -> preparing -> submitted -> running -> importing -> completed
 2. MediaLink 可见路由目录和设置收敛。
 3. Codex image-generation app-server client 与串行 runner。
 4. 图片任务导入、恢复和 UI 状态。
-5. macOS Keychain 与 SSH tunnel manager。
-6. ComfyUI workflow profile、验证和视频 runner。
-7. H3 定向提示词优化与引用上下文。
-8. 端到端回归、arm64 打包和无消耗验收。
-9. 经用户单独确认后的真实生成验收。
+5. macOS Keychain、AutoDL 多实例与 SSH tunnel manager。
+6. ComfyUI workflow profile、Z-Image runner 与实例调度。
+7. H3 workflow profile 与视频 runner。
+8. Z-Image/H3 定向提示词优化与引用上下文。
+9. 端到端回归、arm64 打包和无消耗验收。
+10. 经用户单独确认后的真实生成验收。
 
 每一步优先在现有组件内增加窄接口和适配器；只有测试证明当前结构无法表达需求时，才引入增量 schema 或新服务。
 
 ## 16. 最终验收标准
 
-MediaLink 可以在 macOS Apple Silicon 上安装启动；用户使用现有 Codex/ChatGPT 登录完成所有人物、场景、道具和分镜图片生成，使用手动启动的 AutoDL ComfyUI MiniMax H3 完成分镜视频生成。所有结果进入原有素材、任务和剧集工作流；提示词优化符合 H3 约束；断线或重启不产生重复 GPU 任务；界面不暴露其他生成供应商，也不要求 OpenAI Image API Key。
+MediaLink 可以在 macOS Apple Silicon 上安装启动；用户可以使用现有 Codex/ChatGPT 登录或多实例 AutoDL Z-Image 完成人物、场景、道具和分镜图片生成，并使用 AutoDL ComfyUI MiniMax H3 完成分镜视频生成。所有结果进入原有素材、任务和剧集工作流；提示词优化符合目标引擎约束；断线或重启不产生重复 Codex/GPU 任务；不同 AutoDL 实例可并行、单实例内任务串行；界面不暴露其他生成供应商，也不要求 OpenAI Image API Key。
