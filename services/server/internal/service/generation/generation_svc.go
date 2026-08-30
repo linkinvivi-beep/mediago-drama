@@ -83,6 +83,9 @@ type GenerationAsset = dto.GenerationAsset
 // GenerationUsage contains token usage for generation providers.
 type GenerationUsage = dto.GenerationUsage
 
+// GenerationTaskRuntimeState contains non-secret resumable provider state.
+type GenerationTaskRuntimeState = dto.GenerationTaskRuntimeState
+
 // GenerationTaskRecord is a persisted generation task.
 type GenerationTaskRecord = dto.GenerationTaskRecord
 

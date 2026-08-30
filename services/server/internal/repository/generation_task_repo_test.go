@@ -210,6 +210,39 @@ func TestGenerationTaskRepositoryLifecycle(t *testing.T) {
 	}
 }
 
+func TestGenerationTaskRepositoryRuntimeStateRoundTrip(t *testing.T) {
+	repo, err := NewGenerationTaskRepository(filepath.Join(t.TempDir(), "workspace.db"))
+	if err != nil {
+		t.Fatalf("NewGenerationTaskRepository() error = %v", err)
+	}
+
+	task := generationTaskTestModel("task-runtime-state", "running", "2026-05-22T00:00:00Z")
+	task.RuntimeStateJSON = `{"codexThreadId":"thread-1","codexTurnId":"turn-1","codexItemId":"item-1","revisedPrompt":"revised","savedPath":"/tmp/job/output.png","comfyPromptId":"prompt-1","submittedAt":"2026-08-30T12:34:56Z"}`
+	if err := repo.UpsertGenerationTask(task); err != nil {
+		t.Fatalf("UpsertGenerationTask() error = %v", err)
+	}
+
+	got, err := repo.GetGenerationTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetGenerationTask() error = %v", err)
+	}
+	if got.RuntimeStateJSON != task.RuntimeStateJSON {
+		t.Fatalf("RuntimeStateJSON = %q, want %q", got.RuntimeStateJSON, task.RuntimeStateJSON)
+	}
+
+	task.RuntimeStateJSON = `{"codexThreadId":"thread-2","savedPath":"/tmp/job/final.png"}`
+	if err := repo.UpsertGenerationTask(task); err != nil {
+		t.Fatalf("UpsertGenerationTask() update error = %v", err)
+	}
+	got, err = repo.GetGenerationTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetGenerationTask() after update error = %v", err)
+	}
+	if got.RuntimeStateJSON != task.RuntimeStateJSON {
+		t.Fatalf("updated RuntimeStateJSON = %q, want %q", got.RuntimeStateJSON, task.RuntimeStateJSON)
+	}
+}
+
 func TestGenerationTaskRepositoryListDefaultLimitAndOffset(t *testing.T) {
 	repo, err := NewGenerationTaskRepository(filepath.Join(t.TempDir(), "workspace.db"))
 	if err != nil {

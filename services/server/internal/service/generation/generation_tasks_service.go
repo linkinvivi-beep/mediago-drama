@@ -249,7 +249,7 @@ func (service *GenerationTaskService) ListProjectSelectedAssets(projectID string
 	return assets, nil
 }
 
-// ListPending returns pending video generation tasks.
+// ListPending returns pending generation tasks that may need background recovery.
 func (service *GenerationTaskService) ListPending(limit int) ([]GenerationTaskRecord, error) {
 	if service.initErr != nil {
 		return nil, service.initErr
@@ -270,9 +270,15 @@ func (service *GenerationTaskService) ListPending(limit int) ([]GenerationTaskRe
 		return nil, err
 	}
 
-	// Image tasks are only polled once the inline generation handed them off — status
-	// "submitted" with a provider task id — never while they are still running inline.
-	imageModels, err := service.repo.ListPendingGenerationTasks("image", []string{"submitted"}, limit*2)
+	imageModels, err := service.repo.ListPendingGenerationTasks("image", []string{
+		"preparing",
+		"queued",
+		"submitting",
+		"submitted",
+		"running",
+		"importing",
+		"waiting_reconnect",
+	}, limit*2)
 	if err != nil {
 		return nil, err
 	}
@@ -296,9 +302,6 @@ func (service *GenerationTaskService) ListPending(limit int) ([]GenerationTaskRe
 	for _, task := range imageTasks {
 		if len(filtered) >= limit {
 			break
-		}
-		if GenerationTaskProviderPollID(task) == "" {
-			continue
 		}
 		filtered = append(filtered, task)
 	}
@@ -864,6 +867,10 @@ func (service *GenerationTaskService) upsertTask(task GenerationTaskRecord, requ
 	if err != nil {
 		return false, err
 	}
+	runtimeStateJSON, err := encodeGenerationTaskRuntimeState(task.RuntimeState)
+	if err != nil {
+		return false, err
+	}
 
 	startedTransition := false
 	completedTransition := false
@@ -902,41 +909,42 @@ func (service *GenerationTaskService) upsertTask(task GenerationTaskRecord, requ
 		return false, err
 	}
 	if err := service.repo.UpsertGenerationTask(generationTaskModel{
-		ID:              task.ID,
-		BatchID:         strings.TrimSpace(task.BatchID),
-		BatchItemID:     strings.TrimSpace(task.BatchItemID),
-		BatchIndex:      task.BatchIndex,
-		ProviderTaskID:  task.ProviderTaskID,
-		ConversationID:  domain.StringPtr(task.ConversationID),
-		ProjectID:       domain.StringPtr(GenerationProjectIDForRequest(task.ProjectID, "")),
-		DocumentID:      domain.StringPtr(task.DocumentID),
-		SectionID:       domain.StringPtr(task.SectionID),
-		CapabilityID:    domain.StringPtr(task.CapabilityID),
-		ResourceType:    domain.StringPtr(task.ResourceType),
-		Kind:            task.Kind,
-		RouteID:         task.RouteID,
-		FamilyID:        task.FamilyID,
-		VersionID:       task.VersionID,
-		Provider:        task.Provider,
-		ModelID:         task.ModelID,
-		Model:           task.Model,
-		Prompt:          task.Prompt,
-		SourceRefsJSON:  string(sourceRefsJSON),
-		ParamsJSON:      string(paramsJSON),
-		Status:          strings.ToLower(strings.TrimSpace(task.Status)),
-		Message:         task.Message,
-		Text:            task.Text,
-		InputTokens:     task.Usage.InputTokens,
-		OutputTokens:    task.Usage.OutputTokens,
-		TotalTokens:     task.Usage.TotalTokens,
-		ReasoningTokens: task.Usage.ReasoningTokens,
-		CachedTokens:    task.Usage.CachedTokens,
-		Error:           task.Error,
-		ErrorCode:       task.ErrorCode,
-		ErrorType:       task.ErrorType,
-		Retryable:       task.Retryable,
-		CreatedAt:       domain.TimeFromString(task.CreatedAt),
-		UpdatedAt:       domain.TimeFromString(task.UpdatedAt),
+		ID:               task.ID,
+		BatchID:          strings.TrimSpace(task.BatchID),
+		BatchItemID:      strings.TrimSpace(task.BatchItemID),
+		BatchIndex:       task.BatchIndex,
+		ProviderTaskID:   task.ProviderTaskID,
+		ConversationID:   domain.StringPtr(task.ConversationID),
+		ProjectID:        domain.StringPtr(GenerationProjectIDForRequest(task.ProjectID, "")),
+		DocumentID:       domain.StringPtr(task.DocumentID),
+		SectionID:        domain.StringPtr(task.SectionID),
+		CapabilityID:     domain.StringPtr(task.CapabilityID),
+		ResourceType:     domain.StringPtr(task.ResourceType),
+		Kind:             task.Kind,
+		RouteID:          task.RouteID,
+		FamilyID:         task.FamilyID,
+		VersionID:        task.VersionID,
+		Provider:         task.Provider,
+		ModelID:          task.ModelID,
+		Model:            task.Model,
+		Prompt:           task.Prompt,
+		SourceRefsJSON:   string(sourceRefsJSON),
+		ParamsJSON:       string(paramsJSON),
+		RuntimeStateJSON: runtimeStateJSON,
+		Status:           strings.ToLower(strings.TrimSpace(task.Status)),
+		Message:          task.Message,
+		Text:             task.Text,
+		InputTokens:      task.Usage.InputTokens,
+		OutputTokens:     task.Usage.OutputTokens,
+		TotalTokens:      task.Usage.TotalTokens,
+		ReasoningTokens:  task.Usage.ReasoningTokens,
+		CachedTokens:     task.Usage.CachedTokens,
+		Error:            task.Error,
+		ErrorCode:        task.ErrorCode,
+		ErrorType:        task.ErrorType,
+		Retryable:        task.Retryable,
+		CreatedAt:        domain.TimeFromString(task.CreatedAt),
+		UpdatedAt:        domain.TimeFromString(task.UpdatedAt),
 	}); err != nil {
 		return false, err
 	}
@@ -1425,6 +1433,9 @@ func generationTaskRecordFromModel(model generationTaskModel) (GenerationTaskRec
 		return GenerationTaskRecord{}, err
 	}
 	if err := decodeGenerationTaskJSON(model.SourceRefsJSON, &task.SourceRefs); err != nil {
+		return GenerationTaskRecord{}, err
+	}
+	if err := decodeGenerationTaskRuntimeState(model.RuntimeStateJSON, &task.RuntimeState); err != nil {
 		return GenerationTaskRecord{}, err
 	}
 	task.ReferenceURLs, task.ReferenceAssetIDs = generationTaskReferencesFromModels(model.References)
@@ -2072,5 +2083,23 @@ func decodeGenerationTaskJSON[T any](value string, target *T) error {
 		return fmt.Errorf("decoding generation task json: %w", err)
 	}
 
+	return nil
+}
+
+func encodeGenerationTaskRuntimeState(state GenerationTaskRuntimeState) (string, error) {
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		return "", fmt.Errorf("encoding generation task runtime state: %w", err)
+	}
+	return string(encoded), nil
+}
+
+func decodeGenerationTaskRuntimeState(value string, target *GenerationTaskRuntimeState) error {
+	if strings.TrimSpace(value) == "" {
+		value = "{}"
+	}
+	if err := json.Unmarshal([]byte(value), target); err != nil {
+		return fmt.Errorf("decoding generation task runtime state: %w", err)
+	}
 	return nil
 }

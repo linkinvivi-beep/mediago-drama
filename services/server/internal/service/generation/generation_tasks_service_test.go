@@ -1,8 +1,10 @@
 package generation
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -140,6 +142,120 @@ func TestGenerationTaskServicePersistToSQLite(t *testing.T) {
 	}
 	if ok {
 		t.Fatal("deleted task is still present")
+	}
+}
+
+func TestGenerationTaskServiceRuntimeStateRoundTrip(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "workspace.db")
+	service := NewGenerationTaskService(dbPath, nil)
+	want := GenerationTaskRuntimeState{
+		CodexThreadID: "thread-1",
+		CodexTurnID:   "turn-1",
+		CodexItemID:   "item-1",
+		RevisedPrompt: "cinematic portrait",
+		SavedPath:     "/tmp/medialink/job/output.png",
+		ComfyPromptID: "comfy-1",
+		SubmittedAt:   "2026-08-30T12:34:56Z",
+	}
+	if err := service.Upsert(GenerationTaskRecord{
+		ID:           "task-runtime-state",
+		Kind:         "image",
+		RouteID:      "codex.imagegen",
+		Prompt:       "portrait",
+		Status:       "waiting_reconnect",
+		RuntimeState: want,
+	}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+
+	restarted := NewGenerationTaskService(dbPath, nil)
+	got, ok, err := restarted.Get("task-runtime-state")
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("Get() ok = false, want persisted task")
+	}
+	if got.RuntimeState != want {
+		t.Fatalf("RuntimeState = %+v, want %+v", got.RuntimeState, want)
+	}
+
+	publicJSON, err := json.Marshal(GenerationTaskForClient(got))
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	for _, forbidden := range []string{"credential", "privateKey", "tunnelEndpoint", "rawCodexEvents", "metadata"} {
+		if strings.Contains(string(publicJSON), forbidden) {
+			t.Fatalf("public task JSON %s contains forbidden field %q", publicJSON, forbidden)
+		}
+	}
+}
+
+func TestGenerationTaskServiceRuntimeStateInvalidJSONReturnsDataError(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "workspace.db")
+	service := NewGenerationTaskService(dbPath, nil)
+	if err := service.Upsert(GenerationTaskRecord{
+		ID:     "task-invalid-runtime-state",
+		Kind:   "image",
+		Prompt: "portrait",
+		Status: "running",
+	}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+
+	db, err := repository.OpenWorkspaceDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenWorkspaceDB() error = %v", err)
+	}
+	if err := db.Model(&domain.GenerationTaskModel{}).
+		Where("id = ?", "task-invalid-runtime-state").
+		Update("runtime_state_json", `{not-json`).Error; err != nil {
+		t.Fatalf("corrupting runtime state fixture: %v", err)
+	}
+
+	_, ok, err := service.Get("task-invalid-runtime-state")
+	if err == nil {
+		t.Fatal("Get() error = nil, want invalid stored runtime state error")
+	}
+	if ok {
+		t.Fatal("Get() ok = true, want false when stored runtime state is invalid")
+	}
+	if !strings.Contains(err.Error(), "decoding generation task runtime state") || !strings.Contains(err.Error(), "invalid character") {
+		t.Fatalf("Get() error = %v, want wrapped runtime-state data error", err)
+	}
+}
+
+func TestGenerationTaskServiceListPendingImageRuntimeStatuses(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "workspace.db")
+	service := NewGenerationTaskService(dbPath, nil)
+	pendingStatuses := []string{"preparing", "queued", "submitting", "submitted", "running", "importing", "waiting_reconnect"}
+	for _, status := range append(append([]string{}, pendingStatuses...), "pending", "processing", "completed") {
+		if err := service.Upsert(GenerationTaskRecord{
+			ID:     "image-" + status,
+			Kind:   "image",
+			Prompt: "portrait",
+			Status: status,
+		}); err != nil {
+			t.Fatalf("Upsert(%s) error = %v", status, err)
+		}
+	}
+
+	pending, err := service.ListPending(20)
+	if err != nil {
+		t.Fatalf("ListPending() error = %v", err)
+	}
+	gotIDs := make([]string, 0, len(pending))
+	for _, task := range pending {
+		gotIDs = append(gotIDs, task.ID)
+	}
+	wantIDs := make([]string, 0, len(pendingStatuses))
+	for _, status := range pendingStatuses {
+		wantIDs = append(wantIDs, "image-"+status)
+	}
+	sort.Strings(gotIDs)
+	sort.Strings(wantIDs)
+	if strings.Join(gotIDs, ",") != strings.Join(wantIDs, ",") {
+		t.Fatalf("ListPending() IDs = %v, want exactly %v", gotIDs, wantIDs)
 	}
 }
 

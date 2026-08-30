@@ -245,6 +245,7 @@ func (repo *GenerationTaskRepository) UpsertGenerationTask(model domain.Generati
 			"model",
 			"prompt",
 			"params_json",
+			"runtime_state_json",
 			"status",
 			"message",
 			"text",

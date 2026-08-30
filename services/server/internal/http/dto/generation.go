@@ -305,6 +305,17 @@ type GenerationUsage struct {
 	CachedTokens    int `json:"cachedTokens"`
 }
 
+// GenerationTaskRuntimeState contains only non-secret identifiers and recovery data.
+type GenerationTaskRuntimeState struct {
+	CodexThreadID string `json:"codexThreadId,omitempty"`
+	CodexTurnID   string `json:"codexTurnId,omitempty"`
+	CodexItemID   string `json:"codexItemId,omitempty"`
+	RevisedPrompt string `json:"revisedPrompt,omitempty"`
+	SavedPath     string `json:"savedPath,omitempty"`
+	ComfyPromptID string `json:"comfyPromptId,omitempty"`
+	SubmittedAt   string `json:"submittedAt,omitempty"`
+}
+
 // GenerationTaskRecord is a persisted generation task.
 type GenerationTaskRecord struct {
 	ID                string                        `json:"id"`
@@ -331,6 +342,7 @@ type GenerationTaskRecord struct {
 	ReferenceURLs     []string                      `json:"referenceUrls"`
 	ReferenceAssetIDs []string                      `json:"referenceAssetIds"`
 	Params            map[string]any                `json:"params"`
+	RuntimeState      GenerationTaskRuntimeState    `json:"runtimeState"`
 	Status            string                        `json:"status"`
 	Message           string                        `json:"message"`
 	Text              string                        `json:"text,omitempty"`
