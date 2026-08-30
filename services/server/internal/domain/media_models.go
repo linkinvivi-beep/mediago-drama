@@ -22,10 +22,34 @@ type AssetModel struct {
 	SourceURL       string    `gorm:"column:source_url;not null;default:'';index:assets_source_url_idx"`
 	MetadataStatus  string    `gorm:"column:metadata_status;not null;default:''"`
 	StorageStatus   string    `gorm:"column:storage_status;not null;default:'ready';index:assets_storage_status_idx"`
+	CleanupPending  bool      `gorm:"column:cleanup_pending;not null;default:false;index:assets_cleanup_pending_idx"`
 	CreatedAt       time.Time `gorm:"column:created_at;not null;autoCreateTime:nano"`
 	UpdatedAt       time.Time `gorm:"column:updated_at;not null;autoUpdateTime:nano"`
 
 	Project *WorkspaceProjectModel `gorm:"foreignKey:ProjectID;references:ID;constraint:OnDelete:CASCADE"`
+}
+
+// MediaAssetCleanupIntentModel persists recoverable cleanup state without
+// storing absolute or user-controlled filesystem paths.
+type MediaAssetCleanupIntentModel struct {
+	AssetID         string     `gorm:"column:asset_id;primaryKey"`
+	ProjectID       string     `gorm:"column:project_id;not null;default:''"`
+	FileRoot        string     `gorm:"column:file_root;not null;default:''"`
+	FileRelPath     string     `gorm:"column:file_rel_path;not null;default:''"`
+	FileTombstone   string     `gorm:"column:file_tombstone;not null;default:''"`
+	PosterRoot      string     `gorm:"column:poster_root;not null;default:''"`
+	PosterRelPath   string     `gorm:"column:poster_rel_path;not null;default:''"`
+	PosterTombstone string     `gorm:"column:poster_tombstone;not null;default:''"`
+	Stage           string     `gorm:"column:stage;not null;index:media_cleanup_intents_stage_idx"`
+	Attempts        int        `gorm:"column:attempts;not null;default:0"`
+	NextAttemptAt   *time.Time `gorm:"column:next_attempt_at;index:media_cleanup_intents_next_attempt_idx"`
+	CreatedAt       time.Time  `gorm:"column:created_at;not null;autoCreateTime:nano"`
+	UpdatedAt       time.Time  `gorm:"column:updated_at;not null;autoUpdateTime:nano"`
+}
+
+// TableName returns the cleanup intent table name.
+func (MediaAssetCleanupIntentModel) TableName() string {
+	return "media_asset_cleanup_intents"
 }
 
 // TableName returns the backing table name.

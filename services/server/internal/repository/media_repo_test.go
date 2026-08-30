@@ -2,6 +2,7 @@ package repository
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -190,6 +191,73 @@ func TestMediaAssetRepositoryListMediaAssetsFiltersByProject(t *testing.T) {
 	}
 	if got := mediaAssetIDs(alphaAssets); !equalStringSlices(got, []string{"asset-alpha", "asset-global"}) {
 		t.Fatalf("alpha asset IDs = %#v, want alpha and global", got)
+	}
+}
+
+func TestMediaAssetRepositoryPreparesCleanupIntentOnlyForPendingUnreferencedAsset(t *testing.T) {
+	repo, err := NewMediaAssetRepository(filepath.Join(t.TempDir(), "media.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := domain.TimeFromString("2026-08-30T00:00:00Z")
+	asset := domain.AssetModel{
+		ID: "asset-cleanup", Kind: "image", Filename: "image.png", MIMEType: "image/png",
+		RelPath: "2026-08-30/image.png", Source: "generation", CleanupPending: true,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := repo.CreateMediaAsset(asset); err != nil {
+		t.Fatal(err)
+	}
+	intent := domain.MediaAssetCleanupIntentModel{
+		AssetID: asset.ID, FileRoot: "global_library", FileRelPath: "2026-08-30/image.png",
+		FileTombstone: "asset-cleanup-file.png", Stage: "planned", CreatedAt: now, UpdatedAt: now,
+	}
+	prepared, err := repo.PrepareMediaAssetCleanupIntent(intent)
+	if err != nil || !prepared {
+		t.Fatalf("PrepareMediaAssetCleanupIntent() = prepared %v err %v", prepared, err)
+	}
+	got, err := repo.GetMediaAssetCleanupIntent(asset.ID)
+	if err != nil || got != intent {
+		t.Fatalf("GetMediaAssetCleanupIntent() = %#v err %v", got, err)
+	}
+
+	if err := repo.DeleteMediaAssetCleanupIntent(asset.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.MarkMediaAssetCleanupPending(asset.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err = repo.PrepareMediaAssetCleanupIntent(intent)
+	if err != nil || prepared {
+		t.Fatalf("non-pending prepare = prepared %v err %v", prepared, err)
+	}
+}
+
+func TestMediaAssetRepositoryListsPendingAssetsWithoutIntentInBoundedOrder(t *testing.T) {
+	repo, err := NewMediaAssetRepository(filepath.Join(t.TempDir(), "media.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, id := range []string{"asset-3", "asset-1", "asset-2"} {
+		if err := repo.CreateMediaAsset(domain.AssetModel{
+			ID: id, Kind: "image", Filename: id + ".png", MIMEType: "image/png",
+			RelPath: id + ".png", Source: "generation", CleanupPending: true,
+			CreatedAt: domain.TimeFromString(fmt.Sprintf("2026-08-30T00:00:0%dZ", index)),
+			UpdatedAt: domain.TimeFromString(fmt.Sprintf("2026-08-30T00:00:0%dZ", index)),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if prepared, err := repo.PrepareMediaAssetCleanupIntent(domain.MediaAssetCleanupIntentModel{
+		AssetID: "asset-3", FileRoot: "global_library", FileRelPath: "asset-3.png",
+		FileTombstone: "asset-3-file.png", Stage: "planned",
+		CreatedAt: domain.TimeFromString("2026-08-30T00:00:00Z"), UpdatedAt: domain.TimeFromString("2026-08-30T00:00:00Z"),
+	}); err != nil || !prepared {
+		t.Fatalf("PrepareMediaAssetCleanupIntent() = prepared %v err %v", prepared, err)
+	}
+	assets, err := repo.ListMediaAssetsPendingCleanupWithoutIntent(1)
+	if err != nil || len(assets) != 1 || assets[0].ID != "asset-1" {
+		t.Fatalf("ListMediaAssetsPendingCleanupWithoutIntent() = %#v err %v", assets, err)
 	}
 }
 

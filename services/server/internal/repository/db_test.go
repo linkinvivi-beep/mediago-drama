@@ -26,6 +26,7 @@ func TestOpenWorkspaceDBMigratesWorkspaceSchema(t *testing.T) {
 		&domain.DocumentEditStreamModel{},
 		&domain.AgentSessionModel{},
 		&domain.AssetModel{},
+		&domain.MediaAssetCleanupIntentModel{},
 		&domain.GenerationConversationModel{},
 		&domain.GenerationTaskModel{},
 		&domain.GenerationTaskAttemptModel{},
@@ -48,6 +49,18 @@ func TestOpenWorkspaceDBMigratesWorkspaceSchema(t *testing.T) {
 	for _, model := range models {
 		if !db.Migrator().HasTable(model) {
 			t.Fatalf("expected table for %T to exist", model)
+		}
+	}
+	for _, indexed := range []struct {
+		model any
+		name  string
+	}{
+		{&domain.AssetModel{}, "assets_cleanup_pending_idx"},
+		{&domain.MediaAssetCleanupIntentModel{}, "media_cleanup_intents_stage_idx"},
+		{&domain.MediaAssetCleanupIntentModel{}, "media_cleanup_intents_next_attempt_idx"},
+	} {
+		if !db.Migrator().HasIndex(indexed.model, indexed.name) {
+			t.Fatalf("expected index %s to exist", indexed.name)
 		}
 	}
 

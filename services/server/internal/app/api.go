@@ -179,6 +179,9 @@ func (handler *apiHandler) Close() error {
 			closeErr = errors.Join(closeErr, extension.Close())
 		}
 	}
+	if handler.mediaAssets != nil {
+		closeErr = errors.Join(closeErr, handler.mediaAssets.Close())
+	}
 	if handler.workspaceState != nil {
 		closeErr = errors.Join(closeErr, handler.workspaceState.Close())
 	}

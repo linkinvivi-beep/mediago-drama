@@ -69,8 +69,14 @@ func TestCacheGenerationResponseAssetsSavesBase64Locally(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading media dir: %v", err)
 	}
-	if len(files) != 1 {
-		t.Fatalf("cached files = %d, want 1", len(files))
+	visibleFiles := 0
+	for _, file := range files {
+		if !strings.HasPrefix(file.Name(), ".") {
+			visibleFiles++
+		}
+	}
+	if visibleFiles != 1 {
+		t.Fatalf("visible cached files = %d, want 1", visibleFiles)
 	}
 
 	assets, err := mediaAssets.List("")
