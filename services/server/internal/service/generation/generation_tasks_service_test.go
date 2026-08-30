@@ -1394,6 +1394,39 @@ func TestGenerationTaskServiceUpsertExistingDoesNotResurrectDeletedTask(t *testi
 	}
 }
 
+func TestGenerationTaskServiceUpsertExistingActiveRejectsTerminalTask(t *testing.T) {
+	service := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	active := testCodexGenerationTask("task-active-cas", "waiting_reconnect")
+	active.ProviderTaskID = codexImageResponseIDPrefix + "thread-active-cas"
+	if err := service.Upsert(active); err != nil {
+		t.Fatal(err)
+	}
+	staleCompletion := active
+	staleCompletion.Status = "completed"
+	staleCompletion.Message = "stale provider completion"
+
+	terminal := active
+	terminal.Status = "completed"
+	terminal.Message = "completed by another poller"
+	if err := service.Upsert(terminal); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := service.UpsertExistingActive(staleCompletion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted {
+		t.Fatal("UpsertExistingActive() persisted stale completion over terminal task")
+	}
+	stored, found, err := service.Get(active.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() = found %v, err %v", found, err)
+	}
+	if stored.Message != "completed by another poller" {
+		t.Fatalf("message = %q, want concurrent terminal value", stored.Message)
+	}
+}
+
 func TestGenerationTaskServiceManualSelectReplacesOtherTaskSelectionForResource(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "settings.db")
 	projectID := "project-manual-select-replace"

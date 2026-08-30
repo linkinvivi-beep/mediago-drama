@@ -816,7 +816,7 @@ func (service *GenerationTaskService) updateAssetRecord(id string, assetIndex in
 
 // Upsert creates or updates a generation task.
 func (service *GenerationTaskService) Upsert(task GenerationTaskRecord) error {
-	_, err := service.upsertTask(task, false, true)
+	_, err := service.upsertTask(task, false, false, true)
 	return err
 }
 
@@ -826,7 +826,7 @@ func (service *GenerationTaskService) Upsert(task GenerationTaskRecord) error {
 // published immediately after this write, avoiding a premature untracked-task
 // event before the richer notification exists.
 func (service *GenerationTaskService) UpsertWithoutCompletionListener(task GenerationTaskRecord) error {
-	_, err := service.upsertTask(task, false, false)
+	_, err := service.upsertTask(task, false, false, false)
 	return err
 }
 
@@ -834,7 +834,14 @@ func (service *GenerationTaskService) UpsertWithoutCompletionListener(task Gener
 // workers (submit/poll/progress/handoff) use this so a task the user deleted mid-generation is
 // not resurrected by a late write from the in-flight goroutine.
 func (service *GenerationTaskService) UpsertExisting(task GenerationTaskRecord) (bool, error) {
-	return service.upsertTask(task, true, true)
+	return service.upsertTask(task, true, false, true)
+}
+
+// UpsertExistingActive writes only when the row still exists and its persisted
+// status remains active. Pollers use it to avoid overwriting a concurrent delete
+// or terminal transition with a stale provider response.
+func (service *GenerationTaskService) UpsertExistingActive(task GenerationTaskRecord) (bool, error) {
+	return service.upsertTask(task, true, true, true)
 }
 
 // FailExistingPreservingRecovery marks one active row failed while leaving the
@@ -900,7 +907,7 @@ func (service *GenerationTaskService) ClaimFailedCodexRetry(id string, message s
 	return state, claimed, err
 }
 
-func (service *GenerationTaskService) upsertTask(task GenerationTaskRecord, requireExisting bool, notifyCompletion bool) (bool, error) {
+func (service *GenerationTaskService) upsertTask(task GenerationTaskRecord, requireExisting bool, requireActive bool, notifyCompletion bool) (bool, error) {
 	if service.initErr != nil {
 		return false, service.initErr
 	}
@@ -967,6 +974,9 @@ func (service *GenerationTaskService) upsertTask(task GenerationTaskRecord, requ
 	previousStatus, statusErr := service.repo.GetGenerationTaskStatus(task.ID)
 	if statusErr != nil && !repository.IsRecordNotFound(statusErr) {
 		return false, statusErr
+	}
+	if requireActive && !IsActiveGenerationStatus(previousStatus) {
+		return false, nil
 	}
 
 	if err := service.ensureTaskConversationLocked(task); err != nil {

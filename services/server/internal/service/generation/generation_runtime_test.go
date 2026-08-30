@@ -1396,6 +1396,157 @@ func TestCodexPollCompletionAfterDeleteDoesNotImportOrResurrect(t *testing.T) {
 	}
 }
 
+func TestManualCodexStatusAndActiveRetrySkipLiveLocalOwner(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	task := testCodexGenerationTask("task-manual-owner", "submitted")
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	provider := &liveOwnedCodexProvider{
+		checkpoint: make(chan struct{}),
+		release:    make(chan struct{}),
+		response:   completedCoreCodexResponseForThread("thread-live", "live completed"),
+	}
+	released := false
+	defer func() {
+		if !released {
+			close(provider.release)
+		}
+	}()
+	workflow := NewGenerationService(nil, store, media.NewMediaAssets(dbPath, filepath.Join(root, "media")))
+	workflow.SetMediaLinkProviders(provider, &mediaLinkTestProvider{name: "h3"}, func(context.Context, string) (bool, string) { return true, "" })
+	workflow.launchSubmittedGeneration(task, provider, codexImageRequest(task.ID), "create", "", "")
+	select {
+	case <-provider.checkpoint:
+	case <-time.After(time.Second):
+		t.Fatal("live Generate did not emit a checkpoint")
+	}
+	statusResponse, status, err := workflow.GetGenerationVideo(context.Background(), task.ID)
+	if err != nil || status != http.StatusOK || !IsActiveGenerationStatus(statusResponse.Status) {
+		t.Fatalf("GetGenerationVideo() = status %d, response %+v, err %v", status, statusResponse, err)
+	}
+	retryResponse, status, err := workflow.RetryGenerationTask(context.Background(), task.ID)
+	if err != nil || status != http.StatusOK || !IsActiveGenerationStatus(retryResponse.Status) {
+		t.Fatalf("RetryGenerationTask() = status %d, response %+v, err %v", status, retryResponse, err)
+	}
+	if got := provider.getCalls.Load(); got != 0 {
+		t.Fatalf("Get calls while local Generate owns manual status/retry = %d, want 0", got)
+	}
+	close(provider.release)
+	released = true
+	waitForGenerationTask(t, store, task.ID, func(task GenerationTaskRecord) bool { return task.Status == "completed" })
+	waitForGenerationCancelRegistry(t, workflow, task.ID, false)
+}
+
+func TestManualCodexGetCompletionAfterDeleteDoesNotCacheOrResurrect(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	task := testCodexGenerationTask("task-manual-delete", "waiting_reconnect")
+	task.ProviderTaskID = codexImageResponseIDPrefix + "thread-manual-delete"
+	task.RuntimeState = GenerationTaskRuntimeState{CodexThreadID: "thread-manual-delete"}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	provider := &blockingCodexPollProvider{
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+		response: completedCoreCodexResponseForThread("thread-manual-delete", "deleted result"),
+	}
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	workflow.SetMediaLinkProviders(provider, &mediaLinkTestProvider{name: "h3"}, func(context.Context, string) (bool, string) { return true, "" })
+	done := make(chan struct{})
+	go func() {
+		_, _, _ = workflow.GetGenerationVideo(context.Background(), task.ID)
+		close(done)
+	}()
+	select {
+	case <-provider.started:
+	case <-time.After(time.Second):
+		t.Fatal("manual provider Get did not start")
+	}
+	if _, deleted, err := workflow.DeleteGenerationTask(task.ID); err != nil || !deleted {
+		t.Fatalf("DeleteGenerationTask() = deleted %v, err %v", deleted, err)
+	}
+	close(provider.release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("manual Get did not finish")
+	}
+	if _, found, err := store.Get(task.ID); err != nil || found {
+		t.Fatalf("deleted task found = %v, err %v", found, err)
+	}
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("media assets cached after delete = %d, want zero", len(assets))
+	}
+}
+
+func TestManualCodexGetDoesNotOverwriteConcurrentTerminalTask(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	task := testCodexGenerationTask("task-manual-terminal", "waiting_reconnect")
+	task.ProviderTaskID = codexImageResponseIDPrefix + "thread-manual-terminal"
+	task.RuntimeState = GenerationTaskRuntimeState{CodexThreadID: "thread-manual-terminal"}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	provider := &blockingCodexPollProvider{
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+		response: completedCoreCodexResponseForThread("thread-manual-terminal", "provider result"),
+	}
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	workflow.SetMediaLinkProviders(provider, &mediaLinkTestProvider{name: "h3"}, func(context.Context, string) (bool, string) { return true, "" })
+	done := make(chan struct{})
+	go func() {
+		_, _, _ = workflow.GetGenerationVideo(context.Background(), task.ID)
+		close(done)
+	}()
+	select {
+	case <-provider.started:
+	case <-time.After(time.Second):
+		t.Fatal("manual provider Get did not start")
+	}
+	terminal := task
+	terminal.Status = "completed"
+	terminal.Message = "already completed elsewhere"
+	terminal.ProviderTaskID = ""
+	terminal.RuntimeState = GenerationTaskRuntimeState{RevisedPrompt: "existing terminal"}
+	if err := store.Upsert(terminal); err != nil {
+		t.Fatal(err)
+	}
+	close(provider.release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("manual Get did not finish")
+	}
+	stored, found, err := store.Get(task.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() = found %v, err %v", found, err)
+	}
+	if stored.Status != "completed" || stored.Message != "already completed elsewhere" || stored.RuntimeState.RevisedPrompt != "existing terminal" {
+		t.Fatalf("terminal task was overwritten: %+v", stored)
+	}
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("provider result cached after concurrent terminal transition = %d, want zero", len(assets))
+	}
+}
+
 func TestRecoverCodexImageAfterRestartUsesExistingThread(t *testing.T) {
 	root := t.TempDir()
 	dbPath := filepath.Join(root, "settings.db")

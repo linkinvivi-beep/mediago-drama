@@ -26,6 +26,9 @@ func (workflow *GenerationService) GetGenerationVideo(ctx context.Context, id st
 		if status == "completed" || status == "failed" {
 			return GenerationResponseFromTask(storedTask), http.StatusOK, nil
 		}
+		if !IsActiveGenerationStatus(status) || workflow.generationTaskLocallyOwned(storedTask.ID) {
+			return GenerationResponseFromTask(storedTask), http.StatusOK, nil
+		}
 		pollID := GenerationTaskProviderPollID(storedTask)
 		if pollID == "" {
 			return GenerationResponseFromTask(storedTask), http.StatusOK, nil
@@ -44,13 +47,35 @@ func (workflow *GenerationService) GetGenerationVideo(ctx context.Context, id st
 	response, err := provider.Get(pollCtx, id)
 	if err != nil {
 		if found {
-			_ = workflow.generationTasks.RecordError(id, err)
-			_ = workflow.generationTasks.RecordAttempt(id, "poll", storedTask.Status, "Manual status check failed.", err)
+			latestTask, latestFound, pollable, latestErr := workflow.currentGenerationTaskForProviderPoll(storedTask.ID)
+			if latestErr != nil {
+				return generationMessageResponse{}, http.StatusInternalServerError, latestErr
+			}
+			if !latestFound {
+				return generationMessageResponse{}, http.StatusNotFound, fmt.Errorf("generation task not found")
+			}
+			if !pollable {
+				return GenerationResponseFromTask(latestTask), http.StatusOK, nil
+			}
+			storedTask = latestTask
+			_ = workflow.generationTasks.RecordError(storedTask.ID, err)
+			_ = workflow.generationTasks.RecordAttempt(storedTask.ID, "poll", storedTask.Status, "Manual status check failed.", err)
 		}
 		return generationMessageResponse{}, http.StatusBadGateway, err
 	}
 	projectID := ""
 	if found {
+		latestTask, latestFound, pollable, latestErr := workflow.currentGenerationTaskForProviderPoll(storedTask.ID)
+		if latestErr != nil {
+			return generationMessageResponse{}, http.StatusInternalServerError, latestErr
+		}
+		if !latestFound {
+			return generationMessageResponse{}, http.StatusNotFound, fmt.Errorf("generation task not found")
+		}
+		if !pollable {
+			return GenerationResponseFromTask(latestTask), http.StatusOK, nil
+		}
+		storedTask = latestTask
 		projectID = workflow.projectIDForTask(storedTask)
 	}
 	if found {
@@ -65,11 +90,32 @@ func (workflow *GenerationService) GetGenerationVideo(ctx context.Context, id st
 	}
 	messageResponse := GenerationResponseFromCore(response, responseKind)
 	if found {
+		latestTask, latestFound, pollable, latestErr := workflow.currentGenerationTaskForProviderPoll(storedTask.ID)
+		if latestErr != nil {
+			return generationMessageResponse{}, http.StatusInternalServerError, latestErr
+		}
+		if !latestFound {
+			return generationMessageResponse{}, http.StatusNotFound, fmt.Errorf("generation task not found")
+		}
+		if !pollable {
+			return GenerationResponseFromTask(latestTask), http.StatusOK, nil
+		}
+		storedTask = latestTask
 		messageResponse.ID = storedTask.ID
 		storedTask = GenerationTaskWithMessage(storedTask, messageResponse)
 		storedTask = workflow.taskWithCodexResponseRuntime(storedTask, response)
-		if err := workflow.generationTasks.Upsert(storedTask); err != nil {
-			messageResponse.Message = AppendStorageWarning(messageResponse.Message, err)
+		persisted, persistErr := workflow.generationTasks.UpsertExistingActive(storedTask)
+		if persistErr != nil {
+			messageResponse.Message = AppendStorageWarning(messageResponse.Message, persistErr)
+		} else if !persisted {
+			latestTask, latestFound, _, latestErr := workflow.currentGenerationTaskForProviderPoll(storedTask.ID)
+			if latestErr != nil {
+				return generationMessageResponse{}, http.StatusInternalServerError, latestErr
+			}
+			if !latestFound {
+				return generationMessageResponse{}, http.StatusNotFound, fmt.Errorf("generation task not found")
+			}
+			return GenerationResponseFromTask(latestTask), http.StatusOK, nil
 		} else {
 			workflow.syncGenerationNotificationTask(storedTask)
 			_ = workflow.generationTasks.RecordAttempt(storedTask.ID, "poll", messageResponse.Status, messageResponse.Message, nil)
@@ -77,6 +123,15 @@ func (workflow *GenerationService) GetGenerationVideo(ctx context.Context, id st
 	}
 
 	return messageResponse, http.StatusOK, nil
+}
+
+func (workflow *GenerationService) currentGenerationTaskForProviderPoll(id string) (generationTaskRecord, bool, bool, error) {
+	task, found, err := workflow.generationTasks.Get(id)
+	if err != nil || !found {
+		return task, found, false, err
+	}
+	pollable := IsActiveGenerationStatus(task.Status) && !workflow.generationTaskLocallyOwned(task.ID)
+	return task, true, pollable, nil
 }
 
 // RetryGenerationTask retries a generation task for HTTP handlers.
@@ -741,18 +796,11 @@ func (workflow *GenerationService) PollGenerationTask(ctx context.Context, task 
 	if status == "completed" || status == "failed" {
 		return
 	}
-	if workflow.generationTaskLocallyOwned(task.ID) {
-		return
-	}
-	latestTask, found, err := workflow.generationTasks.Get(task.ID)
-	if err != nil || !found {
+	latestTask, found, pollable, err := workflow.currentGenerationTaskForProviderPoll(task.ID)
+	if err != nil || !found || !pollable {
 		return
 	}
 	task = latestTask
-	status = strings.ToLower(strings.TrimSpace(task.Status))
-	if status == "completed" || status == "failed" || workflow.generationTaskLocallyOwned(task.ID) {
-		return
-	}
 	route, err := RouteForStoredGenerationTask(task.ID, task, true)
 	if err != nil {
 		_ = workflow.generationTasks.RecordAttempt(task.ID, "poll", task.Status, "后台轮询的供应商未配置。", err)
@@ -793,12 +841,8 @@ func (workflow *GenerationService) PollGenerationTask(ctx context.Context, task 
 
 	response, err := provider.Get(pollCtx, pollID)
 	if err != nil {
-		latestTask, found, getErr := workflow.generationTasks.Get(task.ID)
-		if getErr != nil || !found {
-			return
-		}
-		latestStatus := strings.ToLower(strings.TrimSpace(latestTask.Status))
-		if latestStatus == "completed" || latestStatus == "failed" || workflow.generationTaskLocallyOwned(task.ID) {
+		latestTask, found, pollable, getErr := workflow.currentGenerationTaskForProviderPoll(task.ID)
+		if getErr != nil || !found || !pollable {
 			return
 		}
 		task = latestTask
@@ -822,23 +866,15 @@ func (workflow *GenerationService) PollGenerationTask(ctx context.Context, task 
 		_ = workflow.generationTasks.RecordAttempt(task.ID, "poll", task.Status, "后台状态检查失败。", err)
 		return
 	}
-	latestTask, found, err = workflow.generationTasks.Get(task.ID)
-	if err != nil || !found {
-		return
-	}
-	latestStatus := strings.ToLower(strings.TrimSpace(latestTask.Status))
-	if latestStatus == "completed" || latestStatus == "failed" || workflow.generationTaskLocallyOwned(task.ID) {
+	latestTask, found, pollable, err = workflow.currentGenerationTaskForProviderPoll(task.ID)
+	if err != nil || !found || !pollable {
 		return
 	}
 	task = latestTask
 
 	response = workflow.cacheGenerationResponseAssetsForTask(ctx, response, task)
-	latestTask, found, err = workflow.generationTasks.Get(task.ID)
-	if err != nil || !found {
-		return
-	}
-	latestStatus = strings.ToLower(strings.TrimSpace(latestTask.Status))
-	if latestStatus == "completed" || latestStatus == "failed" || workflow.generationTaskLocallyOwned(task.ID) {
+	latestTask, found, pollable, err = workflow.currentGenerationTaskForProviderPoll(task.ID)
+	if err != nil || !found || !pollable {
 		return
 	}
 	task = latestTask
@@ -854,7 +890,7 @@ func (workflow *GenerationService) PollGenerationTask(ctx context.Context, task 
 	}
 	task = GenerationTaskWithMessage(task, messageResponse)
 	task = workflow.taskWithCodexResponseRuntime(task, response)
-	existed, err := workflow.generationTasks.UpsertExisting(task)
+	existed, err := workflow.generationTasks.UpsertExistingActive(task)
 	if err != nil {
 		_ = workflow.generationTasks.RecordAttempt(task.ID, "poll", messageResponse.Status, "后台状态检查结果保存失败。", err)
 		return
