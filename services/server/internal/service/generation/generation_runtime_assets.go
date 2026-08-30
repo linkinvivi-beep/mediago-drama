@@ -445,7 +445,9 @@ func (workflow *GenerationService) finalizeGenerationAssetClaims(claims []media.
 		return
 	}
 	if persisted {
-		workflow.mediaAssets.CommitGenerationAssetClaims(claims)
+		for _, err := range workflow.mediaAssets.CommitGenerationAssetClaims(claims) {
+			slog.Warn("generation asset commit failed", "error", sanitizedLogString(err.Error()))
+		}
 		return
 	}
 	for _, err := range workflow.mediaAssets.CompensateGenerationAssetClaims(claims) {

@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -11,7 +12,8 @@ import (
 
 // MediaAssetRepository persists local media asset metadata.
 type MediaAssetRepository struct {
-	db *gorm.DB
+	db                      *gorm.DB
+	cleanupIntentInsertHook func(*gorm.DB) error
 }
 
 // NewMediaAssetRepository opens the workspace database via the central workspace schema owner.
@@ -69,7 +71,7 @@ func (repo *MediaAssetRepository) GetMediaAsset(id string) (domain.AssetModel, e
 // FindMediaAssetBySourceURL returns the latest media asset for a source URL.
 func (repo *MediaAssetRepository) FindMediaAssetBySourceURL(sourceURL string) (domain.AssetModel, error) {
 	var model domain.AssetModel
-	err := repo.db.Where("source_url = ?", strings.TrimSpace(sourceURL)).
+	err := repo.db.Where("source_url = ? AND cleanup_pending = ?", strings.TrimSpace(sourceURL), false).
 		Order("updated_at DESC").
 		First(&model).Error
 	if IsRecordNotFound(err) {
@@ -85,10 +87,11 @@ func (repo *MediaAssetRepository) FindMediaAssetBySourceURL(sourceURL string) (d
 func (repo *MediaAssetRepository) FindMediaAssetBySourceURLAndScope(sourceURL string, projectID string, source string, conversationID string) (domain.AssetModel, error) {
 	var model domain.AssetModel
 	err := repo.db.Where(
-		"source_url = ? AND COALESCE(project_id, '') = ? AND source = ?",
+		"source_url = ? AND COALESCE(project_id, '') = ? AND source = ? AND cleanup_pending = ?",
 		strings.TrimSpace(sourceURL),
 		domain.CleanProjectID(projectID),
 		strings.TrimSpace(source),
+		false,
 	).
 		Order("updated_at DESC").
 		First(&model).Error
@@ -105,11 +108,12 @@ func (repo *MediaAssetRepository) FindMediaAssetBySourceURLAndScope(sourceURL st
 func (repo *MediaAssetRepository) FindMediaAssetByContentHashAndScope(contentHash string, kind string, projectID string, source string, conversationID string) (domain.AssetModel, error) {
 	var model domain.AssetModel
 	err := repo.db.Where(
-		"content_hash = ? AND kind = ? AND COALESCE(project_id, '') = ? AND source = ?",
+		"content_hash = ? AND kind = ? AND COALESCE(project_id, '') = ? AND source = ? AND cleanup_pending = ?",
 		strings.TrimSpace(contentHash),
 		strings.TrimSpace(kind),
 		domain.CleanProjectID(projectID),
 		strings.TrimSpace(source),
+		false,
 	).
 		Order("updated_at DESC").
 		First(&model).Error
@@ -180,18 +184,26 @@ func (repo *MediaAssetRepository) PrepareMediaAssetCleanupIntent(intent domain.M
 	}
 	prepared := false
 	err := repo.db.Transaction(func(tx *gorm.DB) error {
-		var count int64
+		var asset domain.AssetModel
+		if err := tx.First(&asset, "id = ?", intent.AssetID).Error; err != nil {
+			return err
+		}
+		if domain.CleanProjectID(domain.StringValue(asset.ProjectID)) != domain.CleanProjectID(intent.ProjectID) ||
+			asset.RelPath != intent.AssetRelPath || asset.PosterRelPath != intent.AssetPosterPath {
+			return errors.New("media asset cleanup intent does not match canonical asset storage")
+		}
+		var references int64
 		if err := tx.Model(&domain.AssetModel{}).
-			Where(`id = ? AND cleanup_pending = ?
+			Where(`id = ?
 				AND NOT EXISTS (SELECT 1 FROM generation_task_assets WHERE asset_id = ?)
 				AND NOT EXISTS (SELECT 1 FROM generation_task_references WHERE asset_id = ?)
 				AND NOT EXISTS (SELECT 1 FROM project_selected_assets WHERE asset_id = ?)
 				AND NOT EXISTS (SELECT 1 FROM project_reference_assets WHERE asset_id = ?)`,
-				intent.AssetID, true, intent.AssetID, intent.AssetID, intent.AssetID, intent.AssetID).
-			Count(&count).Error; err != nil {
+				intent.AssetID, intent.AssetID, intent.AssetID, intent.AssetID, intent.AssetID).
+			Count(&references).Error; err != nil {
 			return err
 		}
-		if count == 0 {
+		if references == 0 {
 			return nil
 		}
 		var existing int64
@@ -200,9 +212,19 @@ func (repo *MediaAssetRepository) PrepareMediaAssetCleanupIntent(intent domain.M
 			return err
 		}
 		if existing == 0 {
+			if err := tx.Model(&domain.AssetModel{}).Where("id = ?", intent.AssetID).Update("cleanup_pending", true).Error; err != nil {
+				return err
+			}
+			if repo.cleanupIntentInsertHook != nil {
+				if err := repo.cleanupIntentInsertHook(tx); err != nil {
+					return err
+				}
+			}
 			if err := tx.Create(&intent).Error; err != nil {
 				return err
 			}
+		} else if !asset.CleanupPending {
+			return errors.New("media asset cleanup intent exists without pending ownership")
 		}
 		prepared = true
 		return nil
@@ -234,20 +256,20 @@ func (repo *MediaAssetRepository) DeleteMediaAssetCleanupIntent(assetID string) 
 	return nil
 }
 
-// ListMediaAssetsPendingCleanupWithoutIntent returns bounded recovery
-// candidates whose intent insert did not complete.
+// ListMediaAssetsPendingCleanupWithoutIntent returns bounded unreferenced
+// generated assets whose atomic intent transaction did not complete.
 func (repo *MediaAssetRepository) ListMediaAssetsPendingCleanupWithoutIntent(limit int) ([]domain.AssetModel, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
 	assets := []domain.AssetModel{}
 	err := repo.db.Model(&domain.AssetModel{}).
-		Where(`cleanup_pending = ?
+		Where(`source = ?
 			AND NOT EXISTS (SELECT 1 FROM media_asset_cleanup_intents WHERE asset_id = assets.id)
 			AND NOT EXISTS (SELECT 1 FROM generation_task_assets WHERE asset_id = assets.id)
 			AND NOT EXISTS (SELECT 1 FROM generation_task_references WHERE asset_id = assets.id)
 			AND NOT EXISTS (SELECT 1 FROM project_selected_assets WHERE asset_id = assets.id)
-			AND NOT EXISTS (SELECT 1 FROM project_reference_assets WHERE asset_id = assets.id)`, true).
+			AND NOT EXISTS (SELECT 1 FROM project_reference_assets WHERE asset_id = assets.id)`, "generation").
 		Order("created_at ASC, id ASC").Limit(limit).Find(&assets).Error
 	if err != nil {
 		return nil, fmt.Errorf("listing media assets pending cleanup: %w", err)
@@ -261,7 +283,7 @@ func (repo *MediaAssetRepository) ListMediaAssetCleanupIntents(limit int, now ti
 		return nil, nil
 	}
 	intents := []domain.MediaAssetCleanupIntentModel{}
-	query := repo.db.Model(&domain.MediaAssetCleanupIntentModel{})
+	query := repo.db.Model(&domain.MediaAssetCleanupIntentModel{}).Where("stage <> ?", "quarantined")
 	if !includeDeferred {
 		query = query.Where("next_attempt_at IS NULL OR next_attempt_at <= ?", now)
 	}
@@ -269,6 +291,48 @@ func (repo *MediaAssetRepository) ListMediaAssetCleanupIntents(limit int, now ti
 		return nil, fmt.Errorf("listing media asset cleanup intents: %w", err)
 	}
 	return intents, nil
+}
+
+// NextMediaAssetCleanupAttempt returns the earliest persisted retry deadline,
+// or now when an unreferenced generated asset still needs an intent.
+func (repo *MediaAssetRepository) NextMediaAssetCleanupAttempt(now time.Time) (*time.Time, error) {
+	candidates, err := repo.ListMediaAssetsPendingCleanupWithoutIntent(1)
+	if err != nil {
+		return nil, err
+	}
+	if len(candidates) > 0 {
+		value := now
+		return &value, nil
+	}
+	var immediate int64
+	if err := repo.db.Model(&domain.MediaAssetCleanupIntentModel{}).Where("stage <> ? AND next_attempt_at IS NULL", "quarantined").Count(&immediate).Error; err != nil {
+		return nil, fmt.Errorf("checking immediate media cleanup intents: %w", err)
+	}
+	if immediate > 0 {
+		value := now
+		return &value, nil
+	}
+	var intent domain.MediaAssetCleanupIntentModel
+	err = repo.db.Where("stage <> ? AND next_attempt_at IS NOT NULL", "quarantined").Order("next_attempt_at ASC").First(&intent).Error
+	if IsRecordNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("finding next media cleanup attempt: %w", err)
+	}
+	return intent.NextAttemptAt, nil
+}
+
+// QuarantineMediaAssetCleanupIntent retains cleanup responsibility while
+// excluding an unsafe or corrupt intent from automatic filesystem retries.
+func (repo *MediaAssetRepository) QuarantineMediaAssetCleanupIntent(assetID string, updatedAt time.Time) error {
+	result := repo.db.Model(&domain.MediaAssetCleanupIntentModel{}).
+		Where("asset_id = ?", strings.TrimSpace(assetID)).
+		Updates(map[string]any{"stage": "quarantined", "next_attempt_at": nil, "updated_at": updatedAt})
+	if result.Error != nil {
+		return fmt.Errorf("quarantining media asset cleanup intent: %w", result.Error)
+	}
+	return nil
 }
 
 // UpdateMediaAssetCleanupIntentStage advances recoverable file/DB state.
@@ -302,6 +366,22 @@ func (repo *MediaAssetRepository) DeleteMediaAssetForCleanup(assetID string, upd
 	deleted := false
 	referenced := false
 	err := repo.db.Transaction(func(tx *gorm.DB) error {
+		var intent domain.MediaAssetCleanupIntentModel
+		if err := tx.First(&intent, "asset_id = ?", assetID).Error; err != nil {
+			return err
+		}
+		var asset domain.AssetModel
+		if err := tx.First(&asset, "id = ?", assetID).Error; IsRecordNotFound(err) {
+			return tx.Model(&domain.MediaAssetCleanupIntentModel{}).
+				Where("asset_id = ?", assetID).
+				Updates(map[string]any{"stage": "db_deleted", "updated_at": updatedAt}).Error
+		} else if err != nil {
+			return err
+		}
+		if domain.CleanProjectID(domain.StringValue(asset.ProjectID)) != domain.CleanProjectID(intent.ProjectID) ||
+			asset.RelPath != intent.AssetRelPath || asset.PosterRelPath != intent.AssetPosterPath {
+			return errors.New("media asset cleanup binding changed before delete")
+		}
 		result := tx.Exec(`DELETE FROM assets
 			WHERE id = ?
 			  AND cleanup_pending = ?

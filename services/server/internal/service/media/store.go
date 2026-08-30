@@ -40,6 +40,8 @@ const (
 	MediaSourcePreview      = "preview"
 )
 
+var ErrMediaAssetCleanupPending = errors.New("media asset cleanup is pending")
+
 var mediaAssetHTTPClient = &http.Client{Timeout: 2 * time.Minute}
 
 type MediaAssets struct {
@@ -54,7 +56,11 @@ type MediaAssets struct {
 	cleanupIntentCancel      context.CancelFunc
 	cleanupIntentWG          sync.WaitGroup
 	cleanupIntentCloseOnce   sync.Once
-	cleanupFD                *managedCleanupFS
+	cleanupWakeTimer         mediaCleanupWakeTimer
+	cleanupWakeToken         uint64
+	cleanupScheduleWake      func(time.Duration, func()) mediaCleanupWakeTimer
+	openCleanupFS            func() (*managedCleanupFS, error)
+	cleanupAfterOpen         func()
 	prepareCleanupIntent     func(domain.MediaAssetCleanupIntentModel) (bool, error)
 	deleteCleanupAsset       func(string) (bool, bool, error)
 	cleanupBeforeAttempt     func(context.Context, string)
@@ -546,9 +552,13 @@ func (store *MediaAssets) claimSavedGenerationAsset(save func() (MediaAsset, boo
 		}
 		store.generationClaimMu.Lock()
 		store.mu.RLock()
-		_, existsErr := store.repo.GetMediaAsset(asset.ID)
+		model, existsErr := store.repo.GetMediaAsset(asset.ID)
 		store.mu.RUnlock()
 		if existsErr == nil {
+			if model.CleanupPending {
+				store.generationClaimMu.Unlock()
+				return MediaAsset{}, MediaAssetClaim{}, ErrMediaAssetCleanupPending
+			}
 			if store.generationClaims == nil {
 				store.generationClaims = map[string]mediaAssetClaimState{}
 			}
@@ -568,8 +578,8 @@ func (store *MediaAssets) claimSavedGenerationAsset(save func() (MediaAsset, boo
 }
 
 // CommitGenerationAssetClaims makes task-associated generated assets durable.
-func (store *MediaAssets) CommitGenerationAssetClaims(claims []MediaAssetClaim) {
-	store.finishGenerationAssetClaims(claims, true)
+func (store *MediaAssets) CommitGenerationAssetClaims(claims []MediaAssetClaim) []error {
+	return store.finishGenerationAssetClaims(claims, true)
 }
 
 // CompensateGenerationAssetClaims releases failed task writes and removes only
@@ -584,7 +594,7 @@ func (store *MediaAssets) finishGenerationAssetClaims(claims []MediaAssetClaim, 
 	}
 	store.generationClaimMu.Lock()
 	errorsFound := []error{}
-	retryCleanup := false
+	wakeCleanup := false
 	for _, claim := range claims {
 		assetID := strings.TrimSpace(claim.AssetID)
 		state, ok := store.generationClaims[assetID]
@@ -592,10 +602,18 @@ func (store *MediaAssets) finishGenerationAssetClaims(claims []MediaAssetClaim, 
 			continue
 		}
 		if committed {
-			state.staged = false
 			store.mu.Lock()
-			if err := store.repo.CancelMediaAssetCleanup(assetID); err != nil {
+			model, err := store.repo.GetMediaAsset(assetID)
+			if err == nil && model.CleanupPending {
+				errorsFound = append(errorsFound, ErrMediaAssetCleanupPending)
+				wakeCleanup = true
+			} else if err != nil && !repository.IsRecordNotFound(err) {
 				errorsFound = append(errorsFound, err)
+			} else {
+				state.staged = false
+				if err := store.repo.CancelMediaAssetCleanup(assetID); err != nil {
+					errorsFound = append(errorsFound, err)
+				}
 			}
 			store.mu.Unlock()
 		}
@@ -609,12 +627,6 @@ func (store *MediaAssets) finishGenerationAssetClaims(claims []MediaAssetClaim, 
 		if !committed && state.staged {
 			store.generationClaims[assetID] = state
 			store.mu.Lock()
-			if err := store.repo.MarkMediaAssetCleanupPending(assetID, true); err != nil {
-				errorsFound = append(errorsFound, err)
-				store.mu.Unlock()
-				retryCleanup = true
-				continue
-			}
 			model, err := store.repo.GetMediaAsset(assetID)
 			if err == nil {
 				intent, intentErr := store.cleanupIntentForModel(model)
@@ -637,11 +649,11 @@ func (store *MediaAssets) finishGenerationAssetClaims(claims []MediaAssetClaim, 
 				}
 				if intentErr != nil {
 					errorsFound = append(errorsFound, intentErr)
-					retryCleanup = true
+					wakeCleanup = true
 				}
 			} else if !repository.IsRecordNotFound(err) {
 				errorsFound = append(errorsFound, err)
-				retryCleanup = true
+				wakeCleanup = true
 			}
 			store.mu.Unlock()
 			if _, exists := store.generationClaims[assetID]; exists {
@@ -651,7 +663,7 @@ func (store *MediaAssets) finishGenerationAssetClaims(claims []MediaAssetClaim, 
 		delete(store.generationClaims, assetID)
 	}
 	store.generationClaimMu.Unlock()
-	if retryCleanup {
+	if wakeCleanup {
 		store.triggerMediaAssetCleanup()
 	}
 	return errorsFound
