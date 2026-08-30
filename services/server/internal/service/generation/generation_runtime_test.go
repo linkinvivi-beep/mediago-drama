@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"image"
 	"image/color"
@@ -1589,6 +1590,105 @@ func TestRecoverCodexImageAfterRestartUsesExistingThread(t *testing.T) {
 	}
 	if len(readThreadIDs) != 1 || readThreadIDs[0] != "thread-restart" {
 		t.Fatalf("ReadImageResult thread ids = %v, want [thread-restart]", readThreadIDs)
+	}
+}
+
+func TestCodexImageImportCachesValidatedFileWithoutLeakingItsPath(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	seedGenerationTaskProject(t, dbPath, "project-import")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaRepo, err := repository.NewMediaAssetRepository(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mediaAssets := media.NewMediaAssetsFromRepository(mediaRepo, filepath.Join(root, "media"), root, nil, nil)
+	task := testCodexGenerationTask("task-codex-import", "waiting_reconnect")
+	task.ProviderTaskID = codexImageResponseIDPrefix + "thread-import"
+	task.RuntimeState = GenerationTaskRuntimeState{CodexThreadID: "thread-import"}
+	task.Prompt = "the user's original prompt"
+	task.ProjectID = "project-import"
+	task.ConversationID = "conversation-import"
+	task.SectionID = "storyboard-section-import"
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+
+	jobDir := filepath.Join(root, "generation", "codex-image", task.ID, "attempt-0123456789abcdef0123456789abcdef")
+	savedPath := writeTestPNG(t, jobDir, "generated.png")
+	session := &codexImageSessionStub{read: func(_ context.Context, threadID string) (codexapp.ImageGenerationResult, error) {
+		return completedCodexImageResult(threadID, "turn-import", "item-import", savedPath), nil
+	}}
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	workflow.SetMediaLinkProviders(
+		NewCodexImageProvider(session, root),
+		&mediaLinkTestProvider{name: "h3"},
+		func(context.Context, string) (bool, string) { return true, "" },
+	)
+
+	response, status, err := workflow.GetGenerationVideo(context.Background(), task.ID)
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("GetGenerationVideo() = status %d, err %v", status, err)
+	}
+	if response.Status != "completed" || len(response.Assets) != 1 {
+		t.Fatalf("response = status %q, assets %+v; want one completed asset", response.Status, response.Assets)
+	}
+	if !strings.HasPrefix(response.Assets[0].URL, "/api/v1/media-assets/") || response.Assets[0].Base64 != "" {
+		t.Fatalf("public asset = %+v, want cached MediaLink URL without inline bytes", response.Assets[0])
+	}
+	publicJSON, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(publicJSON, []byte("file://")) {
+		t.Fatalf("public response leaked Codex output path: %s", publicJSON)
+	}
+
+	stored, found, err := store.Get(task.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() = found %v, err %v", found, err)
+	}
+	if stored.Prompt != "the user's original prompt" || stored.RuntimeState.RevisedPrompt != "revised prompt" {
+		t.Fatalf("stored prompt/state = %q/%+v", stored.Prompt, stored.RuntimeState)
+	}
+	if stored.ProjectID != task.ProjectID || stored.ConversationID != task.ConversationID || stored.SectionID != task.SectionID {
+		t.Fatalf("stored task scope = %q/%q/%q, want original project/conversation/section", stored.ProjectID, stored.ConversationID, stored.SectionID)
+	}
+	if len(stored.Assets) != 1 || stored.Assets[0].AssetID == "" || stored.Assets[0].URL != response.Assets[0].URL {
+		t.Fatalf("stored assets = %+v, want one cached MediaLink asset", stored.Assets)
+	}
+	assets, err := mediaAssets.List(task.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 1 || assets[0].ID != stored.Assets[0].AssetID || assets[0].ProjectID != task.ProjectID {
+		t.Fatalf("media assets = %+v, want existing project association", assets)
+	}
+	if _, err := os.Stat(savedPath); err != nil {
+		t.Fatalf("Codex output was removed: %v", err)
+	}
+	if info, err := os.Stat(jobDir); err != nil || !info.IsDir() {
+		t.Fatalf("Codex job directory was removed: info=%v err=%v", info, err)
+	}
+}
+
+func TestCodexImageImportReusesProgressAssetWithoutReopeningLocalOutput(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "settings.db")
+	seedGenerationTaskAsset(t, dbPath, "asset-progress", "image", "")
+	store := NewGenerationTaskService(dbPath, nil)
+	task := testCodexGenerationTask("task-codex-progress-import", "running")
+	task.Assets = []GenerationAsset{{Kind: "image", URL: "/api/v1/media-assets/asset-progress/content", MIMEType: "image/png"}}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	workflow := NewGenerationService(nil, store, nil)
+	response := workflow.responseWithCachedProgressAssets(task.ID, coregeneration.Response{Assets: []coregeneration.Asset{{
+		Kind:      coregeneration.KindImage,
+		MIMEType:  "image/png",
+		LocalPath: "/validated/codex/output.png",
+	}}})
+	if len(response.Assets) != 1 || response.Assets[0].URL != task.Assets[0].URL || response.Assets[0].LocalPath != "" {
+		t.Fatalf("response assets = %+v, want cached URL with consumed local handoff", response.Assets)
 	}
 }
 

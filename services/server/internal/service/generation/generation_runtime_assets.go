@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -265,6 +266,28 @@ func (workflow *GenerationService) cacheGenerationAsset(
 	options media.MediaAssetSaveOptions,
 ) (media.MediaAsset, error) {
 	kind := string(asset.Kind)
+	if localPath := strings.TrimSpace(asset.LocalPath); localPath != "" {
+		if asset.Base64 != "" || strings.TrimSpace(asset.URL) != "" {
+			return media.MediaAsset{}, fmt.Errorf("local generated asset has ambiguous content sources")
+		}
+		file, err := os.Open(localPath)
+		if err != nil {
+			return media.MediaAsset{}, fmt.Errorf("opening local generated asset")
+		}
+		defer file.Close()
+		cached, err := workflow.mediaAssets.SaveReaderWithOptions(
+			ctx,
+			file,
+			filepath.Base(localPath),
+			asset.MIMEType,
+			"",
+			options,
+		)
+		if err != nil {
+			return media.MediaAsset{}, fmt.Errorf("saving local generated asset: %w", err)
+		}
+		return cached, nil
+	}
 	if asset.Base64 != "" {
 		cached, err := workflow.mediaAssets.SaveBase64WithOptions(kind, asset.MIMEType, asset.Base64, "", options)
 		if err != nil {

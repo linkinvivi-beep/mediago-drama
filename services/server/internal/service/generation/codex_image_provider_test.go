@@ -168,8 +168,11 @@ func TestCodexImageProviderResultCases(t *testing.T) {
 				t.Fatalf("runtime_state = %#v, want typed state with thread id", response.Metadata["runtime_state"])
 			}
 			if response.Status == "completed" {
-				if len(response.Assets) != 1 || response.Assets[0].MIMEType != "image/png" || response.Assets[0].Base64 == "" {
-					t.Fatalf("assets = %#v, want one imported PNG payload", response.Assets)
+				if len(response.Assets) != 1 || response.Assets[0].MIMEType != "image/png" || response.Assets[0].Base64 != "" {
+					t.Fatalf("assets = %#v, want one local-file PNG without an inline payload", response.Assets)
+				}
+				if got, _ := response.Assets[0].Metadata["saved_path"].(string); !filepath.IsAbs(got) {
+					t.Fatalf("saved_path = %q, want validated absolute local path", got)
 				}
 			}
 			if _, marshalErr := json.Marshal(response.Metadata); marshalErr != nil {

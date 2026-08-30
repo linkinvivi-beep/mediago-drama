@@ -23,6 +23,9 @@ type Asset struct {
 	Base64   string
 	MIMEType string
 	Metadata map[string]any
+	// LocalPath is a server-only handoff for validated provider output. API
+	// response mappers must replace it with a MediaLink asset URL or omit it.
+	LocalPath string `json:"-"`
 }
 
 // Request describes a media generation request.
