@@ -20,6 +20,10 @@ var (
 	ErrTunnelManagerClosed = errors.New("AutoDL tunnel manager is closed")
 	// ErrHostKeyMismatch means the SSH server did not present the pinned key.
 	ErrHostKeyMismatch = errors.New("AutoDL SSH host key mismatch")
+	// ErrTunnelSuperseded means a newer connection target replaced this request.
+	ErrTunnelSuperseded = errors.New("AutoDL tunnel target was superseded")
+	// ErrTunnelStale means Close invalidated work that began before its epoch.
+	ErrTunnelStale = errors.New("AutoDL tunnel request is stale")
 )
 
 // TunnelTarget contains the non-secret connection fields needed to establish
@@ -56,27 +60,52 @@ type TunnelManager interface {
 
 type tunnelManager struct {
 	passwords TunnelPasswordSource
+	hooks     tunnelManagerHooks
 
 	mu         sync.Mutex
-	tunnels    map[string]*managedTunnel
-	operations map[string]*tunnelOperation
+	instances  map[string]*tunnelInstance
+	operations map[*tunnelOperation]struct{}
 	closed     bool
 	closeDone  chan struct{}
 }
 
+type tunnelManagerHooks struct {
+	beforeHandshakeWatch func()
+	afterHandshake       func()
+}
+
+type tunnelInstance struct {
+	revision  uint64
+	tunnel    *managedTunnel
+	operation *tunnelOperation
+	closing   bool
+	closeDone chan struct{}
+}
+
 type tunnelOperation struct {
-	done    chan struct{}
-	cancel  context.CancelFunc
-	invalid bool
+	instanceID string
+	targetKey  string
+	revision   uint64
+	done       chan struct{}
+	cancel     context.CancelFunc
+	ctx        context.Context
+	reason     error
+	result     Tunnel
+	err        error
 }
 
 // NewTunnelManager creates a multi-instance tunnel manager. CloseAll is
 // terminal; construct a new manager to establish tunnels after shutdown.
 func NewTunnelManager(passwords TunnelPasswordSource) TunnelManager {
+	return newTunnelManagerWithHooks(passwords, tunnelManagerHooks{})
+}
+
+func newTunnelManagerWithHooks(passwords TunnelPasswordSource, hooks tunnelManagerHooks) TunnelManager {
 	return &tunnelManager{
 		passwords:  passwords,
-		tunnels:    make(map[string]*managedTunnel),
-		operations: make(map[string]*tunnelOperation),
+		hooks:      hooks,
+		instances:  make(map[string]*tunnelInstance),
+		operations: make(map[*tunnelOperation]struct{}),
 		closeDone:  make(chan struct{}),
 	}
 }
@@ -102,75 +131,131 @@ func (manager *tunnelManager) Ensure(ctx context.Context, target TunnelTarget) (
 			manager.mu.Unlock()
 			return Tunnel{}, ErrTunnelManagerClosed
 		}
-		if current := manager.tunnels[target.InstanceProfileID]; current != nil {
+		instance := manager.instances[target.InstanceProfileID]
+		if instance == nil {
+			instance = &tunnelInstance{}
+			manager.instances[target.InstanceProfileID] = instance
+		}
+		if instance.closing {
+			manager.mu.Unlock()
+			return Tunnel{}, ErrTunnelStale
+		}
+		if current := instance.tunnel; current != nil {
 			if current.targetKey == targetKey && current.active.Load() {
 				result := current.public()
 				manager.mu.Unlock()
 				return result, nil
 			}
-			delete(manager.tunnels, target.InstanceProfileID)
-			retirement := &tunnelOperation{done: make(chan struct{}), cancel: func() {}}
-			manager.operations[target.InstanceProfileID] = retirement
-			manager.mu.Unlock()
-			current.closeAndWait()
-			manager.mu.Lock()
-			if manager.operations[target.InstanceProfileID] == retirement {
-				delete(manager.operations, target.InstanceProfileID)
+			instance.tunnel = nil
+			if current.targetKey != targetKey {
+				instance.revision++
 			}
-			close(retirement.done)
-			manager.mu.Unlock()
-			continue
+			return manager.startTunnelOperationLocked(ctx, target, targetKey, instance, current)
 		}
-		if operation := manager.operations[target.InstanceProfileID]; operation != nil {
-			done := operation.done
-			manager.mu.Unlock()
-			select {
-			case <-done:
-				continue
-			case <-ctx.Done():
-				return Tunnel{}, ctx.Err()
+		if current := instance.operation; current != nil {
+			if current.targetKey == targetKey && current.revision == instance.revision {
+				manager.mu.Unlock()
+				return waitTunnelOperation(ctx, current)
 			}
+			instance.revision++
+			current.reason = ErrTunnelSuperseded
+			current.cancel()
 		}
+		return manager.startTunnelOperationLocked(ctx, target, targetKey, instance, nil)
+	}
+}
 
-		operationContext, cancel := context.WithCancel(ctx)
-		operation := &tunnelOperation{done: make(chan struct{}), cancel: cancel}
-		manager.operations[target.InstanceProfileID] = operation
+func (manager *tunnelManager) startTunnelOperationLocked(
+	ctx context.Context,
+	target TunnelTarget,
+	targetKey string,
+	instance *tunnelInstance,
+	retired *managedTunnel,
+) (Tunnel, error) {
+	operationContext, cancel := context.WithCancel(ctx)
+	operation := &tunnelOperation{
+		instanceID: target.InstanceProfileID,
+		targetKey:  targetKey,
+		revision:   instance.revision,
+		done:       make(chan struct{}),
+		cancel:     cancel,
+		ctx:        operationContext,
+	}
+	instance.operation = operation
+	manager.operations[operation] = struct{}{}
+	manager.mu.Unlock()
+
+	if retired != nil {
+		retired.closeAndWait()
+	}
+	created, openErr := openManagedTunnel(operationContext, manager.passwords, target, targetKey, manager.hooks)
+	manager.finishTunnelOperation(operation, created, openErr)
+	return operation.result, operation.err
+}
+
+func (manager *tunnelManager) finishTunnelOperation(operation *tunnelOperation, created *managedTunnel, openErr error) {
+	manager.mu.Lock()
+	instance := manager.instances[operation.instanceID]
+	valid := !manager.closed && operation.ctx.Err() == nil && instance != nil && !instance.closing &&
+		instance.revision == operation.revision && instance.operation == operation && operation.reason == nil
+	if valid && openErr == nil {
+		instance.tunnel = created
+		operation.result = created.public()
+		operation.err = nil
+		manager.finalizeTunnelOperationLocked(instance, operation)
 		manager.mu.Unlock()
-
-		created, err := openManagedTunnel(operationContext, manager.passwords, target, targetKey)
-		cancel()
-
-		manager.mu.Lock()
-		if manager.operations[target.InstanceProfileID] == operation {
-			delete(manager.operations, target.InstanceProfileID)
-		}
-		shouldClose := false
-		if err == nil && !manager.closed && !operation.invalid {
-			manager.tunnels[target.InstanceProfileID] = created
-		} else if err == nil {
-			shouldClose = true
-			if manager.closed {
-				err = ErrTunnelManagerClosed
-			} else {
-				err = context.Canceled
-			}
-		}
+		return
+	}
+	discardCreated := created != nil
+	if !discardCreated {
+		operation.err = manager.tunnelOperationErrorLocked(operation, openErr)
+		manager.finalizeTunnelOperationLocked(instance, operation)
 		manager.mu.Unlock()
-		if shouldClose {
-			created.closeAndWait()
-			created = nil
-		}
-		close(operation.done)
-		if err != nil {
-			if created != nil {
-				created.closeAndWait()
-			}
-			if contextErr := ctx.Err(); contextErr != nil {
-				return Tunnel{}, contextErr
-			}
-			return Tunnel{}, err
-		}
-		return created.public(), nil
+		return
+	}
+	created.active.Store(false)
+	manager.mu.Unlock()
+
+	created.closeAndWait()
+	manager.mu.Lock()
+	instance = manager.instances[operation.instanceID]
+	operation.err = manager.tunnelOperationErrorLocked(operation, openErr)
+	manager.finalizeTunnelOperationLocked(instance, operation)
+	manager.mu.Unlock()
+}
+
+func (manager *tunnelManager) tunnelOperationErrorLocked(operation *tunnelOperation, openErr error) error {
+	if operation.reason != nil {
+		return operation.reason
+	}
+	if contextErr := operation.ctx.Err(); contextErr != nil {
+		return contextErr
+	}
+	if manager.closed {
+		return ErrTunnelManagerClosed
+	}
+	if instance := manager.instances[operation.instanceID]; instance == nil || instance.closing ||
+		instance.revision != operation.revision || instance.operation != operation {
+		return ErrTunnelSuperseded
+	}
+	return openErr
+}
+
+func (manager *tunnelManager) finalizeTunnelOperationLocked(instance *tunnelInstance, operation *tunnelOperation) {
+	if instance != nil && instance.operation == operation {
+		instance.operation = nil
+	}
+	delete(manager.operations, operation)
+	operation.cancel()
+	close(operation.done)
+}
+
+func waitTunnelOperation(ctx context.Context, operation *tunnelOperation) (Tunnel, error) {
+	select {
+	case <-operation.done:
+		return operation.result, operation.err
+	case <-ctx.Done():
+		return Tunnel{}, ctx.Err()
 	}
 }
 
@@ -179,21 +264,48 @@ func (manager *tunnelManager) Close(instanceID string) error {
 		return nil
 	}
 	manager.mu.Lock()
-	current := manager.tunnels[instanceID]
-	delete(manager.tunnels, instanceID)
-	var pending <-chan struct{}
-	if operation := manager.operations[instanceID]; operation != nil {
-		operation.invalid = true
+	if manager.closed {
+		done := manager.closeDone
+		manager.mu.Unlock()
+		<-done
+		return nil
+	}
+	instance := manager.instances[instanceID]
+	if instance == nil {
+		manager.mu.Unlock()
+		return nil
+	}
+	if instance.closing {
+		done := instance.closeDone
+		manager.mu.Unlock()
+		<-done
+		return nil
+	}
+	instance.revision++
+	instance.closing = true
+	instance.closeDone = make(chan struct{})
+	current := instance.tunnel
+	instance.tunnel = nil
+	pending := make([]<-chan struct{}, 0)
+	for operation := range manager.operations {
+		if operation.instanceID != instanceID {
+			continue
+		}
+		operation.reason = ErrTunnelStale
 		operation.cancel()
-		pending = operation.done
+		pending = append(pending, operation.done)
 	}
 	manager.mu.Unlock()
 	if current != nil {
 		current.closeAndWait()
 	}
-	if pending != nil {
-		<-pending
+	for _, done := range pending {
+		<-done
 	}
+	manager.mu.Lock()
+	instance.closing = false
+	close(instance.closeDone)
+	manager.mu.Unlock()
 	return nil
 }
 
@@ -209,14 +321,20 @@ func (manager *tunnelManager) CloseAll() error {
 		return nil
 	}
 	manager.closed = true
-	tunnels := make([]*managedTunnel, 0, len(manager.tunnels))
-	for _, current := range manager.tunnels {
-		tunnels = append(tunnels, current)
+	tunnels := make([]*managedTunnel, 0, len(manager.instances))
+	closing := make([]<-chan struct{}, 0)
+	for _, instance := range manager.instances {
+		if instance.tunnel != nil {
+			tunnels = append(tunnels, instance.tunnel)
+			instance.tunnel = nil
+		}
+		if instance.closing {
+			closing = append(closing, instance.closeDone)
+		}
 	}
-	clear(manager.tunnels)
 	pending := make([]<-chan struct{}, 0, len(manager.operations))
-	for _, operation := range manager.operations {
-		operation.invalid = true
+	for operation := range manager.operations {
+		operation.reason = ErrTunnelManagerClosed
 		operation.cancel()
 		pending = append(pending, operation.done)
 	}
@@ -225,6 +343,9 @@ func (manager *tunnelManager) CloseAll() error {
 		current.closeAndWait()
 	}
 	for _, done := range pending {
+		<-done
+	}
+	for _, done := range closing {
 		<-done
 	}
 	close(manager.closeDone)
@@ -279,7 +400,13 @@ func tunnelTargetKey(target TunnelTarget) string {
 		strconv.Itoa(target.ComfyPort) + "\x00" + target.HostFingerprint + "\x00" + target.CredentialRef
 }
 
-func openManagedTunnel(ctx context.Context, passwords TunnelPasswordSource, target TunnelTarget, targetKey string) (*managedTunnel, error) {
+func openManagedTunnel(
+	ctx context.Context,
+	passwords TunnelPasswordSource,
+	target TunnelTarget,
+	targetKey string,
+	hooks tunnelManagerHooks,
+) (*managedTunnel, error) {
 	password, err := passwords.Password(ctx, target.CredentialRef)
 	defer zeroBytes(password)
 	if err != nil {
@@ -312,15 +439,33 @@ func openManagedTunnel(ctx context.Context, passwords TunnelPasswordSource, targ
 		},
 	}
 	handshakeFinished := make(chan struct{})
+	handshakeWatcherDone := make(chan struct{})
+	var handshakeMu sync.Mutex
+	handshakeReturned := false
 	go func() {
+		defer close(handshakeWatcherDone)
+		if hooks.beforeHandshakeWatch != nil {
+			hooks.beforeHandshakeWatch()
+		}
 		select {
 		case <-ctx.Done():
-			_ = rawConnection.Close()
+			handshakeMu.Lock()
+			if !handshakeReturned {
+				_ = rawConnection.Close()
+			}
+			handshakeMu.Unlock()
 		case <-handshakeFinished:
 		}
 	}()
 	sshConnection, channels, requests, err := ssh.NewClientConn(rawConnection, serverAddress, config)
+	if hooks.afterHandshake != nil {
+		hooks.afterHandshake()
+	}
+	handshakeMu.Lock()
+	handshakeReturned = true
+	handshakeMu.Unlock()
 	close(handshakeFinished)
+	<-handshakeWatcherDone
 	config.Auth = nil
 	if err != nil {
 		_ = rawConnection.Close()
@@ -328,6 +473,10 @@ func openManagedTunnel(ctx context.Context, passwords TunnelPasswordSource, targ
 			return nil, contextErr
 		}
 		return nil, fmt.Errorf("establish AutoDL SSH session: %w", err)
+	}
+	if contextErr := ctx.Err(); contextErr != nil {
+		_ = sshConnection.Close()
+		return nil, contextErr
 	}
 	client := ssh.NewClient(sshConnection, channels, requests)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -405,19 +554,35 @@ func (tunnel *managedTunnel) forward(local net.Conn) {
 		return
 	}
 	defer remote.Close()
-	copied := make(chan struct{}, 2)
+	copied := make(chan error, 2)
 	go func() {
-		_, _ = io.Copy(remote, local)
-		copied <- struct{}{}
+		copied <- copyAndCloseWrite(remote, local)
 	}()
 	go func() {
-		_, _ = io.Copy(local, remote)
-		copied <- struct{}{}
+		copied <- copyAndCloseWrite(local, remote)
 	}()
+	if firstErr := <-copied; firstErr != nil {
+		_ = local.Close()
+		_ = remote.Close()
+	}
 	<-copied
-	_ = local.Close()
-	_ = remote.Close()
-	<-copied
+}
+
+type closeWriter interface {
+	CloseWrite() error
+}
+
+func copyAndCloseWrite(destination io.Writer, source io.Reader) error {
+	if _, err := io.Copy(destination, source); err != nil {
+		return err
+	}
+	if halfCloser, ok := destination.(closeWriter); ok {
+		return halfCloser.CloseWrite()
+	}
+	if closer, ok := destination.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
 }
 
 func (tunnel *managedTunnel) shutdown() {
