@@ -1830,7 +1830,7 @@ func TestAutoDLActiveHandoffPersistsFirstCompleteCheckpoint(t *testing.T) {
 	want := completeAutoDLRuntimeIdentity("zimage-t2i")
 	workflow := NewGenerationService(nil, store, nil)
 	handedOff := workflow.handOffPendingGeneration(task, task, coregeneration.Response{
-		ID:     coregeneration.RouteAutoDLZImage + ":prompt-1",
+		ID:     mustAutoDLZImageProviderTaskID(t, "instance-a", "prompt-1"),
 		Status: "running",
 		Metadata: map[string]any{
 			"runtime_state": want,
@@ -1843,7 +1843,7 @@ func TestAutoDLActiveHandoffPersistsFirstCompleteCheckpoint(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("Get() = found %v err %v", found, err)
 	}
-	if got.RuntimeState != want || got.ProviderTaskID != coregeneration.RouteAutoDLZImage+":prompt-1" {
+	if got.RuntimeState != want || got.ProviderTaskID != mustAutoDLZImageProviderTaskID(t, "instance-a", "prompt-1") {
 		t.Fatalf("handoff identity/provider = %+v/%q, want %+v", got.RuntimeState, got.ProviderTaskID, want)
 	}
 }
@@ -1886,7 +1886,7 @@ func TestAutoDLActiveHandoffRejectsConflictingCheckpoint(t *testing.T) {
 	conflicting.WorkflowProfileID = "zimage-i2i"
 	workflow := NewGenerationService(nil, store, nil)
 	if !workflow.handOffPendingGeneration(task, task, coregeneration.Response{
-		ID:       coregeneration.RouteAutoDLZImage + ":prompt-2",
+		ID:       mustAutoDLZImageProviderTaskID(t, "instance-a", "prompt-2"),
 		Status:   "running",
 		Metadata: map[string]any{"runtime_state": conflicting},
 	}, "create") {
@@ -1919,7 +1919,7 @@ func TestAutoDLActiveHandoffCompletesAnchorAfterMissedProgressCheckpoint(t *test
 	want := completeAutoDLRuntimeIdentity("zimage-t2i")
 	workflow := NewGenerationService(nil, store, nil)
 	if !workflow.handOffPendingGeneration(task, task, coregeneration.Response{
-		ID:       coregeneration.RouteAutoDLZImage + ":prompt-1",
+		ID:       mustAutoDLZImageProviderTaskID(t, "instance-a", "prompt-1"),
 		Status:   "running",
 		Metadata: map[string]any{"runtime_state": want},
 	}, "create") {
@@ -1935,14 +1935,14 @@ func TestAutoDLActiveHandoffRejectsMissingPromptIdentity(t *testing.T) {
 	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
 	task := GenerationTaskRecord{
 		ID: "task-handoff-missing-prompt", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage,
-		Status: "running", ProviderTaskID: coregeneration.RouteAutoDLZImage + ":stale-prompt",
+		Status: "running", ProviderTaskID: mustAutoDLZImageProviderTaskID(t, "instance-a", "stale-prompt"),
 	}
 	if err := store.Upsert(task); err != nil {
 		t.Fatal(err)
 	}
 	workflow := NewGenerationService(nil, store, nil)
 	if !workflow.handOffPendingGeneration(task, task, coregeneration.Response{
-		ID:     coregeneration.RouteAutoDLZImage + ":prompt-missing-runtime",
+		ID:     mustAutoDLZImageProviderTaskID(t, "instance-a", "prompt-missing-runtime"),
 		Status: "running",
 	}, "create") {
 		t.Fatal("missing runtime handoff was not persisted as terminal failure")
@@ -1968,7 +1968,7 @@ func TestAutoDLActiveHandoffRejectsProviderPromptMismatch(t *testing.T) {
 	}
 	workflow := NewGenerationService(nil, store, nil)
 	if !workflow.handOffPendingGeneration(task, task, coregeneration.Response{
-		ID:       coregeneration.RouteAutoDLZImage + ":stale-prompt",
+		ID:       mustAutoDLZImageProviderTaskID(t, "instance-a", "stale-prompt"),
 		Status:   "running",
 		Metadata: map[string]any{"runtime_state": checkpoint},
 	}, "create") {
@@ -1988,7 +1988,7 @@ func TestAutoDLZImagePollConflictDoesNotImportAsset(t *testing.T) {
 	current := completeAutoDLRuntimeIdentity("zimage-t2i")
 	task := GenerationTaskRecord{
 		ID: "task-z-poll-conflict", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage,
-		Status: "submitted", ProviderTaskID: coregeneration.RouteAutoDLZImage + ":prompt-1", RuntimeState: current,
+		Status: "submitted", ProviderTaskID: mustAutoDLZImageProviderTaskID(t, "instance-a", "prompt-1"), RuntimeState: current,
 	}
 	if err := store.Upsert(task); err != nil {
 		t.Fatal(err)
@@ -1996,7 +1996,7 @@ func TestAutoDLZImagePollConflictDoesNotImportAsset(t *testing.T) {
 	conflicting := current
 	conflicting.WorkflowDigest = "sha256:conflict"
 	provider := &stubImageProvider{getResponse: coregeneration.Response{
-		ID: coregeneration.RouteAutoDLZImage + ":prompt-1", Status: "completed",
+		ID: mustAutoDLZImageProviderTaskID(t, "instance-a", "prompt-1"), Status: "completed",
 		Assets: []coregeneration.Asset{{
 			Kind: coregeneration.KindImage, MIMEType: "image/png",
 			Base64: base64.StdEncoding.EncodeToString(testPNGBytes()),
@@ -2026,6 +2026,35 @@ func TestAutoDLZImagePollConflictDoesNotImportAsset(t *testing.T) {
 	}
 }
 
+func TestAutoDLZImagePollRejectsStoredProviderTaskIDBeforeProviderCall(t *testing.T) {
+	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	checkpoint := completeAutoDLRuntimeIdentity("zimage-t2i")
+	task := GenerationTaskRecord{
+		ID: "task-z-poll-invalid-provider-id", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage,
+		Status:         "submitted",
+		ProviderTaskID: "autodl.zimage:aW5zdGFuY2UtYg:cHJvbXB0LTE",
+		RuntimeState:   checkpoint,
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	provider := &stubImageProvider{getResponse: coregeneration.Response{
+		Status: "running", Metadata: map[string]any{"runtime_state": checkpoint},
+	}}
+	workflow := NewGenerationService(nil, store, nil)
+	workflow.generationProviderFactory = func(coregeneration.ModelRoute) (coregeneration.Provider, error) { return provider, nil }
+	workflow.mediaLinkReadiness = func(context.Context, string) (bool, string) { return true, "" }
+	workflow.PollGenerationTask(context.Background(), task)
+
+	if provider.getCalls.Load() != 0 {
+		t.Fatalf("provider.Get calls = %d, want 0 for mismatched stored identity", provider.getCalls.Load())
+	}
+	got, found, err := store.Get(task.ID)
+	if err != nil || !found || got.Status != "failed" || got.ErrorCode != generationRuntimeStateConflictCode {
+		t.Fatalf("stored task = found %v err %v task %+v", found, err, got)
+	}
+}
+
 func TestAutoDLZImagePollDeleteRaceCompensatesAsset(t *testing.T) {
 	root := t.TempDir()
 	dbPath := filepath.Join(root, "settings.db")
@@ -2034,13 +2063,13 @@ func TestAutoDLZImagePollDeleteRaceCompensatesAsset(t *testing.T) {
 	current := completeAutoDLRuntimeIdentity("zimage-t2i")
 	task := GenerationTaskRecord{
 		ID: "task-z-poll-delete", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage,
-		Status: "submitted", ProviderTaskID: coregeneration.RouteAutoDLZImage + ":prompt-1", RuntimeState: current,
+		Status: "submitted", ProviderTaskID: mustAutoDLZImageProviderTaskID(t, "instance-a", "prompt-1"), RuntimeState: current,
 	}
 	if err := store.Upsert(task); err != nil {
 		t.Fatal(err)
 	}
 	provider := &stubImageProvider{getResponse: coregeneration.Response{
-		ID: coregeneration.RouteAutoDLZImage + ":prompt-1", Status: "completed",
+		ID: mustAutoDLZImageProviderTaskID(t, "instance-a", "prompt-1"), Status: "completed",
 		Assets: []coregeneration.Asset{{
 			Kind: coregeneration.KindImage, MIMEType: "image/png",
 			Base64: base64.StdEncoding.EncodeToString(testPNGBytes()),
@@ -2090,7 +2119,7 @@ func TestAutoDLZImageManualPollConflictDoesNotImportAsset(t *testing.T) {
 	current := completeAutoDLRuntimeIdentity("zimage-t2i")
 	task := GenerationTaskRecord{
 		ID: "task-z-manual-poll-conflict", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage,
-		Status: "submitted", ProviderTaskID: coregeneration.RouteAutoDLZImage + ":prompt-1", RuntimeState: current,
+		Status: "submitted", ProviderTaskID: mustAutoDLZImageProviderTaskID(t, "instance-a", "prompt-1"), RuntimeState: current,
 	}
 	if err := store.Upsert(task); err != nil {
 		t.Fatal(err)
@@ -2098,7 +2127,7 @@ func TestAutoDLZImageManualPollConflictDoesNotImportAsset(t *testing.T) {
 	conflicting := current
 	conflicting.WorkflowDigest = "sha256:conflict"
 	provider := &stubImageProvider{getResponse: coregeneration.Response{
-		ID: coregeneration.RouteAutoDLZImage + ":prompt-1", Status: "completed",
+		ID: mustAutoDLZImageProviderTaskID(t, "instance-a", "prompt-1"), Status: "completed",
 		Assets: []coregeneration.Asset{{
 			Kind: coregeneration.KindImage, MIMEType: "image/png",
 			Base64: base64.StdEncoding.EncodeToString(testPNGBytes()),
@@ -2130,13 +2159,13 @@ func TestAutoDLZImageManualPollDeleteRaceCompensatesAsset(t *testing.T) {
 	checkpoint := completeAutoDLRuntimeIdentity("zimage-t2i")
 	task := GenerationTaskRecord{
 		ID: "task-z-manual-poll-delete", Kind: "image", RouteID: coregeneration.RouteAutoDLZImage,
-		Status: "submitted", ProviderTaskID: coregeneration.RouteAutoDLZImage + ":prompt-1", RuntimeState: checkpoint,
+		Status: "submitted", ProviderTaskID: mustAutoDLZImageProviderTaskID(t, "instance-a", "prompt-1"), RuntimeState: checkpoint,
 	}
 	if err := store.Upsert(task); err != nil {
 		t.Fatal(err)
 	}
 	provider := &stubImageProvider{getResponse: coregeneration.Response{
-		ID: coregeneration.RouteAutoDLZImage + ":prompt-1", Status: "completed",
+		ID: mustAutoDLZImageProviderTaskID(t, "instance-a", "prompt-1"), Status: "completed",
 		Assets: []coregeneration.Asset{{
 			Kind: coregeneration.KindImage, MIMEType: "image/png",
 			Base64: base64.StdEncoding.EncodeToString(testPNGBytes()),
@@ -2434,6 +2463,98 @@ func TestAutoDLAssetCompensationPreservesConcurrentDeduplicatedTaskAsset(t *test
 	}
 }
 
+func TestGenerationAssetClaimsProtectCrossProviderDedupeBeforeAssociation(t *testing.T) {
+	tests := []struct {
+		name   string
+		routeA string
+		routeB string
+	}{
+		{name: "non AutoDL creator and AutoDL reuser", routeA: coregeneration.RouteDMXGPTImage2, routeB: coregeneration.RouteAutoDLZImage},
+		{name: "AutoDL creator and non AutoDL reuser", routeA: coregeneration.RouteAutoDLZImage, routeB: coregeneration.RouteDMXGPTImage2},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			dbPath := filepath.Join(root, "settings.db")
+			store := NewGenerationTaskService(dbPath, nil)
+			mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+			checkpoint := completeAutoDLRuntimeIdentity("zimage-t2i")
+			taskA := GenerationTaskRecord{ID: "task-cross-provider-a", Kind: "image", RouteID: test.routeA, Status: "running"}
+			taskB := GenerationTaskRecord{ID: "task-cross-provider-b", Kind: "image", RouteID: test.routeB, Status: "running"}
+			if isAutoDLGenerationRouteID(taskA.RouteID) {
+				taskA.RuntimeState = checkpoint
+			}
+			if isAutoDLGenerationRouteID(taskB.RouteID) {
+				taskB.RuntimeState = checkpoint
+			}
+			if err := store.Upsert(taskA); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Upsert(taskB); err != nil {
+				t.Fatal(err)
+			}
+			workflow := NewGenerationService(nil, store, mediaAssets)
+			payload := base64.StdEncoding.EncodeToString(testPNGBytes())
+			eventFor := func(task GenerationTaskRecord) coregeneration.ProgressEvent {
+				response := coregeneration.Response{
+					Status: "running",
+					Assets: []coregeneration.Asset{{Kind: coregeneration.KindImage, MIMEType: "image/png", Base64: payload}},
+				}
+				if isAutoDLGenerationRouteID(task.RouteID) {
+					response.Metadata = map[string]any{"runtime_state": checkpoint}
+				}
+				return coregeneration.ProgressEvent{Response: response}
+			}
+			aCached := make(chan struct{})
+			bCached := make(chan struct{})
+			releaseA := make(chan struct{})
+			releaseB := make(chan struct{})
+			workflow.generationAssetsCachedHook = func(taskID string) {
+				switch taskID {
+				case taskA.ID:
+					close(aCached)
+					<-releaseA
+				case taskB.ID:
+					close(bCached)
+					<-releaseB
+				}
+			}
+			doneA := make(chan struct{})
+			go func() {
+				defer close(doneA)
+				workflow.persistGenerationProgress(context.Background(), taskA, eventFor(taskA), "", "", "")
+			}()
+			<-aCached
+			doneB := make(chan struct{})
+			go func() {
+				defer close(doneB)
+				workflow.persistGenerationProgress(context.Background(), taskB, eventFor(taskB), "", "", "")
+			}()
+			<-bCached
+			if deleted, err := store.Delete(taskA.ID); err != nil || !deleted {
+				t.Fatalf("Delete(task A) = %v, %v", deleted, err)
+			}
+			close(releaseA)
+			<-doneA
+			close(releaseB)
+			<-doneB
+
+			storedB, found, err := store.Get(taskB.ID)
+			if err != nil || !found || len(storedB.Assets) != 1 || storedB.Assets[0].AssetID == "" {
+				t.Fatalf("task B association = found %v err %v task %+v", found, err, storedB)
+			}
+			assetID := storedB.Assets[0].AssetID
+			asset, found, err := mediaAssets.Get(assetID)
+			if err != nil || !found {
+				t.Fatalf("asset = found %v err %v", found, err)
+			}
+			if _, err := os.Stat(asset.FilePath); err != nil {
+				t.Fatalf("asset file missing: %v", err)
+			}
+		})
+	}
+}
+
 func newAutoDLH3DispatchWorkflow(store *GenerationTaskService, mediaAssets *media.MediaAssets, provider coregeneration.Provider) *GenerationService {
 	workflow := NewGenerationService(nil, store, mediaAssets)
 	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
@@ -2466,6 +2587,15 @@ func autoDLH3SubmittedResponse(checkpoint GenerationTaskRuntimeState, withAsset 
 		}}
 	}
 	return response
+}
+
+func mustAutoDLZImageProviderTaskID(t *testing.T, instanceProfileID string, promptID string) string {
+	t.Helper()
+	value, err := encodeAutoDLZImageProviderTaskID(instanceProfileID, promptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return value
 }
 
 func completeAutoDLRuntimeIdentity(workflowProfileID string) GenerationTaskRuntimeState {

@@ -513,9 +513,10 @@ func (workflow *GenerationService) CreateGenerationMessage(ctx context.Context, 
 		}
 		return messageResponse, http.StatusOK, nil
 	}
-	response = workflow.cacheGenerationResponseAssetsWithOptions(ctx, response, generationMediaSaveOptionsWithTitle(projectID, payload.ConversationID, payload.SectionID, payload.AssetTitle))
+	response, assetClaims := workflow.cacheGenerationResponseAssetsWithOptionsClaimed(ctx, response, generationMediaSaveOptionsWithTitle(projectID, payload.ConversationID, payload.SectionID, payload.AssetTitle))
 
 	messageResponse := generationResponseWithAssetTitle(GenerationResponseFromCore(response, payload.Kind), payload.AssetTitle)
+	persistedAssets := !ShouldPersistGenerationTask(route)
 	if ShouldPersistGenerationTask(route) {
 		task := GenerationTaskFromMessage(payload, route, messageResponse)
 		// A synchronous completed task has no persisted notification yet. Suppress
@@ -530,12 +531,14 @@ func (workflow *GenerationService) CreateGenerationMessage(ctx context.Context, 
 		if persistErr != nil {
 			messageResponse.Message = AppendStorageWarning(messageResponse.Message, persistErr)
 		} else {
+			persistedAssets = true
 			messageResponse.Assets = generationAssetsWithTaskSlots(task.ID, task.Assets)
 			workflow.trackGenerationNotificationTarget(task, payload.NotificationTarget)
 			workflow.syncGenerationNotificationTask(task)
 			_ = workflow.generationTasks.RecordAttempt(task.ID, "create", messageResponse.Status, messageResponse.Message, nil)
 		}
 	}
+	workflow.finalizeGenerationAssetClaims(assetClaims, persistedAssets)
 	workflow.appendStudioAssistantTranscript(conversation, messageResponse)
 
 	return messageResponse, http.StatusOK, nil

@@ -440,26 +440,6 @@ func (workflow *GenerationService) cacheGenerationAssetClaimed(
 	return cached, claim, nil
 }
 
-func (workflow *GenerationService) cleanupCreatedGenerationAssets(assetIDs []string) {
-	if workflow == nil || workflow.mediaAssets == nil {
-		return
-	}
-	seen := map[string]struct{}{}
-	for index := len(assetIDs) - 1; index >= 0; index-- {
-		assetID := strings.TrimSpace(assetIDs[index])
-		if assetID == "" {
-			continue
-		}
-		if _, exists := seen[assetID]; exists {
-			continue
-		}
-		seen[assetID] = struct{}{}
-		if _, err := workflow.mediaAssets.DeleteIfUnreferenced(assetID); err != nil {
-			slog.Warn("generation asset compensation failed", "asset_id", assetID, "error", sanitizedLogString(err.Error()))
-		}
-	}
-}
-
 func (workflow *GenerationService) finalizeGenerationAssetClaims(claims []media.MediaAssetClaim, persisted bool) {
 	if workflow == nil || workflow.mediaAssets == nil || len(claims) == 0 {
 		return

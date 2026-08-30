@@ -5,9 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -55,6 +57,7 @@ type MediaAssets struct {
 	metadataBackfillAttempts map[string]struct{}
 	renameFile               func(string, string) error
 	removeFile               func(string) error
+	deleteIfUnreferenced     func(string) (bool, error)
 	initErr                  error
 }
 
@@ -140,6 +143,8 @@ func NewMediaAssets(dbPath string, mediaDir string) *MediaAssets {
 	}
 
 	store.repo = repo
+	store.deleteIfUnreferenced = repo.DeleteMediaAssetIfUnreferenced
+	store.reconcilePendingMediaAssetCleanup()
 	return store
 }
 
@@ -172,7 +177,10 @@ func NewMediaAssetsFromRepository(repo *repository.MediaAssetRepository, mediaDi
 	}
 	if err := os.MkdirAll(mediaDir, 0o700); err != nil {
 		store.initErr = fmt.Errorf("creating media asset directory: %w", err)
+		return store
 	}
+	store.deleteIfUnreferenced = store.repo.DeleteMediaAssetIfUnreferenced
+	store.reconcilePendingMediaAssetCleanup()
 	return store
 }
 
@@ -988,8 +996,13 @@ func (store *MediaAssets) Delete(id string) (bool, error) {
 }
 
 type stagedMediaAssetFile struct {
-	original string
-	staged   string
+	Original string `json:"original"`
+	Staged   string `json:"staged"`
+}
+
+type mediaAssetCleanupJournal struct {
+	AssetID string                 `json:"assetId"`
+	Files   []stagedMediaAssetFile `json:"files"`
 }
 
 // DeleteIfUnreferenced removes an uncommitted generated asset without
@@ -1005,6 +1018,11 @@ func (store *MediaAssets) DeleteIfUnreferenced(id string) (bool, error) {
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	if journal, found, err := store.readMediaAssetCleanupJournalLocked(id); err != nil {
+		return false, err
+	} else if found {
+		return store.reconcileMediaAssetCleanupJournalLocked(journal)
+	}
 	model, err := store.repo.GetMediaAsset(id)
 	if repository.IsRecordNotFound(err) {
 		return false, store.removeStagedMediaAssetFilesLocked(id)
@@ -1013,35 +1031,15 @@ func (store *MediaAssets) DeleteIfUnreferenced(id string) (bool, error) {
 		return false, err
 	}
 	asset := store.mediaAssetRecordFromModel(model)
-	staged, err := store.stageMediaAssetFilesLocked(asset)
+	journal, err := store.writeMediaAssetCleanupJournalLocked(asset)
 	if err != nil {
 		return false, err
 	}
-	deleted, deleteErr := store.repo.DeleteMediaAssetIfUnreferenced(id)
-	if deleteErr != nil || !deleted {
-		restoreErr := store.restoreStagedMediaAssetFilesLocked(staged)
-		if deleteErr != nil {
-			if restoreErr != nil {
-				return false, fmt.Errorf("%v; restoring staged media asset: %w", deleteErr, restoreErr)
-			}
-			return false, deleteErr
-		}
-		if restoreErr != nil {
-			return false, fmt.Errorf("restoring referenced media asset: %w", restoreErr)
-		}
-		return false, nil
-	}
-	if err := store.removeStagedFilesLocked(staged); err != nil {
-		return true, err
-	}
-	return true, nil
+	return store.reconcileMediaAssetCleanupJournalLocked(journal)
 }
 
-func (store *MediaAssets) stageMediaAssetFilesLocked(asset MediaAsset) ([]stagedMediaAssetFile, error) {
+func (store *MediaAssets) mediaAssetCleanupJournalForAsset(asset MediaAsset) mediaAssetCleanupJournal {
 	trashDir := filepath.Join(store.dir, ".trash")
-	if err := os.MkdirAll(trashDir, 0o700); err != nil {
-		return nil, fmt.Errorf("creating media asset trash: %w", err)
-	}
 	files := []struct {
 		path string
 		role string
@@ -1053,13 +1051,141 @@ func (store *MediaAssets) stageMediaAssetFilesLocked(asset MediaAsset) ([]staged
 		}
 		ext := filepath.Ext(file.path)
 		target := filepath.Join(trashDir, asset.ID+"-"+file.role+ext)
-		if err := store.renameMediaAssetFile(file.path, target); err != nil {
-			_ = store.restoreStagedMediaAssetFilesLocked(staged)
-			return nil, err
-		}
-		staged = append(staged, stagedMediaAssetFile{original: file.path, staged: target})
+		staged = append(staged, stagedMediaAssetFile{Original: file.path, Staged: target})
 	}
-	return staged, nil
+	return mediaAssetCleanupJournal{AssetID: asset.ID, Files: staged}
+}
+
+func (store *MediaAssets) writeMediaAssetCleanupJournalLocked(asset MediaAsset) (mediaAssetCleanupJournal, error) {
+	journal := store.mediaAssetCleanupJournalForAsset(asset)
+	trashDir := filepath.Join(store.dir, ".trash")
+	if err := os.MkdirAll(trashDir, 0o700); err != nil {
+		return mediaAssetCleanupJournal{}, fmt.Errorf("creating media asset cleanup directory")
+	}
+	data, err := json.Marshal(journal)
+	if err != nil {
+		return mediaAssetCleanupJournal{}, fmt.Errorf("encoding media asset cleanup journal: %w", err)
+	}
+	journalPath := store.mediaAssetCleanupJournalPath(asset.ID)
+	temporaryPath := journalPath + ".tmp"
+	if err := os.WriteFile(temporaryPath, data, 0o600); err != nil {
+		return mediaAssetCleanupJournal{}, fmt.Errorf("writing media asset cleanup journal %q", filepath.Base(temporaryPath))
+	}
+	if err := os.Rename(temporaryPath, journalPath); err != nil {
+		_ = os.Remove(temporaryPath)
+		return mediaAssetCleanupJournal{}, fmt.Errorf("committing media asset cleanup journal %q", filepath.Base(journalPath))
+	}
+	return journal, nil
+}
+
+func (store *MediaAssets) readMediaAssetCleanupJournalLocked(id string) (mediaAssetCleanupJournal, bool, error) {
+	journalPath := store.mediaAssetCleanupJournalPath(id)
+	data, err := os.ReadFile(journalPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return mediaAssetCleanupJournal{}, false, nil
+	}
+	if err != nil {
+		return mediaAssetCleanupJournal{}, false, fmt.Errorf("reading media asset cleanup journal %q", filepath.Base(journalPath))
+	}
+	journal := mediaAssetCleanupJournal{}
+	if err := json.Unmarshal(data, &journal); err != nil || strings.TrimSpace(journal.AssetID) != strings.TrimSpace(id) {
+		return mediaAssetCleanupJournal{}, false, fmt.Errorf("invalid media asset cleanup journal %q", filepath.Base(journalPath))
+	}
+	trashDir := filepath.Join(store.dir, ".trash")
+	for _, file := range journal.Files {
+		withinTrash, pathErr := pathWithinRoot(file.Staged, trashDir)
+		if pathErr != nil || !withinTrash || strings.TrimSpace(file.Original) == "" {
+			return mediaAssetCleanupJournal{}, false, fmt.Errorf("unsafe media asset cleanup journal %q", filepath.Base(journalPath))
+		}
+	}
+	return journal, true, nil
+}
+
+func (store *MediaAssets) reconcileMediaAssetCleanupJournalLocked(journal mediaAssetCleanupJournal) (bool, error) {
+	model, err := store.repo.GetMediaAsset(journal.AssetID)
+	if repository.IsRecordNotFound(err) {
+		if removeErr := store.removeStagedFilesLocked(journal.Files); removeErr != nil {
+			return false, removeErr
+		}
+		return false, store.removeMediaAssetCleanupJournalLocked(journal.AssetID)
+	}
+	if err != nil {
+		return false, err
+	}
+	expected := store.mediaAssetCleanupJournalForAsset(store.mediaAssetRecordFromModel(model))
+	if !sameMediaAssetCleanupFiles(journal.Files, expected.Files) {
+		return false, fmt.Errorf("media asset cleanup journal does not match persisted storage")
+	}
+	if err := store.ensureMediaAssetFilesStagedLocked(journal.Files); err != nil {
+		return false, err
+	}
+	deleteIfUnreferenced := store.deleteIfUnreferenced
+	if deleteIfUnreferenced == nil {
+		deleteIfUnreferenced = store.repo.DeleteMediaAssetIfUnreferenced
+	}
+	deleted, deleteErr := deleteIfUnreferenced(journal.AssetID)
+	if deleteErr != nil || !deleted {
+		restoreErr := store.restoreStagedMediaAssetFilesLocked(journal.Files)
+		if restoreErr == nil {
+			if journalErr := store.removeMediaAssetCleanupJournalLocked(journal.AssetID); journalErr != nil {
+				restoreErr = journalErr
+			}
+		}
+		if deleteErr != nil {
+			if restoreErr != nil {
+				return false, fmt.Errorf("conditional media asset delete failed; restoring staged media asset: %w", restoreErr)
+			}
+			return false, fmt.Errorf("conditional media asset delete failed: %w", deleteErr)
+		}
+		if restoreErr != nil {
+			return false, fmt.Errorf("restoring referenced media asset: %w", restoreErr)
+		}
+		return false, nil
+	}
+	if err := store.removeStagedFilesLocked(journal.Files); err != nil {
+		return true, err
+	}
+	if err := store.removeMediaAssetCleanupJournalLocked(journal.AssetID); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func sameMediaAssetCleanupFiles(left []stagedMediaAssetFile, right []stagedMediaAssetFile) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func (store *MediaAssets) ensureMediaAssetFilesStagedLocked(files []stagedMediaAssetFile) error {
+	for _, file := range files {
+		_, originalErr := os.Stat(file.Original)
+		_, stagedErr := os.Stat(file.Staged)
+		if originalErr != nil && !errors.Is(originalErr, os.ErrNotExist) {
+			return fmt.Errorf("checking media asset file %q: %w", filepath.Base(file.Original), originalErr)
+		}
+		if stagedErr != nil && !errors.Is(stagedErr, os.ErrNotExist) {
+			return fmt.Errorf("checking staged media asset file %q: %w", filepath.Base(file.Staged), stagedErr)
+		}
+		originalExists := originalErr == nil
+		stagedExists := stagedErr == nil
+		if originalExists && stagedExists {
+			return fmt.Errorf("media asset cleanup has both live and staged files")
+		}
+		if stagedExists || !originalExists {
+			continue
+		}
+		if err := store.renameMediaAssetFile(file.Original, file.Staged); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (store *MediaAssets) renameMediaAssetFile(source string, target string) error {
@@ -1075,7 +1201,18 @@ func (store *MediaAssets) renameMediaAssetFile(source string, target string) err
 
 func (store *MediaAssets) restoreStagedMediaAssetFilesLocked(files []stagedMediaAssetFile) error {
 	for index := len(files) - 1; index >= 0; index-- {
-		if err := store.renameMediaAssetFile(files[index].staged, files[index].original); err != nil {
+		file := files[index]
+		if _, err := os.Stat(file.Staged); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return fmt.Errorf("checking staged media asset file %q: %w", filepath.Base(file.Staged), err)
+		}
+		if _, err := os.Stat(file.Original); err == nil {
+			return fmt.Errorf("restoring staged media asset would overwrite a live file")
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("checking live media asset file %q: %w", filepath.Base(file.Original), err)
+		}
+		if err := store.renameMediaAssetFile(file.Staged, file.Original); err != nil {
 			return err
 		}
 	}
@@ -1089,8 +1226,8 @@ func (store *MediaAssets) removeStagedFilesLocked(files []stagedMediaAssetFile) 
 	}
 	var removeErr error
 	for _, file := range files {
-		if err := removeFile(file.staged); err != nil && !errors.Is(err, os.ErrNotExist) && removeErr == nil {
-			removeErr = fmt.Errorf("removing staged media asset file %q: %w", filepath.Base(file.staged), err)
+		if err := removeFile(file.Staged); err != nil && !errors.Is(err, os.ErrNotExist) && removeErr == nil {
+			removeErr = fmt.Errorf("removing staged media asset file %q: %w", filepath.Base(file.Staged), err)
 		}
 	}
 	return removeErr
@@ -1103,9 +1240,49 @@ func (store *MediaAssets) removeStagedMediaAssetFilesLocked(id string) error {
 	}
 	files := make([]stagedMediaAssetFile, 0, len(paths))
 	for _, path := range paths {
-		files = append(files, stagedMediaAssetFile{staged: path})
+		files = append(files, stagedMediaAssetFile{Staged: path})
 	}
 	return store.removeStagedFilesLocked(files)
+}
+
+func (store *MediaAssets) mediaAssetCleanupJournalPath(id string) string {
+	return filepath.Join(store.dir, ".trash", strings.TrimSpace(id)+".json")
+}
+
+func (store *MediaAssets) removeMediaAssetCleanupJournalLocked(id string) error {
+	removeFile := store.removeFile
+	if removeFile == nil {
+		removeFile = os.Remove
+	}
+	path := store.mediaAssetCleanupJournalPath(id)
+	if err := removeFile(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("removing media asset cleanup journal %q: %w", filepath.Base(path), err)
+	}
+	return nil
+}
+
+func (store *MediaAssets) reconcilePendingMediaAssetCleanup() {
+	if store == nil || store.repo == nil || store.initErr != nil {
+		return
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	paths, err := filepath.Glob(filepath.Join(store.dir, ".trash", "*.json"))
+	if err != nil {
+		slog.Warn("media asset cleanup scan remains pending")
+		return
+	}
+	for _, path := range paths {
+		id := strings.TrimSuffix(filepath.Base(path), ".json")
+		journal, found, readErr := store.readMediaAssetCleanupJournalLocked(id)
+		if readErr != nil || !found {
+			slog.Warn("media asset cleanup journal remains pending", "asset_id", id)
+			continue
+		}
+		if _, reconcileErr := store.reconcileMediaAssetCleanupJournalLocked(journal); reconcileErr != nil {
+			slog.Warn("media asset cleanup journal remains pending", "asset_id", id)
+		}
+	}
 }
 
 func (store *MediaAssets) UpdateFilename(id string, filename string) (MediaAsset, bool, error) {
