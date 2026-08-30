@@ -52,6 +52,15 @@ var (
 		"h3-ref2va":                  {},
 		"h3-fl2va":                   {},
 	}
+	blockedAutoDLReadyKinds = map[string]struct{}{
+		"flux-fp8-t2i":               {},
+		"flux-fp8-i2i":               {},
+		"flux-lustly-adult-t2i":      {},
+		"flux-lustly-adult-i2i":      {},
+		"flux-lustly-adult-portrait": {},
+		"flux-lustly-adult-fullbody": {},
+		"zimage-flux-refine":         {},
+	}
 
 	// These seven digests came from the 2026-08-30 read-only inspection. The
 	// user subsequently rejected those workflow files, so they can be stored
@@ -71,6 +80,23 @@ type autoDLPasswordStore interface {
 	Set(context.Context, string, string, string) error
 	Get(context.Context, string, string) (string, error)
 	Delete(context.Context, string, string) error
+}
+
+// AutoDLCredentialWriteError reports a Keychain write whose instance identity
+// is already durable. Callers must reuse InstanceID instead of creating a new
+// profile; the Keychain outcome may be unknown.
+type AutoDLCredentialWriteError struct {
+	InstanceID    string
+	CredentialRef string
+	Cause         error
+}
+
+func (err *AutoDLCredentialWriteError) Error() string {
+	return fmt.Sprintf("saving AutoDL credential for instance %s failed; outcome may be unknown", err.InstanceID)
+}
+
+func (err *AutoDLCredentialWriteError) Unwrap() error {
+	return err.Cause
 }
 
 // AutoDLWorkflowValidation records one instance/profile compatibility check.
@@ -268,17 +294,28 @@ func (service *Settings) SaveAutoDLInstance(ctx context.Context, mutation AutoDL
 	} else {
 		document.Instances[index] = profile
 	}
-	hasPassword := mutation.Password != ""
+	hasPassword := false
 	if mutation.Password == "" && index >= 0 {
 		hasPassword, err = probeAutoDLPassword(ctx, service.autoDLPasswords, profile.CredentialRef)
 		if err != nil {
 			return AutoDLInstanceResponse{}, err
 		}
 	}
-	if err := service.saveAutoDLDocumentWithPasswordLocked(ctx, document, profile, mutation.Password); err != nil {
+	if err := service.persistAutoDLDocumentLocked(document); err != nil {
 		return AutoDLInstanceResponse{}, err
 	}
-	return AutoDLInstanceResponse{AutoDLInstanceProfile: profile, HasPassword: hasPassword}, nil
+	response := AutoDLInstanceResponse{AutoDLInstanceProfile: profile, HasPassword: hasPassword}
+	if mutation.Password == "" {
+		return response, nil
+	}
+	if service.autoDLPasswords == nil {
+		return response, &AutoDLCredentialWriteError{InstanceID: profile.ID, CredentialRef: profile.CredentialRef, Cause: ErrAutoDLPasswordStoreUnavailable}
+	}
+	if err := service.autoDLPasswords.Set(ctx, autoDLKeychainService, profile.CredentialRef, mutation.Password); err != nil {
+		return response, &AutoDLCredentialWriteError{InstanceID: profile.ID, CredentialRef: profile.CredentialRef, Cause: err}
+	}
+	response.HasPassword = true
+	return response, nil
 }
 
 // ClearAutoDLInstancePassword removes only the exact credential reference for
@@ -388,10 +425,10 @@ func (service *Settings) SaveAutoDLWorkflowProfile(ctx context.Context, mutation
 	return service.saveAutoDLWorkflowProfile(ctx, mutation, false)
 }
 
-// saveValidatedAutoDLWorkflowProfile is the package-internal persistence path
-// reserved for a workflow validator. Public mutations cannot call it to grant
-// trusted readiness.
-func (service *Settings) saveValidatedAutoDLWorkflowProfile(ctx context.Context, mutation AutoDLWorkflowProfileMutation) (AutoDLWorkflowProfileResponse, error) {
+// SaveValidatedAutoDLWorkflowProfile is the backend-only persistence path for
+// a workflow validator. HTTP handlers must use SaveAutoDLWorkflowProfile;
+// calling this method is not a substitute for Task 6 semantic validation.
+func (service *Settings) SaveValidatedAutoDLWorkflowProfile(ctx context.Context, mutation AutoDLWorkflowProfileMutation) (AutoDLWorkflowProfileResponse, error) {
 	return service.saveAutoDLWorkflowProfile(ctx, mutation, true)
 }
 
@@ -456,10 +493,20 @@ func (service *Settings) SaveAutoDLWorkflowValidation(ctx context.Context, insta
 	}
 	profile := document.WorkflowProfiles[profileIndex]
 	status := strings.TrimSpace(validation.Status)
-	if !validAutoDLWorkflowStatus(status) || strings.TrimSpace(validation.WorkflowDigest) != profile.WorkflowDigest {
+	if !validAutoDLWorkflowStatus(status) {
 		return AutoDLInstanceResponse{}, fmt.Errorf("%w: workflow validation", ErrAutoDLSettingsInvalid)
 	}
-	if supplied := strings.TrimSpace(validation.APITemplateDigest); supplied != "" && supplied != profile.APITemplateDigest {
+	workflowDigest := strings.TrimSpace(validation.WorkflowDigest)
+	apiTemplateDigest := strings.TrimSpace(validation.APITemplateDigest)
+	if status == AutoDLWorkflowStatusReady &&
+		(workflowDigest == "" || workflowDigest != profile.WorkflowDigest ||
+			apiTemplateDigest == "" || apiTemplateDigest != profile.APITemplateDigest) {
+		return AutoDLInstanceResponse{}, fmt.Errorf("%w: ready workflow validation digests", ErrAutoDLSettingsInvalid)
+	}
+	if status != AutoDLWorkflowStatusReady && workflowDigest != "" && workflowDigest != profile.WorkflowDigest {
+		return AutoDLInstanceResponse{}, fmt.Errorf("%w: workflow validation", ErrAutoDLSettingsInvalid)
+	}
+	if status != AutoDLWorkflowStatusReady && apiTemplateDigest != "" && apiTemplateDigest != profile.APITemplateDigest {
 		return AutoDLInstanceResponse{}, fmt.Errorf("%w: API template validation", ErrAutoDLSettingsInvalid)
 	}
 	validation.WorkflowProfileID = profileID
@@ -563,38 +610,6 @@ func (service *Settings) persistAutoDLDocumentLocked(document autoDLSettingsDocu
 	}
 	if err := service.appSettings.SetAppSetting(autoDLSettingsKey, string(encoded)); err != nil {
 		return fmt.Errorf("saving AutoDL settings: %w", err)
-	}
-	return nil
-}
-
-func (service *Settings) saveAutoDLDocumentWithPasswordLocked(ctx context.Context, document autoDLSettingsDocument, profile AutoDLInstanceProfile, password string) error {
-	if password == "" {
-		return service.persistAutoDLDocumentLocked(document)
-	}
-	if service.autoDLPasswords == nil {
-		return ErrAutoDLPasswordStoreUnavailable
-	}
-	previous, getErr := service.autoDLPasswords.Get(ctx, autoDLKeychainService, profile.CredentialRef)
-	if getErr != nil && !errors.Is(getErr, platformkeychain.ErrNotFound) {
-		return fmt.Errorf("reading prior AutoDL password: %w", getErr)
-	}
-	hadPrevious := getErr == nil
-	if err := service.autoDLPasswords.Set(ctx, autoDLKeychainService, profile.CredentialRef, password); err != nil {
-		return fmt.Errorf("saving AutoDL password: %w", err)
-	}
-	if err := service.persistAutoDLDocumentLocked(document); err != nil {
-		compensationCtx, cancel := autoDLCompensationContext(ctx)
-		defer cancel()
-		var rollbackErr error
-		if hadPrevious {
-			rollbackErr = service.autoDLPasswords.Set(compensationCtx, autoDLKeychainService, profile.CredentialRef, previous)
-		} else {
-			rollbackErr = service.autoDLPasswords.Delete(compensationCtx, autoDLKeychainService, profile.CredentialRef)
-		}
-		if rollbackErr != nil {
-			return errors.Join(err, fmt.Errorf("rolling back AutoDL password: %w", rollbackErr))
-		}
-		return err
 	}
 	return nil
 }
@@ -710,6 +725,7 @@ func normalizeAutoDLWorkflowProfile(mutation AutoDLWorkflowProfileMutation, trus
 		status = AutoDLWorkflowStatusInvalid
 	}
 	if trustedValidation && len(mutation.Workflow) > 0 && len(mutation.APITemplate) > 0 &&
+		!isBlockedAutoDLReadyKind(kind) &&
 		!isRejectedAutoDLWorkflowDigest(autoDLExactPayloadDigest(mutation.Workflow)) {
 		status = AutoDLWorkflowStatusReady
 	}
@@ -732,10 +748,9 @@ func normalizeAutoDLWorkflowProfile(mutation AutoDLWorkflowProfileMutation, trus
 }
 
 func autoDLPayloadDigest(raw json.RawMessage) string {
-	canonical := raw
-	var compact bytes.Buffer
-	if err := json.Compact(&compact, raw); err == nil {
-		canonical = compact.Bytes()
+	canonical, err := json.Marshal(json.RawMessage(raw))
+	if err != nil {
+		canonical = raw
 	}
 	digest := sha256.Sum256(canonical)
 	return fmt.Sprintf("%x", digest[:])
@@ -747,7 +762,8 @@ func autoDLExactPayloadDigest(raw json.RawMessage) string {
 }
 
 func normalizeStoredAutoDLWorkflowStatus(profile AutoDLWorkflowProfile) string {
-	if len(profile.Workflow) == 0 || len(profile.APITemplate) == 0 || isRejectedAutoDLWorkflowDigest(profile.WorkflowDigest) {
+	if len(profile.Workflow) == 0 || len(profile.APITemplate) == 0 ||
+		isBlockedAutoDLReadyKind(profile.Kind) || isRejectedAutoDLWorkflowDigest(profile.WorkflowDigest) {
 		return AutoDLWorkflowStatusNeedsRevalidation
 	}
 	return profile.Status
@@ -760,6 +776,11 @@ func isRejectedAutoDLWorkflowDigest(workflowDigest string) bool {
 		return true
 	}
 	return false
+}
+
+func isBlockedAutoDLReadyKind(kind string) bool {
+	_, blocked := blockedAutoDLReadyKinds[kind]
+	return blocked
 }
 
 func autoDLWorkflowResponse(profile AutoDLWorkflowProfile) AutoDLWorkflowProfileResponse {

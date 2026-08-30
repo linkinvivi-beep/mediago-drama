@@ -223,24 +223,98 @@ func TestAutoDLDeleteInstanceDeletesOnlyItsCredential(t *testing.T) {
 	}
 }
 
-func TestAutoDLSavePasswordReportsCompensationFailureWithIndependentContext(t *testing.T) {
-	primaryErr := errors.New("settings write failed")
-	rollbackErr := errors.New("credential rollback failed")
-	callerCtx, cancel := context.WithCancel(context.Background())
+func TestAutoDLSavePasswordPersistsTraceableIdentityBeforeCredentialWrite(t *testing.T) {
+	credentialErr := errors.New("credential write outcome unknown")
+	service, appStore, passwords := newAutoDLSettingsForTest()
+	identityWasDurable := false
+	passwords.beforeSet = func(_ string, account string) {
+		raw := appStore.value(autoDLSettingsKey)
+		identityWasDurable = strings.Contains(raw, account) && strings.Contains(raw, `"host":"gpu-a.example.com"`)
+	}
+	passwords.setErr = credentialErr
+
+	got, err := service.SaveAutoDLInstance(context.Background(), AutoDLInstanceMutation{
+		Name: "GPU A", SSHCommand: "ssh root@gpu-a.example.com", Password: "secret", ComfyPort: 6006,
+	})
+	var writeErr *AutoDLCredentialWriteError
+	if !errors.As(err, &writeErr) || !errors.Is(err, credentialErr) {
+		t.Fatalf("SaveAutoDLInstance() error = %v, want typed credential write error", err)
+	}
+	if got.ID == "" || got.CredentialRef == "" || writeErr.InstanceID != got.ID || writeErr.CredentialRef != got.CredentialRef {
+		t.Fatalf("response=%#v error=%#v, want matching stable identity", got, writeErr)
+	}
+	if !identityWasDurable {
+		t.Fatal("Keychain Set ran before the instance identity was durable")
+	}
+
+	passwords.setErr = nil
+	response, getErr := service.GetAutoDLSettings(context.Background())
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if len(response.Instances) != 1 || response.Instances[0].ID != got.ID || response.Instances[0].CredentialRef != got.CredentialRef {
+		t.Fatalf("GET response = %#v, want failed credential write identity to remain enumerable", response)
+	}
+
+	retried, retryErr := service.SaveAutoDLInstance(context.Background(), AutoDLInstanceMutation{
+		ID: got.ID, Name: "GPU A", SSHCommand: "ssh root@gpu-a.example.com", Password: "secret", ComfyPort: 6006,
+	})
+	if retryErr != nil || retried.ID != got.ID || !retried.HasPassword {
+		t.Fatalf("retry with durable id got=%#v error=%v, want same successful instance", retried, retryErr)
+	}
+	response, getErr = service.GetAutoDLSettings(context.Background())
+	if getErr != nil || len(response.Instances) != 1 || response.Instances[0].ID != got.ID {
+		t.Fatalf("GET after retry = %#v error=%v, want exactly one stable instance", response, getErr)
+	}
+}
+
+func TestAutoDLSavePasswordFailureKeepsUpdatedExistingIdentityTraceable(t *testing.T) {
+	credentialErr := errors.New("credential write outcome unknown")
+	service, _, passwords := newAutoDLSettingsForTest()
+	initial, err := service.SaveAutoDLInstance(context.Background(), AutoDLInstanceMutation{
+		Name: "GPU A", SSHCommand: "ssh root@gpu-old.example.com", ComfyPort: 6006,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	passwords.setErr = credentialErr
+
+	updated, err := service.SaveAutoDLInstance(context.Background(), AutoDLInstanceMutation{
+		ID: initial.ID, Name: "GPU A new route", SSHCommand: "ssh -p 16001 root@gpu-new.example.com", Password: "secret", ComfyPort: 6010,
+	})
+	var writeErr *AutoDLCredentialWriteError
+	if !errors.As(err, &writeErr) || writeErr.InstanceID != initial.ID || updated.ID != initial.ID || updated.CredentialRef != initial.CredentialRef {
+		t.Fatalf("updated=%#v error=%v, want same traceable instance identity", updated, err)
+	}
+
+	passwords.setErr = nil
+	response, getErr := service.GetAutoDLSettings(context.Background())
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if len(response.Instances) != 1 || response.Instances[0].ID != initial.ID || response.Instances[0].Host != "gpu-new.example.com" || response.Instances[0].ComfyPort != 6010 {
+		t.Fatalf("GET response = %#v, want durable updated profile after credential failure", response)
+	}
+}
+
+func TestAutoDLSavePasswordDoesNotWriteCredentialBeforeProfileCommit(t *testing.T) {
+	settingsErr := errors.New("settings write failed")
 	baseStore := &memoryAppSettingStore{values: map[string]string{}}
-	appStore := &controlledAppSettingStore{memoryAppSettingStore: baseStore, setErr: primaryErr, beforeSet: cancel}
-	passwords := &fakeGenericPasswordStore{values: map[string]string{}, deleteErr: rollbackErr}
+	appStore := &controlledAppSettingStore{memoryAppSettingStore: baseStore, setErr: settingsErr}
+	passwords := &fakeGenericPasswordStore{values: map[string]string{}}
+	keychainSetCalled := false
+	passwords.beforeSet = func(_, _ string) { keychainSetCalled = true }
 	service := NewSettingsWithStores(&memoryAPIKeyStore{values: map[string]string{}}, nil, appStore)
 	service.SetAutoDLPasswordStore(passwords)
 
-	_, err := service.SaveAutoDLInstance(callerCtx, AutoDLInstanceMutation{
+	_, err := service.SaveAutoDLInstance(context.Background(), AutoDLInstanceMutation{
 		Name: "GPU A", SSHCommand: "ssh root@gpu-a.example.com", Password: "secret", ComfyPort: 6006,
 	})
-	if !errors.Is(err, primaryErr) || !errors.Is(err, rollbackErr) {
-		t.Fatalf("SaveAutoDLInstance() error = %v, want joined primary and rollback errors", err)
+	if !errors.Is(err, settingsErr) {
+		t.Fatalf("SaveAutoDLInstance() error = %v, want settings failure", err)
 	}
-	if passwords.lastDeleteContextErr != nil {
-		t.Fatalf("rollback Delete context error = %v, want independent live context", passwords.lastDeleteContextErr)
+	if keychainSetCalled {
+		t.Fatal("Keychain Set was called before durable profile commit")
 	}
 }
 
@@ -309,7 +383,7 @@ func TestAutoDLCommittedMutationsDoNotFailDuringPasswordResponseEnrichment(t *te
 		service.appSettings = controlled
 
 		got, err := service.SaveAutoDLWorkflowValidation(context.Background(), instance.ID, AutoDLWorkflowValidation{
-			WorkflowProfileID: profile.ID, Status: AutoDLWorkflowStatusReady, WorkflowDigest: profile.WorkflowDigest,
+			WorkflowProfileID: profile.ID, Status: AutoDLWorkflowStatusReady, WorkflowDigest: profile.WorkflowDigest, APITemplateDigest: profile.APITemplateDigest,
 		})
 		if err != nil || len(got.WorkflowValidations) != 1 {
 			t.Fatalf("SaveAutoDLWorkflowValidation() got=%#v error=%v, want committed success", got, err)
@@ -376,14 +450,14 @@ func TestAutoDLStoredInvalidCredentialReferenceFailsClosed(t *testing.T) {
 func TestAutoDLWorkflowProfileRejectedFluxDigestNeedsRevalidation(t *testing.T) {
 	service, _, _ := newAutoDLSettingsForTest()
 	profile, err := service.SaveAutoDLWorkflowProfile(context.Background(), AutoDLWorkflowProfileMutation{
-		ID:             "flux-fp8-t2i",
-		Name:           "FLUX FP8 普通文生图",
-		Kind:           "flux-fp8-t2i",
-		Version:        "precision-v2",
-		WorkflowDigest: "9970e8c3d92c4661a744b046d9f1b96208d875ad557af407f0ba89d656bc8419",
-		Status:         AutoDLWorkflowStatusReady,
-		Workflow:       json.RawMessage(`{"nodes":[],"links":[]}`),
-		Manifest:       json.RawMessage(`{"prompt":{"nodeId":"6","input":"t5xxl"}}`),
+		ID:          "flux-fp8-t2i",
+		Name:        "FLUX FP8 普通文生图",
+		Kind:        "flux-fp8-t2i",
+		Version:     "precision-v2",
+		Status:      AutoDLWorkflowStatusReady,
+		Workflow:    json.RawMessage(`{"nodes":[],"links":[]}`),
+		APITemplate: json.RawMessage(`{"1":{"class_type":"Test","inputs":{}}}`),
+		Manifest:    json.RawMessage(`{"prompt":{"nodeId":"6","input":"t5xxl"}}`),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -432,23 +506,38 @@ func TestAutoDLPublicWorkflowSaveBindsDigestsAndCannotPromoteReady(t *testing.T)
 }
 
 func TestAutoDLWorkflowDigestSurvivesJSONPersistenceFormatting(t *testing.T) {
-	service, _, _ := newAutoDLSettingsForTest()
-	saved, err := service.SaveAutoDLWorkflowProfile(context.Background(), AutoDLWorkflowProfileMutation{
-		ID: "zimage-t2i", Name: "Z T2I", Kind: "zimage-t2i", Version: "v1",
-		Workflow:    json.RawMessage("{\n  \"nodes\": [],\n  \"links\": []\n}"),
-		APITemplate: json.RawMessage("{\n  \"1\": {\"class_type\": \"Test\", \"inputs\": {}}\n}"),
-	})
-	if err != nil {
-		t.Fatal(err)
+	testCases := []struct {
+		name     string
+		workflow json.RawMessage
+		api      json.RawMessage
+	}{
+		{name: "whitespace", workflow: json.RawMessage("{\n  \"nodes\": [],\n  \"links\": []\n}"), api: json.RawMessage("{\n  \"1\": {\"class_type\": \"Test\", \"inputs\": {}}\n}")},
+		{name: "html escapes", workflow: json.RawMessage(`{"nodes":[],"links":[],"note":"<tag>&value>"}`), api: json.RawMessage(`{"1":{"class_type":"<Test>&","inputs":{}}}`)},
+		{name: "unicode separators", workflow: json.RawMessage("{\"nodes\":[],\"links\":[],\"note\":\"left middle right\"}"), api: json.RawMessage("{\"1\":{\"class_type\":\"Test  \",\"inputs\":{}}}")},
+		{name: "key order one", workflow: json.RawMessage(`{"nodes":[],"links":[],"alpha":1,"beta":2}`), api: json.RawMessage(`{"1":{"class_type":"Test","inputs":{"alpha":1,"beta":2}}}`)},
+		{name: "key order two", workflow: json.RawMessage(`{"beta":2,"alpha":1,"links":[],"nodes":[]}`), api: json.RawMessage(`{"1":{"inputs":{"beta":2,"alpha":1},"class_type":"Test"}}`)},
 	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			service, appStore, passwords := newAutoDLSettingsForTest()
+			saved, err := service.SaveAutoDLWorkflowProfile(context.Background(), AutoDLWorkflowProfileMutation{
+				ID: "zimage-t2i", Name: "Z T2I", Kind: "zimage-t2i", Version: "v1", Workflow: testCase.workflow, APITemplate: testCase.api,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	response, err := service.GetAutoDLSettings(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	loaded := response.WorkflowProfiles[0]
-	if loaded.WorkflowDigest != saved.WorkflowDigest || loaded.APITemplateDigest != saved.APITemplateDigest {
-		t.Fatalf("loaded digests = (%q, %q), saved = (%q, %q)", loaded.WorkflowDigest, loaded.APITemplateDigest, saved.WorkflowDigest, saved.APITemplateDigest)
+			restarted := NewSettingsWithStores(&memoryAPIKeyStore{values: map[string]string{}}, nil, appStore)
+			restarted.SetAutoDLPasswordStore(passwords)
+			response, err := restarted.GetAutoDLSettings(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded := response.WorkflowProfiles[0]
+			if loaded.WorkflowDigest != saved.WorkflowDigest || loaded.APITemplateDigest != saved.APITemplateDigest {
+				t.Fatalf("loaded digests = (%q, %q), saved = (%q, %q)", loaded.WorkflowDigest, loaded.APITemplateDigest, saved.WorkflowDigest, saved.APITemplateDigest)
+			}
+		})
 	}
 }
 
@@ -475,7 +564,7 @@ func TestAutoDLStoredWorkflowPayloadDigestMismatchFailsClosed(t *testing.T) {
 
 func TestAutoDLTrustedWorkflowSaveCanPromoteValidatedProfile(t *testing.T) {
 	service, _, _ := newAutoDLSettingsForTest()
-	profile, err := service.saveValidatedAutoDLWorkflowProfile(context.Background(), AutoDLWorkflowProfileMutation{
+	profile, err := service.SaveValidatedAutoDLWorkflowProfile(context.Background(), AutoDLWorkflowProfileMutation{
 		ID: "zimage-t2i", Name: "Z T2I", Kind: "zimage-t2i", Version: "v1",
 		Workflow: json.RawMessage(`{"nodes":[],"links":[]}`), APITemplate: json.RawMessage(`{"1":{"class_type":"Test","inputs":{}}}`),
 	})
@@ -484,6 +573,33 @@ func TestAutoDLTrustedWorkflowSaveCanPromoteValidatedProfile(t *testing.T) {
 	}
 	if profile.Status != AutoDLWorkflowStatusReady || !profile.Ready {
 		t.Fatalf("trusted profile = %#v, want ready", profile)
+	}
+}
+
+func TestAutoDLTrustedWorkflowSaveBlocksProblematicKindsUntilExplicitRelease(t *testing.T) {
+	kinds := []string{
+		"flux-fp8-t2i",
+		"flux-fp8-i2i",
+		"flux-lustly-adult-t2i",
+		"flux-lustly-adult-i2i",
+		"flux-lustly-adult-portrait",
+		"flux-lustly-adult-fullbody",
+		"zimage-flux-refine",
+	}
+	for _, kind := range kinds {
+		t.Run(kind, func(t *testing.T) {
+			service, _, _ := newAutoDLSettingsForTest()
+			profile, err := service.SaveValidatedAutoDLWorkflowProfile(context.Background(), AutoDLWorkflowProfileMutation{
+				ID: kind, Name: "Blocked candidate", Kind: kind, Version: "precision-v2",
+				Workflow: json.RawMessage(`{"nodes":[],"links":[]}`), APITemplate: json.RawMessage(`{"1":{"class_type":"Test","inputs":{}}}`),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if profile.Status != AutoDLWorkflowStatusNeedsRevalidation || profile.Ready {
+				t.Fatalf("trusted profile = %#v, problematic kind must remain blocked", profile)
+			}
+		})
 	}
 }
 
@@ -554,12 +670,13 @@ func TestAutoDLSaveWorkflowValidationCannotReadyRejectedProfile(t *testing.T) {
 		t.Fatal(err)
 	}
 	profile, err := service.SaveAutoDLWorkflowProfile(context.Background(), AutoDLWorkflowProfileMutation{
-		ID:             "flux-fp8-t2i",
-		Name:           "FLUX FP8 普通文生图",
-		Kind:           "flux-fp8-t2i",
-		Version:        "precision-v2",
-		WorkflowDigest: "9970e8c3d92c4661a744b046d9f1b96208d875ad557af407f0ba89d656bc8419",
-		Status:         AutoDLWorkflowStatusReady,
+		ID:          "flux-fp8-t2i",
+		Name:        "FLUX FP8 普通文生图",
+		Kind:        "flux-fp8-t2i",
+		Version:     "precision-v2",
+		Status:      AutoDLWorkflowStatusReady,
+		Workflow:    json.RawMessage(`{"nodes":[],"links":[]}`),
+		APITemplate: json.RawMessage(`{"1":{"class_type":"Test","inputs":{}}}`),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -569,6 +686,7 @@ func TestAutoDLSaveWorkflowValidationCannotReadyRejectedProfile(t *testing.T) {
 		WorkflowProfileID: profile.ID,
 		Status:            AutoDLWorkflowStatusReady,
 		WorkflowDigest:    profile.WorkflowDigest,
+		APITemplateDigest: profile.APITemplateDigest,
 		ValidatedAt:       "2026-08-30T02:03:04Z",
 	})
 	if err != nil {
@@ -576,6 +694,52 @@ func TestAutoDLSaveWorkflowValidationCannotReadyRejectedProfile(t *testing.T) {
 	}
 	if len(updated.WorkflowValidations) != 1 || updated.WorkflowValidations[0].Status != AutoDLWorkflowStatusNeedsRevalidation {
 		t.Fatalf("validations = %#v, rejected profile must remain needs_revalidation", updated.WorkflowValidations)
+	}
+}
+
+func TestAutoDLReadyWorkflowValidationRequiresBothServerDigests(t *testing.T) {
+	testCases := []struct {
+		name     string
+		workflow string
+		api      string
+	}{
+		{name: "missing workflow digest", api: "current"},
+		{name: "missing API digest", workflow: "current"},
+		{name: "wrong workflow digest", workflow: "wrong", api: "current"},
+		{name: "wrong API digest", workflow: "current", api: "wrong"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			service, _, _ := newAutoDLSettingsForTest()
+			instance, profile := seedReadyAutoDLInstanceAndProfile(t, service)
+			workflowDigest := testCase.workflow
+			if workflowDigest == "current" {
+				workflowDigest = profile.WorkflowDigest
+			}
+			apiDigest := testCase.api
+			if apiDigest == "current" {
+				apiDigest = profile.APITemplateDigest
+			}
+
+			_, err := service.SaveAutoDLWorkflowValidation(context.Background(), instance.ID, AutoDLWorkflowValidation{
+				WorkflowProfileID: profile.ID, Status: AutoDLWorkflowStatusReady, WorkflowDigest: workflowDigest, APITemplateDigest: apiDigest,
+			})
+			if !errors.Is(err, ErrAutoDLSettingsInvalid) {
+				t.Fatalf("SaveAutoDLWorkflowValidation() error = %v, want ErrAutoDLSettingsInvalid", err)
+			}
+		})
+	}
+
+	service, _, _ := newAutoDLSettingsForTest()
+	instance, profile := seedReadyAutoDLInstanceAndProfile(t, service)
+	updated, err := service.SaveAutoDLWorkflowValidation(context.Background(), instance.ID, AutoDLWorkflowValidation{
+		WorkflowProfileID: profile.ID, Status: AutoDLWorkflowStatusInvalid, Reason: "offline_validation_failed",
+	})
+	if err != nil {
+		t.Fatalf("non-ready validation with omitted digests error = %v", err)
+	}
+	if updated.WorkflowValidations[0].Status != AutoDLWorkflowStatusInvalid || updated.WorkflowValidations[0].WorkflowDigest != profile.WorkflowDigest || updated.WorkflowValidations[0].APITemplateDigest != profile.APITemplateDigest {
+		t.Fatalf("non-ready validation = %#v, want server-bound current digests", updated.WorkflowValidations[0])
 	}
 }
 
@@ -592,7 +756,7 @@ func TestAutoDLSaveWorkflowValidationReplacesOnlySameProfile(t *testing.T) {
 		{ID: "zimage-t2i", Name: "Z T2I", Kind: "zimage-t2i", Version: "v1", Workflow: json.RawMessage(`{"nodes":[{"id":1}],"links":[]}`), APITemplate: json.RawMessage(`{"1":{"class_type":"T2I","inputs":{}}}`)},
 		{ID: "zimage-i2i", Name: "Z I2I", Kind: "zimage-i2i", Version: "v1", Workflow: json.RawMessage(`{"nodes":[{"id":2}],"links":[]}`), APITemplate: json.RawMessage(`{"2":{"class_type":"I2I","inputs":{}}}`)},
 	} {
-		saved, err := service.saveValidatedAutoDLWorkflowProfile(context.Background(), profile)
+		saved, err := service.SaveValidatedAutoDLWorkflowProfile(context.Background(), profile)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -668,7 +832,7 @@ func TestAutoDLWorkflowAPITemplateDigestChangeRequiresInstanceRevalidation(t *te
 	initial := AutoDLWorkflowProfileMutation{
 		ID: "zimage-t2i", Name: "Z Image", Kind: "zimage-t2i", Version: "v1", Workflow: json.RawMessage(`{"nodes":[],"links":[]}`), APITemplate: json.RawMessage(`{"1":{"class_type":"First","inputs":{}}}`),
 	}
-	first, err := service.saveValidatedAutoDLWorkflowProfile(context.Background(), initial)
+	first, err := service.SaveValidatedAutoDLWorkflowProfile(context.Background(), initial)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -678,7 +842,7 @@ func TestAutoDLWorkflowAPITemplateDigestChangeRequiresInstanceRevalidation(t *te
 		t.Fatal(err)
 	}
 	initial.APITemplate = json.RawMessage(`{"1":{"class_type":"Second","inputs":{}}}`)
-	second, err := service.saveValidatedAutoDLWorkflowProfile(context.Background(), initial)
+	second, err := service.SaveValidatedAutoDLWorkflowProfile(context.Background(), initial)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -733,7 +897,7 @@ func TestAutoDLDeleteAndRecreateWorkflowInvalidatesHistoricalValidation(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := service.saveValidatedAutoDLWorkflowProfile(context.Background(), AutoDLWorkflowProfileMutation{
+	first, err := service.SaveValidatedAutoDLWorkflowProfile(context.Background(), AutoDLWorkflowProfileMutation{
 		ID: "zimage-t2i", Name: "Z T2I", Kind: "zimage-t2i", Version: "v1",
 		Workflow: json.RawMessage(`{"nodes":[{"id":1}],"links":[]}`), APITemplate: json.RawMessage(`{"1":{"class_type":"First","inputs":{}}}`),
 	})
@@ -748,7 +912,7 @@ func TestAutoDLDeleteAndRecreateWorkflowInvalidatesHistoricalValidation(t *testi
 	if _, err := service.DeleteAutoDLWorkflowProfile(context.Background(), first.ID); err != nil {
 		t.Fatal(err)
 	}
-	second, err := service.saveValidatedAutoDLWorkflowProfile(context.Background(), AutoDLWorkflowProfileMutation{
+	second, err := service.SaveValidatedAutoDLWorkflowProfile(context.Background(), AutoDLWorkflowProfileMutation{
 		ID: "zimage-t2i", Name: "Z T2I", Kind: "zimage-t2i", Version: "v2",
 		Workflow: json.RawMessage(`{"nodes":[{"id":2}],"links":[]}`), APITemplate: json.RawMessage(`{"2":{"class_type":"Second","inputs":{}}}`),
 	})
@@ -794,8 +958,9 @@ func seedReadyAutoDLInstanceAndProfile(t *testing.T, service *Settings) (AutoDLI
 	if err != nil {
 		t.Fatal(err)
 	}
-	profile, err := service.SaveAutoDLWorkflowProfile(context.Background(), AutoDLWorkflowProfileMutation{
-		ID: "zimage-t2i", Name: "Z T2I", Kind: "zimage-t2i", Version: "v1", Status: AutoDLWorkflowStatusReady, WorkflowDigest: "sha256:test",
+	profile, err := service.SaveValidatedAutoDLWorkflowProfile(context.Background(), AutoDLWorkflowProfileMutation{
+		ID: "zimage-t2i", Name: "Z T2I", Kind: "zimage-t2i", Version: "v1",
+		Workflow: json.RawMessage(`{"nodes":[],"links":[]}`), APITemplate: json.RawMessage(`{"1":{"class_type":"Test","inputs":{}}}`),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -842,6 +1007,7 @@ type fakeGenericPasswordStore struct {
 	deleteErr            error
 	lastSetContextErr    error
 	lastDeleteContextErr error
+	beforeSet            func(service, account string)
 }
 
 func (store *fakeGenericPasswordStore) Set(ctx context.Context, service, account, secret string) error {
@@ -850,6 +1016,9 @@ func (store *fakeGenericPasswordStore) Set(ctx context.Context, service, account
 	store.lastSetContextErr = ctx.Err()
 	if store.lastSetContextErr != nil {
 		return store.lastSetContextErr
+	}
+	if store.beforeSet != nil {
+		store.beforeSet(service, account)
 	}
 	if store.setErr != nil {
 		return store.setErr
