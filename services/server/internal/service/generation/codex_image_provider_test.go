@@ -1,14 +1,19 @@
 package generation
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"image"
+	"image/color"
+	"image/png"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,6 +30,23 @@ type codexImageSessionStub struct {
 	requests        []codexapp.ImageGenerationRequest
 	readThreadIDs   []string
 }
+
+type managedCodexClientStub struct {
+	call       func(context.Context, string, any, any) error
+	next       func(context.Context) (codexapp.Message, error)
+	closeCount atomic.Int32
+}
+
+func (client *managedCodexClientStub) Call(ctx context.Context, method string, params any, result any) error {
+	return client.call(ctx, method, params, result)
+}
+func (client *managedCodexClientStub) Next(ctx context.Context) (codexapp.Message, error) {
+	if client.next == nil {
+		return codexapp.Message{}, errors.New("unexpected Next call")
+	}
+	return client.next(ctx)
+}
+func (client *managedCodexClientStub) Close() { client.closeCount.Add(1) }
 
 func (stub *codexImageSessionStub) Capabilities(context.Context) (codexapp.ModelProviderCapabilities, error) {
 	return stub.capabilities, stub.capabilitiesErr
@@ -176,12 +198,37 @@ func TestCodexImageProviderMaterializesOrderedValidatedReferences(t *testing.T) 
 	if _, err := provider.Generate(context.Background(), request); err != nil {
 		t.Fatalf("Generate() error = %v", err)
 	}
-	canonicalLocal, err := filepath.EvalSymlinks(local)
-	if err != nil {
-		t.Fatalf("EvalSymlinks() error = %v", err)
-	}
-	if len(got) != 2 || filepath.Base(got[0]) != "reference-001.png" || got[1] != canonicalLocal {
+	if len(got) != 2 || filepath.Ext(got[0]) != ".png" || filepath.Ext(got[1]) != ".png" {
 		t.Fatalf("ordered reference paths = %#v", got)
+	}
+	if filepath.Dir(got[0]) == filepath.Dir(local) || filepath.Dir(got[0]) != filepath.Dir(got[1]) || got[0] == got[1] {
+		t.Fatalf("materialized reference paths = %#v, want distinct attempt-owned copies", got)
+	}
+}
+
+func TestCodexImageProviderUsesFreshAttemptDirectoryForEveryTurn(t *testing.T) {
+	var dirs []string
+	stub := &codexImageSessionStub{
+		capabilities: codexapp.ModelProviderCapabilities{ImageGeneration: true},
+		generate: func(_ context.Context, request codexapp.ImageGenerationRequest, _ func(codexapp.ImageGenerationCheckpoint)) (codexapp.ImageGenerationResult, error) {
+			dirs = append(dirs, request.JobDir)
+			path := writeTestPNG(t, request.JobDir, "result.png")
+			return completedCodexImageResult("thread-"+filepath.Base(request.JobDir), "turn", "item", path), nil
+		},
+	}
+	provider := NewCodexImageProvider(stub, t.TempDir())
+	for index := 0; index < 2; index++ {
+		if _, err := provider.Generate(context.Background(), codexImageRequest("same-task")); err != nil {
+			t.Fatalf("Generate() error = %v", err)
+		}
+	}
+	if len(dirs) != 2 || dirs[0] == dirs[1] {
+		t.Fatalf("attempt dirs = %#v, want two distinct directories", dirs)
+	}
+	for _, dir := range dirs {
+		if filepath.Base(filepath.Dir(dir)) != "same-task" || !contains(filepath.Base(dir), "attempt-") {
+			t.Fatalf("attempt dir = %q, want root/task/attempt hierarchy", dir)
+		}
 	}
 }
 
@@ -248,9 +295,69 @@ func TestCodexImageProviderSerializesFIFOAndCancelsQueuedTask(t *testing.T) {
 	}
 }
 
+func TestCodexImageProviderFIFOAllowsMiddleCancellationWithoutReordering(t *testing.T) {
+	for iteration := 0; iteration < 20; iteration++ {
+		started := make(chan string, 8)
+		release := make(chan struct{}, 8)
+		stub := &codexImageSessionStub{
+			capabilities: codexapp.ModelProviderCapabilities{ImageGeneration: true},
+			generate: func(ctx context.Context, request codexapp.ImageGenerationRequest, _ func(codexapp.ImageGenerationCheckpoint)) (codexapp.ImageGenerationResult, error) {
+				started <- request.Prompt
+				select {
+				case <-ctx.Done():
+					return codexapp.ImageGenerationResult{}, ctx.Err()
+				case <-release:
+				}
+				path := writeTestPNG(t, request.JobDir, "result.png")
+				return completedCodexImageResult("thread-"+request.Prompt, "turn", "item", path), nil
+			},
+		}
+		provider := NewCodexImageProvider(stub, t.TempDir())
+		type result struct {
+			prompt string
+			err    error
+		}
+		done := make(chan result, 5)
+		launch := func(ctx context.Context, prompt string) {
+			go func() {
+				_, err := provider.Generate(ctx, codexImageRequestWithPrompt("task-"+prompt, prompt))
+				done <- result{prompt: prompt, err: err}
+			}()
+		}
+		launch(context.Background(), "first")
+		if got := <-started; got != "first" {
+			t.Fatalf("first start = %q", got)
+		}
+		launch(context.Background(), "second")
+		waitForCodexImageQueueDepth(t, provider.queue, 1)
+		cancelCtx, cancel := context.WithCancel(context.Background())
+		launch(cancelCtx, "canceled")
+		waitForCodexImageQueueDepth(t, provider.queue, 2)
+		launch(context.Background(), "third")
+		waitForCodexImageQueueDepth(t, provider.queue, 3)
+		launch(context.Background(), "fourth")
+		waitForCodexImageQueueDepth(t, provider.queue, 4)
+		cancel()
+		release <- struct{}{}
+		want := []string{"second", "third", "fourth"}
+		for _, expected := range want {
+			if got := <-started; got != expected {
+				t.Fatalf("start order = %q, want %q (iteration %d)", got, expected, iteration)
+			}
+			release <- struct{}{}
+		}
+		for index := 0; index < 5; index++ {
+			result := <-done
+			if result.prompt == "canceled" && !errors.Is(result.err, context.Canceled) {
+				t.Fatalf("canceled error = %v", result.err)
+			}
+		}
+	}
+}
+
 func TestCodexImageProviderResumesExistingThread(t *testing.T) {
 	dataRoot := t.TempDir()
-	jobDir := filepath.Join(dataRoot, "generation", "codex-image", "task-existing")
+	jobDir := filepath.Join(dataRoot, "generation", "codex-image", "task-existing", "attempt-0123456789abcdef0123456789abcdef")
 	path := writeTestPNG(t, jobDir, "resumed.png")
 	stub := &codexImageSessionStub{read: func(_ context.Context, threadID string) (codexapp.ImageGenerationResult, error) {
 		return completedCodexImageResult(threadID, "turn-existing", "item-existing", path), nil
@@ -302,7 +409,7 @@ func TestCodexImageProviderResumeJobRootBoundary(t *testing.T) {
 			arrange: func(t *testing.T, dataRoot string, taskA string, _ string, _ string) (string, string) {
 				return filepath.Join(dataRoot, "generation", "codex-image"), writeTestPNG(t, taskA, "result.png")
 			},
-			wantErr: "immediate task directory",
+			wantErr: "exact task attempt directory",
 		},
 		{
 			name: "cwd outside provider root",
@@ -324,7 +431,7 @@ func TestCodexImageProviderResumeJobRootBoundary(t *testing.T) {
 				}
 				return link, writeTestPNG(t, taskA, "result.png")
 			},
-			wantErr: "outside Codex image jobs directory",
+			wantErr: "must not contain symlinks",
 		},
 	}
 
@@ -332,8 +439,8 @@ func TestCodexImageProviderResumeJobRootBoundary(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			dataRoot := t.TempDir()
 			jobsRoot := filepath.Join(dataRoot, "generation", "codex-image")
-			taskA := filepath.Join(jobsRoot, "task-a")
-			taskB := filepath.Join(jobsRoot, "task-b")
+			taskA := filepath.Join(jobsRoot, "task-a", "attempt-0123456789abcdef0123456789abcdef")
+			taskB := filepath.Join(jobsRoot, "task-b", "attempt-fedcba9876543210fedcba9876543210")
 			outside := t.TempDir()
 			jobDir, savedPath := test.arrange(t, dataRoot, taskA, taskB, outside)
 			stub := &codexImageSessionStub{read: func(_ context.Context, threadID string) (codexapp.ImageGenerationResult, error) {
@@ -357,6 +464,100 @@ func TestCodexImageProviderResumeJobRootBoundary(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCodexImageProviderDoesNotPersistUnvalidatedCheckpointPath(t *testing.T) {
+	malicious := filepath.Join(t.TempDir(), "malicious.png")
+	var progress []coregeneration.Response
+	stub := &codexImageSessionStub{
+		capabilities: codexapp.ModelProviderCapabilities{ImageGeneration: true},
+		generate: func(_ context.Context, _ codexapp.ImageGenerationRequest, checkpoint func(codexapp.ImageGenerationCheckpoint)) (codexapp.ImageGenerationResult, error) {
+			item := codexapp.ImageGenerationThreadItem{ID: "item", Type: "imageGeneration", Status: "completed", SavedPath: &malicious}
+			checkpoint(codexapp.ImageGenerationCheckpoint{Stage: codexapp.ImageGenerationStageItemCompleted, ThreadID: "thread", TurnID: "turn", Item: &item})
+			return codexapp.ImageGenerationResult{ThreadID: "thread", TurnID: "turn", Item: item}, nil
+		},
+	}
+	provider := NewCodexImageProvider(stub, t.TempDir())
+	request := codexImageRequest("task-malicious")
+	request.Options[coregeneration.ProgressCallbackOption] = coregeneration.ProgressCallback(func(_ context.Context, event coregeneration.ProgressEvent) {
+		progress = append(progress, event.Response)
+	})
+	_, err := provider.Generate(context.Background(), request)
+	if err == nil {
+		t.Fatal("Generate() error = nil, want invalid saved path")
+	}
+	if len(progress) == 0 {
+		t.Fatal("progress callback was not invoked")
+	}
+	for _, response := range progress {
+		state, _ := response.Metadata["runtime_state"].(GenerationTaskRuntimeState)
+		if state.SavedPath != "" {
+			t.Fatalf("progress SavedPath = %q, want empty", state.SavedPath)
+		}
+	}
+}
+
+func TestCodexImageProviderRejectsCorruptAndOversizedImages(t *testing.T) {
+	t.Run("signature only output", func(t *testing.T) {
+		dataRoot := t.TempDir()
+		stub := &codexImageSessionStub{capabilities: codexapp.ModelProviderCapabilities{ImageGeneration: true}, generate: func(_ context.Context, request codexapp.ImageGenerationRequest, _ func(codexapp.ImageGenerationCheckpoint)) (codexapp.ImageGenerationResult, error) {
+			path := filepath.Join(request.JobDir, "bad.png")
+			valid := testPNGBytes()
+			if err := os.WriteFile(path, valid[:len(valid)-12], 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return completedCodexImageResult("thread", "turn", "item", path), nil
+		}}
+		_, err := NewCodexImageProvider(stub, dataRoot).Generate(context.Background(), codexImageRequest("task"))
+		if err == nil || !contains(err.Error(), "invalid image") {
+			t.Fatalf("Generate() error = %v", err)
+		}
+	})
+	t.Run("too many references", func(t *testing.T) {
+		provider := NewCodexImageProvider(&codexImageSessionStub{capabilities: codexapp.ModelProviderCapabilities{ImageGeneration: true}}, t.TempDir())
+		request := codexImageRequest("task")
+		request.ReferenceURLs = make([]string, maxCodexImageReferences+1)
+		for index := range request.ReferenceURLs {
+			request.ReferenceURLs[index] = "data:image/png;base64," + base64.StdEncoding.EncodeToString(testPNGBytes())
+		}
+		_, err := provider.Generate(context.Background(), request)
+		if err == nil || !contains(err.Error(), "reference count") {
+			t.Fatalf("Generate() error = %v", err)
+		}
+	})
+	t.Run("base64 preflight", func(t *testing.T) {
+		value := "data:image/png;base64," + base64.StdEncoding.EncodeToString(testPNGBytes())
+		if _, _, err := decodeCodexImageDataReference(value, 0, 8); err == nil || !contains(err.Error(), "exceeds 8 bytes") {
+			t.Fatalf("decodeCodexImageDataReference() error = %v", err)
+		}
+	})
+	t.Run("oversized sparse output", func(t *testing.T) {
+		root := t.TempDir()
+		path := filepath.Join(root, "huge.png")
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Truncate(maxCodexImageOutputBytes + 1); err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, _, err := readValidatedCodexImage(path, root, maxCodexImageOutputBytes, "test root"); err == nil || !contains(err.Error(), "exceeds") {
+			t.Fatalf("readValidatedCodexImage() error = %v", err)
+		}
+	})
+	t.Run("dimension limit", func(t *testing.T) {
+		value := image.NewRGBA(image.Rect(0, 0, maxCodexImageDimension+1, 1))
+		var buffer bytes.Buffer
+		if err := png.Encode(&buffer, value); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := validateCodexImageBytes(buffer.Bytes()); err == nil || !contains(err.Error(), "dimensions") {
+			t.Fatalf("validateCodexImageBytes() error = %v", err)
+		}
+	})
 }
 
 func TestCodexImageProviderGetKeepsSameIDForNonterminalThread(t *testing.T) {
@@ -389,7 +590,7 @@ func TestCodexImageProviderRejectsCanonicalSymlinkEscape(t *testing.T) {
 	}
 	provider := NewCodexImageProvider(stub, dataRoot)
 	_, err := provider.Generate(context.Background(), codexImageRequest("task-link"))
-	if err == nil || !contains(err.Error(), "outside Codex image job directory") {
+	if err == nil || (!contains(err.Error(), "symbolic") && !contains(err.Error(), "too many levels")) {
 		t.Fatalf("Generate() error = %v, want canonical symlink escape rejection", err)
 	}
 }
@@ -415,6 +616,81 @@ func TestCodexImageProviderRejectsUnsafeTaskID(t *testing.T) {
 	_, err := provider.Generate(context.Background(), request)
 	if err == nil || !contains(err.Error(), "task id") {
 		t.Fatalf("Generate() error = %v, want unsafe task id rejection", err)
+	}
+}
+
+func TestManagedCodexImageSessionGateHonorsDeadlineAndShutdown(t *testing.T) {
+	parent, cancelParent := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	client := &managedCodexClientStub{call: func(ctx context.Context, method string, _ any, _ any) error {
+		if method != "thread/start" {
+			return errors.New("unexpected method " + method)
+		}
+		select {
+		case <-started:
+		default:
+			close(started)
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	managed := &managedCodexImageSession{
+		parent:  parent,
+		factory: func(context.Context, string) (codexapp.Client, error) { return client, nil },
+		gate:    newCodexImageFIFO(),
+	}
+	go managed.closeOnShutdown()
+	generateDone := make(chan error, 1)
+	go func() {
+		_, err := managed.GenerateImage(context.Background(), codexapp.ImageGenerationRequest{JobDir: t.TempDir(), Prompt: "prompt"}, nil)
+		generateDone <- err
+	}()
+	<-started
+	deadlineCtx, deadlineCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer deadlineCancel()
+	if _, err := managed.Capabilities(deadlineCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Capabilities() error = %v, want deadline exceeded", err)
+	}
+	cancelParent()
+	if err := <-generateDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("GenerateImage() error = %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for client.closeCount.Load() != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := client.closeCount.Load(); got != 1 {
+		t.Fatalf("Close() count = %d, want 1", got)
+	}
+}
+
+func TestManagedCodexImageSessionReconnectsReadOnce(t *testing.T) {
+	first := &managedCodexClientStub{call: func(context.Context, string, any, any) error { return errors.New("disconnected") }}
+	second := &managedCodexClientStub{call: func(_ context.Context, method string, _ any, result any) error {
+		if method != "thread/read" {
+			return errors.New("unexpected method " + method)
+		}
+		payload := []byte(`{"thread":{"id":"thread","cwd":"/tmp/job","turns":[]}}`)
+		return json.Unmarshal(payload, result)
+	}}
+	clients := []codexapp.Client{first, second}
+	managed := &managedCodexImageSession{
+		parent: context.Background(), gate: newCodexImageFIFO(),
+		factory: func(context.Context, string) (codexapp.Client, error) {
+			client := clients[0]
+			clients = clients[1:]
+			return client, nil
+		},
+	}
+	result, err := managed.ReadImageResult(context.Background(), "thread")
+	if err != nil {
+		t.Fatalf("ReadImageResult() error = %v", err)
+	}
+	if result.ThreadID != "thread" {
+		t.Fatalf("thread id = %q", result.ThreadID)
+	}
+	if first.closeCount.Load() != 1 || second.closeCount.Load() != 0 {
+		t.Fatalf("close counts = %d/%d", first.closeCount.Load(), second.closeCount.Load())
 	}
 }
 
@@ -458,11 +734,32 @@ func writeTestPNG(t *testing.T, dir string, name string) string {
 }
 
 func testPNGBytes() []byte {
-	return []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 0x0d, 'I', 'H', 'D', 'R', 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89}
+	var buffer bytes.Buffer
+	value := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	value.Set(0, 0, color.RGBA{R: 1, G: 2, B: 3, A: 255})
+	if err := png.Encode(&buffer, value); err != nil {
+		panic(err)
+	}
+	return buffer.Bytes()
 }
 
 func contains(value string, substring string) bool {
 	return len(value) >= len(substring) && (value == substring || containsAt(value, substring))
+}
+
+func waitForCodexImageQueueDepth(t *testing.T, queue *codexImageFIFO, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		queue.mu.Lock()
+		got := len(queue.waiters)
+		queue.mu.Unlock()
+		if got == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("queue depth did not reach %d", want)
 }
 
 func containsAt(value string, substring string) bool {

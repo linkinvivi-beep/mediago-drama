@@ -1,10 +1,16 @@
 package generation
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"net/http"
 	"net/url"
@@ -16,14 +22,25 @@ import (
 
 	coregeneration "github.com/mediago-dev/mediago-drama/packages/core/pkg/generation"
 	"github.com/mediago-dev/mediago-drama/services/server/internal/platform/codexapp"
+	"golang.org/x/sys/unix"
 )
 
 const (
 	codexImageTaskIDRequestOption = "_medialink_task_id"
 	codexImageResponseIDPrefix    = coregeneration.RouteCodexImage + ":"
+
+	// Bounds are intentionally generous for production Codex images while
+	// preventing unbounded allocations from untrusted references/results.
+	maxCodexImageReferences          = 10
+	maxCodexImageReferenceBytes      = 20 << 20
+	maxCodexImageTotalReferenceBytes = 80 << 20
+	maxCodexImageOutputBytes         = 64 << 20
+	maxCodexImageDimension           = 16384
+	maxCodexImagePixels              = 40_000_000
 )
 
 var safeCodexImageTaskID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+var safeCodexImageAttemptID = regexp.MustCompile(`^attempt-[a-f0-9]{32}$`)
 
 // CodexImageSession is the typed app-server surface required by the image provider.
 type CodexImageSession interface {
@@ -32,19 +49,87 @@ type CodexImageSession interface {
 	ReadImageResult(context.Context, string) (codexapp.ImageGenerationResult, error)
 }
 
-// CodexImageProvider executes all Codex image turns through one global semaphore.
+// CodexImageProvider executes all Codex image turns through one strict FIFO gate.
 type CodexImageProvider struct {
 	session CodexImageSession
 	root    string
-	queue   chan struct{}
+	queue   *codexImageFIFO
 }
 
 type managedCodexImageSession struct {
 	parent  context.Context
 	binPath string
-	mu      sync.Mutex
+	factory func(context.Context, string) (codexapp.Client, error)
+	gate    *codexImageFIFO
+	stateMu sync.Mutex
 	client  codexapp.Client
-	session *codexapp.ImageGenerationSession
+	typed   *codexapp.ImageGenerationSession
+}
+
+type codexImageWaiter struct {
+	ready   chan struct{}
+	granted bool
+}
+
+// codexImageFIFO is a context-aware, strict FIFO one-operation gate.
+type codexImageFIFO struct {
+	mu      sync.Mutex
+	active  bool
+	waiters []*codexImageWaiter
+}
+
+func newCodexImageFIFO() *codexImageFIFO { return &codexImageFIFO{} }
+
+func (queue *codexImageFIFO) acquire(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	waiter := &codexImageWaiter{ready: make(chan struct{})}
+	queue.mu.Lock()
+	if !queue.active && len(queue.waiters) == 0 {
+		if err := ctx.Err(); err != nil {
+			queue.mu.Unlock()
+			return err
+		}
+		queue.active = true
+		queue.mu.Unlock()
+		return nil
+	}
+	queue.waiters = append(queue.waiters, waiter)
+	queue.mu.Unlock()
+
+	select {
+	case <-waiter.ready:
+		return nil
+	case <-ctx.Done():
+		queue.mu.Lock()
+		if waiter.granted {
+			queue.mu.Unlock()
+			queue.release()
+			return ctx.Err()
+		}
+		for index, candidate := range queue.waiters {
+			if candidate == waiter {
+				queue.waiters = append(queue.waiters[:index], queue.waiters[index+1:]...)
+				break
+			}
+		}
+		queue.mu.Unlock()
+		return ctx.Err()
+	}
+}
+
+func (queue *codexImageFIFO) release() {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	if len(queue.waiters) == 0 {
+		queue.active = false
+		return
+	}
+	next := queue.waiters[0]
+	queue.waiters = queue.waiters[1:]
+	next.granted = true
+	close(next.ready)
 }
 
 // NewCodexImageProvider creates one application-scoped Codex image provider.
@@ -53,7 +138,7 @@ func NewCodexImageProvider(session CodexImageSession, dataRoot string) *CodexIma
 	return &CodexImageProvider{
 		session: session,
 		root:    filepath.Join(filepath.Clean(strings.TrimSpace(dataRoot)), "generation", "codex-image"),
-		queue:   make(chan struct{}, 1),
+		queue:   newCodexImageFIFO(),
 	}
 }
 
@@ -64,7 +149,14 @@ func NewManagedCodexImageProvider(parent context.Context, binPath string, dataRo
 	if parent == nil {
 		parent = context.Background()
 	}
-	return NewCodexImageProvider(&managedCodexImageSession{parent: parent, binPath: strings.TrimSpace(binPath)}, dataRoot)
+	managed := &managedCodexImageSession{
+		parent:  parent,
+		binPath: strings.TrimSpace(binPath),
+		factory: func(ctx context.Context, path string) (codexapp.Client, error) { return codexapp.Start(ctx, path) },
+		gate:    newCodexImageFIFO(),
+	}
+	go managed.closeOnShutdown()
+	return NewCodexImageProvider(managed, dataRoot)
 }
 
 // Ready checks the exact capability used by generation without submitting a turn.
@@ -85,37 +177,49 @@ func (provider *CodexImageProvider) Ready(ctx context.Context) (bool, string) {
 func (*CodexImageProvider) Name() string { return "Codex Image" }
 
 func (session *managedCodexImageSession) Capabilities(ctx context.Context) (codexapp.ModelProviderCapabilities, error) {
-	session.mu.Lock()
-	defer session.mu.Unlock()
-	typed, err := session.ensureLocked()
+	ctx, cancel := session.operationContext(ctx)
+	defer cancel()
+	if err := session.gate.acquire(ctx); err != nil {
+		return codexapp.ModelProviderCapabilities{}, err
+	}
+	defer session.gate.release()
+	typed, err := session.ensure()
 	if err != nil {
 		return codexapp.ModelProviderCapabilities{}, err
 	}
 	capabilities, err := typed.Capabilities(ctx)
 	if err != nil {
-		session.invalidateLocked()
+		session.invalidate()
 	}
 	return capabilities, err
 }
 
 func (session *managedCodexImageSession) GenerateImage(ctx context.Context, request codexapp.ImageGenerationRequest, checkpoint func(codexapp.ImageGenerationCheckpoint)) (codexapp.ImageGenerationResult, error) {
-	session.mu.Lock()
-	defer session.mu.Unlock()
-	typed, err := session.ensureLocked()
+	ctx, cancel := session.operationContext(ctx)
+	defer cancel()
+	if err := session.gate.acquire(ctx); err != nil {
+		return codexapp.ImageGenerationResult{}, err
+	}
+	defer session.gate.release()
+	typed, err := session.ensure()
 	if err != nil {
 		return codexapp.ImageGenerationResult{}, err
 	}
 	result, err := typed.GenerateImage(ctx, request, checkpoint)
 	if err != nil {
-		session.invalidateLocked()
+		session.invalidate()
 	}
 	return result, err
 }
 
 func (session *managedCodexImageSession) ReadImageResult(ctx context.Context, threadID string) (codexapp.ImageGenerationResult, error) {
-	session.mu.Lock()
-	defer session.mu.Unlock()
-	typed, err := session.ensureLocked()
+	ctx, cancel := session.operationContext(ctx)
+	defer cancel()
+	if err := session.gate.acquire(ctx); err != nil {
+		return codexapp.ImageGenerationResult{}, err
+	}
+	defer session.gate.release()
+	typed, err := session.ensure()
 	if err != nil {
 		return codexapp.ImageGenerationResult{}, err
 	}
@@ -123,33 +227,54 @@ func (session *managedCodexImageSession) ReadImageResult(ctx context.Context, th
 	if err == nil || ctx.Err() != nil {
 		return result, err
 	}
-	session.invalidateLocked()
-	typed, err = session.ensureLocked()
+	session.invalidate()
+	typed, err = session.ensure()
 	if err != nil {
 		return codexapp.ImageGenerationResult{}, err
 	}
 	return typed.ReadImageResult(ctx, threadID)
 }
 
-func (session *managedCodexImageSession) ensureLocked() (*codexapp.ImageGenerationSession, error) {
-	if session.session != nil {
-		return session.session, nil
+func (session *managedCodexImageSession) ensure() (*codexapp.ImageGenerationSession, error) {
+	session.stateMu.Lock()
+	defer session.stateMu.Unlock()
+	if session.typed != nil {
+		return session.typed, nil
 	}
-	client, err := codexapp.Start(session.parent, session.binPath)
+	client, err := session.factory(session.parent, session.binPath)
 	if err != nil {
 		return nil, err
 	}
 	session.client = client
-	session.session = codexapp.NewImageGenerationSession(client)
-	return session.session, nil
+	session.typed = codexapp.NewImageGenerationSession(client)
+	return session.typed, nil
 }
 
-func (session *managedCodexImageSession) invalidateLocked() {
-	if session.client != nil {
-		session.client.Close()
-	}
+func (session *managedCodexImageSession) invalidate() {
+	session.stateMu.Lock()
+	client := session.client
 	session.client = nil
-	session.session = nil
+	session.typed = nil
+	session.stateMu.Unlock()
+	if client != nil {
+		client.Close()
+	}
+}
+
+func (session *managedCodexImageSession) operationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	operationCtx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(session.parent, cancel)
+	return operationCtx, func() { stop(); cancel() }
+}
+
+func (session *managedCodexImageSession) closeOnShutdown() {
+	<-session.parent.Done()
+	_ = session.gate.acquire(context.Background())
+	session.invalidate()
+	session.gate.release()
 }
 
 // Generate creates one isolated app-owned job directory and runs one structured
@@ -172,12 +297,10 @@ func (provider *CodexImageProvider) Generate(ctx context.Context, request corege
 		return coregeneration.Response{}, err
 	}
 
-	select {
-	case provider.queue <- struct{}{}:
-		defer func() { <-provider.queue }()
-	case <-ctx.Done():
-		return coregeneration.Response{}, ctx.Err()
+	if err := provider.queue.acquire(ctx); err != nil {
+		return coregeneration.Response{}, err
 	}
+	defer provider.queue.release()
 
 	capabilities, err := provider.session.Capabilities(ctx)
 	if err != nil {
@@ -325,24 +448,36 @@ func (provider *CodexImageProvider) createJobDir(taskID string) (string, error) 
 	if err := requirePathWithin(canonicalDataRoot, canonicalRoot, "MediaLink user data directory"); err != nil {
 		return "", err
 	}
-	jobDir := filepath.Join(canonicalRoot, taskID)
-	if info, statErr := os.Lstat(jobDir); statErr == nil {
+	taskDir := filepath.Join(canonicalRoot, taskID)
+	if info, statErr := os.Lstat(taskDir); statErr == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 			return "", fmt.Errorf("Codex image task directory collides with a non-directory")
 		}
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return "", fmt.Errorf("checking Codex image task directory: %w", statErr)
-	} else if err := os.Mkdir(jobDir, 0o700); err != nil {
+	} else if err := os.Mkdir(taskDir, 0o700); err != nil {
 		return "", fmt.Errorf("creating Codex image task directory: %w", err)
 	}
-	canonicalJobDir, err := filepath.EvalSymlinks(jobDir)
+	canonicalTaskDir, err := filepath.EvalSymlinks(taskDir)
 	if err != nil {
 		return "", fmt.Errorf("canonicalizing Codex image task directory: %w", err)
 	}
-	if err := requirePathWithin(canonicalRoot, canonicalJobDir, "Codex image jobs directory"); err != nil {
+	if err := requirePathWithin(canonicalRoot, canonicalTaskDir, "Codex image jobs directory"); err != nil {
 		return "", err
 	}
-	return canonicalJobDir, nil
+	for attempt := 0; attempt < 4; attempt++ {
+		suffix, randomErr := codexImageRandomHex(16)
+		if randomErr != nil {
+			return "", fmt.Errorf("creating Codex image attempt id: %w", randomErr)
+		}
+		jobDir := filepath.Join(canonicalTaskDir, "attempt-"+suffix)
+		if mkdirErr := os.Mkdir(jobDir, 0o700); mkdirErr == nil {
+			return jobDir, nil
+		} else if !errors.Is(mkdirErr, os.ErrExist) {
+			return "", fmt.Errorf("creating Codex image attempt directory: %w", mkdirErr)
+		}
+	}
+	return "", fmt.Errorf("creating unique Codex image attempt directory")
 }
 
 func (provider *CodexImageProvider) recoveredJobDir(value string) (string, error) {
@@ -358,16 +493,25 @@ func (provider *CodexImageProvider) recoveredJobDir(value string) (string, error
 	if err != nil {
 		return "", fmt.Errorf("canonicalizing Codex image jobs directory: %w", err)
 	}
-	canonicalJobDir, err := filepath.EvalSymlinks(value)
+	relativeInput, err := filepath.Rel(root, value)
+	if err != nil || filepath.IsAbs(relativeInput) || relativeInput == ".." || strings.HasPrefix(relativeInput, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("Codex image path is outside Codex image jobs directory")
+	}
+	canonicalCandidate := filepath.Join(canonicalRoot, relativeInput)
+	canonicalJobDir, err := filepath.EvalSymlinks(canonicalCandidate)
 	if err != nil {
 		return "", fmt.Errorf("canonicalizing Codex image thread job directory: %w", err)
+	}
+	if canonicalJobDir != canonicalCandidate {
+		return "", fmt.Errorf("Codex image thread cwd must not contain symlinks")
 	}
 	if err := requirePathWithin(canonicalRoot, canonicalJobDir, "Codex image jobs directory"); err != nil {
 		return "", err
 	}
 	relative, err := filepath.Rel(canonicalRoot, canonicalJobDir)
-	if err != nil || relative == "." || filepath.IsAbs(relative) || strings.Contains(relative, string(filepath.Separator)) || !safeCodexImageTaskID.MatchString(relative) {
-		return "", fmt.Errorf("Codex image thread cwd must be an immediate task directory")
+	parts := strings.Split(relative, string(filepath.Separator))
+	if err != nil || relative == "." || filepath.IsAbs(relative) || len(parts) != 2 || !safeCodexImageTaskID.MatchString(parts[0]) || !safeCodexImageAttemptID.MatchString(parts[1]) {
+		return "", fmt.Errorf("Codex image thread cwd must be an exact task attempt directory")
 	}
 	info, err := os.Stat(canonicalJobDir)
 	if err != nil {
@@ -380,14 +524,14 @@ func (provider *CodexImageProvider) recoveredJobDir(value string) (string, error
 }
 
 func (provider *CodexImageProvider) materializeReferences(values []string, jobDir string) ([]string, error) {
+	if len(values) > maxCodexImageReferences {
+		return nil, fmt.Errorf("Codex image reference count exceeds %d", maxCodexImageReferences)
+	}
 	paths := make([]string, 0, len(values))
+	totalBytes := int64(0)
 	dataRoot := filepath.Dir(filepath.Dir(provider.root))
 	if err := os.MkdirAll(dataRoot, 0o700); err != nil {
 		return nil, fmt.Errorf("creating MediaLink user data directory: %w", err)
-	}
-	canonicalDataRoot, err := filepath.EvalSymlinks(dataRoot)
-	if err != nil {
-		return nil, fmt.Errorf("canonicalizing MediaLink user data directory: %w", err)
 	}
 	for index, raw := range values {
 		value := strings.TrimSpace(raw)
@@ -395,7 +539,15 @@ func (provider *CodexImageProvider) materializeReferences(values []string, jobDi
 			continue
 		}
 		if strings.HasPrefix(strings.ToLower(value), "data:") {
-			path, materializeErr := materializeCodexImageDataReference(value, jobDir, index)
+			data, mimeType, materializeErr := decodeCodexImageDataReference(value, index, maxCodexImageReferenceBytes)
+			if materializeErr != nil {
+				return nil, materializeErr
+			}
+			totalBytes += int64(len(data))
+			if totalBytes > maxCodexImageTotalReferenceBytes {
+				return nil, fmt.Errorf("Codex image total reference bytes exceed %d", maxCodexImageTotalReferenceBytes)
+			}
+			path, materializeErr := materializeCodexImageReference(data, mimeType, jobDir, index)
 			if materializeErr != nil {
 				return nil, materializeErr
 			}
@@ -412,38 +564,78 @@ func (provider *CodexImageProvider) materializeReferences(values []string, jobDi
 		if !filepath.IsAbs(value) {
 			return nil, fmt.Errorf("Codex image reference %d must be a validated local image", index+1)
 		}
-		canonical, validateErr := validateCodexImageFile(value, canonicalDataRoot, "MediaLink user data directory")
+		_, mimeType, data, validateErr := readValidatedCodexImage(value, dataRoot, maxCodexImageReferenceBytes, "MediaLink user data directory")
 		if validateErr != nil {
 			return nil, fmt.Errorf("Codex image reference %d: %w", index+1, validateErr)
 		}
-		if _, validateErr = sniffCodexImageMIME(canonical); validateErr != nil {
-			return nil, fmt.Errorf("Codex image reference %d: %w", index+1, validateErr)
+		totalBytes += int64(len(data))
+		if totalBytes > maxCodexImageTotalReferenceBytes {
+			return nil, fmt.Errorf("Codex image total reference bytes exceed %d", maxCodexImageTotalReferenceBytes)
 		}
-		paths = append(paths, canonical)
+		path, materializeErr := materializeCodexImageReference(data, mimeType, jobDir, index)
+		if materializeErr != nil {
+			return nil, materializeErr
+		}
+		paths = append(paths, path)
 	}
 	return paths, nil
 }
 
-func materializeCodexImageDataReference(value string, jobDir string, index int) (string, error) {
+func decodeCodexImageDataReference(value string, index int, maximum int64) ([]byte, string, error) {
 	header, payload, ok := strings.Cut(value, ",")
 	if !ok || !strings.HasSuffix(strings.ToLower(header), ";base64") {
-		return "", fmt.Errorf("Codex image reference %d must be a base64 image data URI", index+1)
+		return nil, "", fmt.Errorf("Codex image reference %d must be a base64 image data URI", index+1)
 	}
 	mimeType := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(header, "data:"), ";base64")))
-	extension, ok := codexImageExtension(mimeType)
+	_, ok = codexImageExtension(mimeType)
 	if !ok {
-		return "", fmt.Errorf("Codex image reference %d has unsupported MIME type %q", index+1, mimeType)
+		return nil, "", fmt.Errorf("Codex image reference %d has unsupported MIME type %q", index+1, mimeType)
 	}
-	data, err := base64.StdEncoding.DecodeString(payload)
+	decodedLength := base64.StdEncoding.DecodedLen(len(payload))
+	if strings.HasSuffix(payload, "==") {
+		decodedLength -= 2
+	} else if strings.HasSuffix(payload, "=") {
+		decodedLength--
+	}
+	if int64(decodedLength) > maximum {
+		return nil, "", fmt.Errorf("Codex image reference %d exceeds %d bytes", index+1, maximum)
+	}
+	reader := io.LimitReader(base64.NewDecoder(base64.StdEncoding, strings.NewReader(payload)), maximum+1)
+	data, err := io.ReadAll(reader)
 	if err != nil || len(data) == 0 {
-		return "", fmt.Errorf("Codex image reference %d has invalid base64 data", index+1)
+		return nil, "", fmt.Errorf("Codex image reference %d has invalid base64 data", index+1)
 	}
-	if detected := http.DetectContentType(data); detected != mimeType {
-		return "", fmt.Errorf("Codex image reference %d MIME mismatch: detected %q", index+1, detected)
+	if int64(len(data)) > maximum {
+		return nil, "", fmt.Errorf("Codex image reference %d exceeds %d bytes", index+1, maximum)
 	}
-	path := filepath.Join(jobDir, fmt.Sprintf("reference-%03d%s", index+1, extension))
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	detected, err := validateCodexImageBytes(data)
+	if err != nil {
+		return nil, "", fmt.Errorf("Codex image reference %d: %w", index+1, err)
+	}
+	if detected != mimeType {
+		return nil, "", fmt.Errorf("Codex image reference %d MIME mismatch: detected %q", index+1, detected)
+	}
+	return data, mimeType, nil
+}
+
+func materializeCodexImageReference(data []byte, mimeType string, jobDir string, index int) (string, error) {
+	extension, _ := codexImageExtension(mimeType)
+	suffix, err := codexImageRandomHex(12)
+	if err != nil {
 		return "", fmt.Errorf("materializing Codex image reference %d: %w", index+1, err)
+	}
+	path := filepath.Join(jobDir, fmt.Sprintf("reference-%03d-%s%s", index+1, suffix, extension))
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return "", fmt.Errorf("materializing Codex image reference %d: %w", index+1, err)
+	}
+	_, writeErr := file.Write(data)
+	closeErr := file.Close()
+	if writeErr != nil {
+		return "", fmt.Errorf("materializing Codex image reference %d: %w", index+1, writeErr)
+	}
+	if closeErr != nil {
+		return "", fmt.Errorf("closing Codex image reference %d: %w", index+1, closeErr)
 	}
 	return path, nil
 }
@@ -455,7 +647,7 @@ func (provider *CodexImageProvider) responseForResult(model string, result codex
 	if !codexImageItemCompleted(result.Item) {
 		return codexImageProgressResponse(model, "waiting_reconnect", state), nil
 	}
-	path, mimeType, data, err := readValidatedCodexImage(*result.Item.SavedPath, allowedRoot)
+	path, mimeType, data, err := readValidatedCodexImage(*result.Item.SavedPath, allowedRoot, maxCodexImageOutputBytes, "Codex image job directory")
 	if err != nil {
 		return coregeneration.Response{}, err
 	}
@@ -511,9 +703,6 @@ func applyCodexImageItem(state *GenerationTaskRuntimeState, item codexapp.ImageG
 	if item.RevisedPrompt != nil {
 		state.RevisedPrompt = strings.TrimSpace(*item.RevisedPrompt)
 	}
-	if item.SavedPath != nil {
-		state.SavedPath = strings.TrimSpace(*item.SavedPath)
-	}
 }
 
 func codexImageItemCompleted(item codexapp.ImageGenerationThreadItem) bool {
@@ -531,82 +720,145 @@ func codexImageFailure(item codexapp.ImageGenerationThreadItem) error {
 	return fmt.Errorf("Codex image item status is %q", item.Status)
 }
 
-func readValidatedCodexImage(savedPath string, allowedRoot string) (string, string, []byte, error) {
-	canonical, err := validateCodexImageFile(savedPath, allowedRoot, "Codex image job directory")
-	if err != nil {
-		return "", "", nil, err
+func readValidatedCodexImage(path string, allowedRoot string, maximum int64, rootLabel string) (string, string, []byte, error) {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if path == "." || !filepath.IsAbs(path) {
+		return "", "", nil, fmt.Errorf("Codex image path must be absolute")
 	}
-	file, err := os.Open(canonical)
+	root := filepath.Clean(strings.TrimSpace(allowedRoot))
+	if root == "." || !filepath.IsAbs(root) {
+		return "", "", nil, fmt.Errorf("%s must be absolute", rootLabel)
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("canonicalizing %s: %w", rootLabel, err)
+	}
+	relative, err := filepath.Rel(root, path)
+	if err == nil && (filepath.IsAbs(relative) || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator))) && root != canonicalRoot {
+		relative, err = filepath.Rel(canonicalRoot, path)
+	}
+	if err == nil && (filepath.IsAbs(relative) || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator))) {
+		canonicalParent, parentErr := filepath.EvalSymlinks(filepath.Dir(path))
+		if parentErr == nil {
+			path = filepath.Join(canonicalParent, filepath.Base(path))
+			relative, err = filepath.Rel(canonicalRoot, path)
+		}
+	}
+	if err != nil || filepath.IsAbs(relative) || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", "", nil, fmt.Errorf("Codex image path is outside %s", rootLabel)
+	}
+	components := strings.Split(relative, string(filepath.Separator))
+	rootFD, err := unix.Open(canonicalRoot, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("opening %s: %w", rootLabel, err)
+	}
+	currentFD := rootFD
+	defer func() {
+		_ = unix.Close(currentFD)
+		if currentFD != rootFD {
+			_ = unix.Close(rootFD)
+		}
+	}()
+	for _, component := range components[:len(components)-1] {
+		if component == "" || component == "." || component == ".." {
+			return "", "", nil, fmt.Errorf("Codex image path is outside %s", rootLabel)
+		}
+		nextFD, openErr := unix.Openat(currentFD, component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		if openErr != nil {
+			return "", "", nil, fmt.Errorf("opening Codex image parent: %w", openErr)
+		}
+		if currentFD != rootFD {
+			_ = unix.Close(currentFD)
+		}
+		currentFD = nextFD
+	}
+	name := components[len(components)-1]
+	fd, err := unix.Openat(currentFD, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("opening Codex image result: %w", err)
 	}
+	file := os.NewFile(uintptr(fd), name)
+	if file == nil {
+		_ = unix.Close(fd)
+		return "", "", nil, fmt.Errorf("opening Codex image result")
+	}
 	defer file.Close()
-	data, err := io.ReadAll(file)
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return "", "", nil, fmt.Errorf("checking Codex image file: %w", err)
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
+		return "", "", nil, fmt.Errorf("Codex image path is not a regular file")
+	}
+	if stat.Size <= 0 {
+		return "", "", nil, fmt.Errorf("Codex image file is empty")
+	}
+	if stat.Size > maximum {
+		return "", "", nil, fmt.Errorf("Codex image file exceeds %d bytes", maximum)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maximum+1))
 	if err != nil {
 		return "", "", nil, fmt.Errorf("reading Codex image result: %w", err)
 	}
+	if int64(len(data)) > maximum {
+		return "", "", nil, fmt.Errorf("Codex image file exceeds %d bytes", maximum)
+	}
+	var after unix.Stat_t
+	if err := unix.Fstat(fd, &after); err != nil {
+		return "", "", nil, fmt.Errorf("rechecking Codex image file: %w", err)
+	}
+	if after.Dev != stat.Dev || after.Ino != stat.Ino || after.Size != stat.Size {
+		return "", "", nil, fmt.Errorf("Codex image file changed while reading")
+	}
+	mimeType, err := validateCodexImageBytes(data)
+	if err != nil {
+		return "", "", nil, err
+	}
+	return filepath.Join(canonicalRoot, relative), mimeType, data, nil
+}
+
+func validateCodexImageBytes(data []byte) (string, error) {
 	if len(data) == 0 {
-		return "", "", nil, fmt.Errorf("Codex image result is empty")
+		return "", fmt.Errorf("Codex image file is empty")
 	}
 	mimeType := http.DetectContentType(data)
 	if _, ok := codexImageExtension(mimeType); !ok {
-		return "", "", nil, fmt.Errorf("Codex image result has unsupported MIME type %q", mimeType)
+		return "", fmt.Errorf("Codex image result has unsupported MIME type %q", mimeType)
 	}
-	return canonical, mimeType, data, nil
-}
-
-func sniffCodexImageMIME(path string) (string, error) {
-	file, err := os.Open(path)
+	config, format, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
-		return "", fmt.Errorf("opening image file: %w", err)
+		return "", fmt.Errorf("Codex image result is an invalid image: %w", err)
 	}
-	defer file.Close()
-	header := make([]byte, 512)
-	count, readErr := file.Read(header)
-	if readErr != nil && !errors.Is(readErr, io.EOF) {
-		return "", fmt.Errorf("reading image file: %w", readErr)
+	if config.Width <= 0 || config.Height <= 0 || config.Width > maxCodexImageDimension || config.Height > maxCodexImageDimension {
+		return "", fmt.Errorf("Codex image dimensions %dx%d exceed limits", config.Width, config.Height)
 	}
-	if count == 0 {
-		return "", fmt.Errorf("image file is empty")
+	if int64(config.Width)*int64(config.Height) > maxCodexImagePixels {
+		return "", fmt.Errorf("Codex image pixel count exceeds %d", maxCodexImagePixels)
 	}
-	mimeType := http.DetectContentType(header[:count])
-	if _, ok := codexImageExtension(mimeType); !ok {
-		return "", fmt.Errorf("image file has unsupported MIME type %q", mimeType)
+	wantFormat := map[string]string{"image/png": "png", "image/jpeg": "jpeg", "image/gif": "gif"}[mimeType]
+	if format != wantFormat {
+		return "", fmt.Errorf("Codex image MIME mismatch: decoded %q", format)
+	}
+	if _, decodedFormat, decodeErr := image.Decode(bytes.NewReader(data)); decodeErr != nil {
+		return "", fmt.Errorf("Codex image result is an invalid image: %w", decodeErr)
+	} else if decodedFormat != wantFormat {
+		return "", fmt.Errorf("Codex image MIME mismatch: decoded %q", decodedFormat)
 	}
 	return mimeType, nil
 }
 
-func validateCodexImageFile(path string, allowedRoot string, rootLabel string) (string, error) {
-	path = filepath.Clean(strings.TrimSpace(path))
-	if path == "." || !filepath.IsAbs(path) {
-		return "", fmt.Errorf("Codex image path must be absolute")
-	}
-	root := filepath.Clean(strings.TrimSpace(allowedRoot))
-	if root == "." || !filepath.IsAbs(root) {
-		return "", fmt.Errorf("%s must be absolute", rootLabel)
-	}
-	canonicalRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		return "", fmt.Errorf("canonicalizing %s: %w", rootLabel, err)
-	}
-	canonicalPath, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return "", fmt.Errorf("canonicalizing Codex image path: %w", err)
-	}
-	if err := requirePathWithin(canonicalRoot, canonicalPath, rootLabel); err != nil {
+func codexImageRandomHex(byteCount int) (string, error) {
+	value := make([]byte, byteCount)
+	if _, err := rand.Read(value); err != nil {
 		return "", err
 	}
-	info, err := os.Stat(canonicalPath)
-	if err != nil {
-		return "", fmt.Errorf("checking Codex image file: %w", err)
+	const alphabet = "0123456789abcdef"
+	encoded := make([]byte, byteCount*2)
+	for index, item := range value {
+		encoded[index*2] = alphabet[item>>4]
+		encoded[index*2+1] = alphabet[item&0x0f]
 	}
-	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("Codex image path is not a regular file")
-	}
-	if info.Size() <= 0 {
-		return "", fmt.Errorf("Codex image file is empty")
-	}
-	return canonicalPath, nil
+	return string(encoded), nil
 }
 
 func requirePathWithin(root string, path string, rootLabel string) error {
@@ -625,8 +877,6 @@ func codexImageExtension(mimeType string) (string, bool) {
 		return ".jpg", true
 	case "image/gif":
 		return ".gif", true
-	case "image/webp":
-		return ".webp", true
 	default:
 		return "", false
 	}
