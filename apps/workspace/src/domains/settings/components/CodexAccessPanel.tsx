@@ -1,6 +1,6 @@
 import { CheckCircle2, CircleAlert, Image, Loader2, LogOut, RefreshCw } from "lucide-react";
 import type React from "react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import useSWR, { useSWRConfig } from "swr";
 import { isAgentRuntimeConfigKey } from "@/domains/agent/api/agent";
 import {
@@ -39,24 +39,51 @@ export const CodexAccessPanel: React.FC = () => {
 	const [attempt, setAttempt] = useState<CodexLoginAttempt>();
 	const [busy, setBusy] = useState("");
 	const [refreshError, setRefreshError] = useState("");
+	const mountedRef = useRef(true);
+	const manualRefreshRequestRef = useRef(0);
+	const accountChangeRequestRef = useRef(0);
 
-	const refreshAccount = useCallback(async () => {
-		await Promise.all([mutate(), mutatePreflight()]);
+	useEffect(() => {
+		mountedRef.current = true;
+		return () => {
+			mountedRef.current = false;
+			manualRefreshRequestRef.current += 1;
+			accountChangeRequestRef.current += 1;
+		};
+	}, []);
+
+	const refreshRuntimeCache = useCallback(() => {
 		void mutateGlobal(isAgentRuntimeConfigKey, undefined, { revalidate: true });
-	}, [mutate, mutateGlobal, mutatePreflight]);
+	}, [mutateGlobal]);
+
+	const warnPreflightRefresh = useCallback(
+		(error: unknown) => {
+			if (!mountedRef.current) return;
+			toast.warning("Codex 生图状态刷新失败", { description: errorMessage(error) });
+		},
+		[toast],
+	);
 
 	const refreshReadiness = async () => {
+		const requestID = ++manualRefreshRequestRef.current;
 		setBusy("refresh");
 		setRefreshError("");
 		try {
-			await refreshAccount();
+			const [nextAccount, nextPreflight] = await Promise.all([
+				getCodexAccount(),
+				getCodexImagePreflight(),
+			]);
+			if (!currentRequest(mountedRef, manualRefreshRequestRef, requestID)) return;
+			await Promise.all([mutate(nextAccount, false), mutatePreflight(nextPreflight, false)]);
+			refreshRuntimeCache();
 			toast.success("Codex 生图检查完成");
 		} catch (error) {
+			if (!currentRequest(mountedRef, manualRefreshRequestRef, requestID)) return;
 			const message = errorMessage(error);
 			setRefreshError(message);
 			toast.error("Codex 生图检查失败", { description: message });
 		} finally {
-			setBusy("");
+			if (currentRequest(mountedRef, manualRefreshRequestRef, requestID)) setBusy("");
 		}
 	};
 
@@ -66,16 +93,50 @@ export const CodexAccessPanel: React.FC = () => {
 		const check = async () => {
 			try {
 				const next = await getCodexAccountLogin(attempt.loginId);
-				if (disposed) return;
+				if (disposed || !mountedRef.current) return;
 				setAttempt(next);
 				if (next.status === "completed") {
-					await refreshAccount();
+					manualRefreshRequestRef.current += 1;
+					const requestID = ++accountChangeRequestRef.current;
 					toast.success("ChatGPT 登录成功", { description: "已复用全局 Codex 登录态。" });
+					const [accountResult, preflightResult] = await Promise.allSettled([
+						getCodexAccount(),
+						getCodexImagePreflight(),
+					]);
+					if (!currentRequest(mountedRef, accountChangeRequestRef, requestID)) return;
+					refreshRuntimeCache();
+					let accountRefreshError =
+						accountResult.status === "rejected" ? accountResult.reason : undefined;
+					if (accountResult.status === "fulfilled") {
+						try {
+							await mutate(accountResult.value, false);
+						} catch (error) {
+							accountRefreshError = error;
+						}
+					}
+					let preflightRefreshError =
+						preflightResult.status === "rejected" ? preflightResult.reason : undefined;
+					if (preflightResult.status === "fulfilled") {
+						try {
+							await mutatePreflight(preflightResult.value, false);
+						} catch (error) {
+							preflightRefreshError = error;
+						}
+					}
+					if (!currentRequest(mountedRef, accountChangeRequestRef, requestID)) return;
+					if (accountRefreshError) {
+						toast.warning("ChatGPT 账号状态刷新失败", {
+							description: errorMessage(accountRefreshError),
+						});
+					}
+					if (preflightRefreshError) {
+						warnPreflightRefresh(preflightRefreshError);
+					}
 				} else if (next.status !== "pending" && next.status !== "canceled") {
 					toast.error("ChatGPT 登录失败", { description: next.error || "请重新发起登录。" });
 				}
 			} catch (error) {
-				if (!disposed) {
+				if (!disposed && mountedRef.current) {
 					toast.error("检查登录状态失败", { description: errorMessage(error) });
 					setAttempt(undefined);
 				}
@@ -87,19 +148,31 @@ export const CodexAccessPanel: React.FC = () => {
 			disposed = true;
 			window.clearInterval(interval);
 		};
-	}, [attempt?.loginId, attempt?.status, refreshAccount, toast]);
+	}, [
+		attempt?.loginId,
+		attempt?.status,
+		mutate,
+		mutatePreflight,
+		refreshRuntimeCache,
+		toast,
+		warnPreflightRefresh,
+	]);
 
 	const startLogin = async () => {
 		setBusy("login");
 		try {
 			const next = await beginCodexAccountLogin();
+			if (!mountedRef.current) return;
 			setAttempt(next);
 			if (next.authUrl) await openExternalUrl(next.authUrl);
+			if (!mountedRef.current) return;
 			toast.info("ChatGPT 登录页已打开", { description: "请在浏览器中完成授权。" });
 		} catch (error) {
-			toast.error("无法开始登录", { description: errorMessage(error) });
+			if (mountedRef.current) {
+				toast.error("无法开始登录", { description: errorMessage(error) });
+			}
 		} finally {
-			setBusy("");
+			if (mountedRef.current) setBusy("");
 		}
 	};
 
@@ -108,7 +181,9 @@ export const CodexAccessPanel: React.FC = () => {
 		try {
 			await openExternalUrl(attempt.authUrl);
 		} catch (error) {
-			toast.error("打开登录页失败", { description: errorMessage(error) });
+			if (mountedRef.current) {
+				toast.error("打开登录页失败", { description: errorMessage(error) });
+			}
 		}
 	};
 
@@ -117,29 +192,57 @@ export const CodexAccessPanel: React.FC = () => {
 		setBusy("cancel");
 		try {
 			const next = await cancelCodexAccountLogin(attempt.loginId);
+			if (!mountedRef.current) return;
 			setAttempt(next);
 			toast.info("登录已取消");
 		} catch (error) {
-			toast.error("取消失败", { description: errorMessage(error) });
+			if (mountedRef.current) {
+				toast.error("取消失败", { description: errorMessage(error) });
+			}
 		} finally {
-			setBusy("");
+			if (mountedRef.current) setBusy("");
 		}
 	};
 
 	const logout = async () => {
 		setBusy("logout");
+		let next;
 		try {
-			const next = await logoutCodexAccount();
-			await mutate(next, false);
-			await mutatePreflight();
-			toast.success("已退出全局 Codex 账号");
-			return true;
+			next = await logoutCodexAccount();
 		} catch (error) {
-			toast.error("退出失败", { description: errorMessage(error) });
+			if (mountedRef.current) {
+				toast.error("退出失败", { description: errorMessage(error) });
+				setBusy("");
+			}
 			return false;
-		} finally {
-			setBusy("");
 		}
+
+		manualRefreshRequestRef.current += 1;
+		const requestID = ++accountChangeRequestRef.current;
+		try {
+			await mutate(next, false);
+		} catch (error) {
+			if (currentRequest(mountedRef, accountChangeRequestRef, requestID)) {
+				toast.warning("ChatGPT 账号状态刷新失败", { description: errorMessage(error) });
+			}
+		}
+		if (currentRequest(mountedRef, accountChangeRequestRef, requestID)) {
+			toast.success("已退出全局 Codex 账号");
+		}
+
+		try {
+			await mutatePreflight(loggedOutPreflight, false);
+			const nextPreflight = await getCodexImagePreflight();
+			if (currentRequest(mountedRef, accountChangeRequestRef, requestID)) {
+				await mutatePreflight(nextPreflight, false);
+			}
+		} catch (error) {
+			if (currentRequest(mountedRef, accountChangeRequestRef, requestID)) {
+				warnPreflightRefresh(error);
+			}
+		}
+		if (currentRequest(mountedRef, accountChangeRequestRef, requestID)) setBusy("");
+		return true;
 	};
 
 	const confirmLogout = () => {
@@ -155,6 +258,7 @@ export const CodexAccessPanel: React.FC = () => {
 	const loggedIn = account?.status === "loggedIn";
 	const pending = attempt?.status === "pending";
 	const readiness = codexImageReadiness(preflight?.reason, preflight?.ready);
+	const readinessError = refreshError || (preflightError ? errorMessage(preflightError) : "");
 
 	return (
 		<SettingsPanelLayout
@@ -166,7 +270,7 @@ export const CodexAccessPanel: React.FC = () => {
 					type="button"
 					variant="outline"
 					size="sm"
-					disabled={busy !== "" || preflightLoading || preflightValidating}
+					disabled={(busy !== "" && busy !== "refresh") || preflightLoading || preflightValidating}
 					onClick={() => void refreshReadiness()}
 				>
 					{busy === "refresh" || preflightValidating ? (
@@ -247,7 +351,7 @@ export const CodexAccessPanel: React.FC = () => {
 				</section>
 
 				<section className="rounded-lg border border-border bg-card p-4">
-					<div className="flex items-start gap-3">
+					<div className="flex items-start gap-3" role="status" aria-live="polite">
 						{preflightLoading ? (
 							<Loader2 className="mt-0.5 size-5 animate-spin text-muted-foreground" />
 						) : readiness.ready ? (
@@ -262,21 +366,31 @@ export const CodexAccessPanel: React.FC = () => {
 							<p className="mt-1 text-xs text-muted-foreground">
 								生图会使用当前 ChatGPT 账号的 Codex 配额。
 							</p>
-							{preflightError && !refreshError ? (
-								<p className="mt-2 text-xs text-destructive">
-									检查失败：{errorMessage(preflightError)}
-								</p>
-							) : null}
-							{refreshError ? (
-								<p className="mt-2 text-xs text-destructive">检查失败：{refreshError}</p>
-							) : null}
 						</div>
 					</div>
+					{readinessError ? (
+						<p className="mt-2 text-xs text-destructive" role="alert">
+							检查失败：{readinessError}
+						</p>
+					) : null}
 				</section>
 			</div>
 		</SettingsPanelLayout>
 	);
 };
+
+const loggedOutPreflight = {
+	accountStatus: "notLoggedIn",
+	imageGeneration: false,
+	ready: false,
+	reason: "not_logged_in",
+};
+
+const currentRequest = (
+	mountedRef: React.RefObject<boolean>,
+	requestRef: React.RefObject<number>,
+	requestID: number,
+) => mountedRef.current && requestRef.current === requestID;
 
 const codexImageReadiness = (reason?: string, ready?: boolean) => {
 	if (ready || reason === "ready") return { ready: true, label: "Codex 生图已就绪" };
