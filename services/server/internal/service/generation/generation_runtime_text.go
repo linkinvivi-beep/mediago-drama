@@ -438,8 +438,9 @@ func (workflow *GenerationService) prepareTextPromptOptimization(
 	promptGuide := boundedAutoDLPromptGuide(stringGenerationParam(payload.Params, promptOptimizationWorkflowGuideParam))
 	if promptGuide == "" && isAutoDLGenerationRouteID(targetRouteID) {
 		resolved, resolveErr := workflow.resolveAutoDLWorkflowForNewTask(ctx, coregeneration.Request{
-			RouteID:       targetRouteID,
-			ReferenceURLs: make([]string, len(ordered)),
+			RouteID:           targetRouteID,
+			WorkflowProfileID: payload.WorkflowProfileID,
+			ReferenceURLs:     make([]string, len(ordered)),
 		})
 		if resolveErr != nil {
 			return promptOptimizationExecution{}, http.StatusServiceUnavailable, resolveErr

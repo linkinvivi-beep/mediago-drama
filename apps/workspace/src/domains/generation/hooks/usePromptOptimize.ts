@@ -51,6 +51,7 @@ export interface UsePromptOptimizeOptions {
 	route?: GenerationRoute | null;
 	targetParams?: Record<string, unknown>;
 	targetRoute?: GenerationRoute | null;
+	targetWorkflowProfileId?: string;
 }
 
 export const usePromptOptimize = ({
@@ -70,6 +71,7 @@ export const usePromptOptimize = ({
 	route,
 	targetParams,
 	targetRoute,
+	targetWorkflowProfileId,
 	onOptimized,
 }: UsePromptOptimizeOptions) => {
 	const [isOptimizing, setIsOptimizing] = useState(false);
@@ -118,6 +120,7 @@ export const usePromptOptimize = ({
 						provider: textRoute?.provider,
 						modelId: textRoute?.legacyModelId ?? "",
 						model: textRoute?.model ?? "",
+						workflowProfileId: targetWorkflowProfileId?.trim() || undefined,
 						prompt: input.currentPrompt,
 						promptOptimization: {
 							model: textRoute?.model ?? "",
@@ -190,6 +193,7 @@ export const usePromptOptimize = ({
 			referenceUrls,
 			targetParams,
 			targetRoute?.id,
+			targetWorkflowProfileId,
 			textExecutor,
 			textRoute,
 		],
