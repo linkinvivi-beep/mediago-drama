@@ -41,6 +41,7 @@ type InstanceLease interface {
 	InstanceProfileID() string
 	Tunnel() platformautodl.Tunnel
 	BindPrompt(promptID string) error
+	Quarantine(reason string) error
 	ReleaseBeforeSubmit()
 	ReleaseTerminal()
 }
@@ -49,7 +50,6 @@ type InstanceScheduler interface {
 	AcquireNew(context.Context, InstanceRequest) (InstanceLease, error)
 	Resume(context.Context, string, string, string) (InstanceLease, error)
 	RestoreReservations([]PersistedInstanceReservation) error
-	Quarantine(instanceProfileID string, reason string)
 	ReconcileQuarantine(instanceProfileID string, taskID string) error
 	NotifyInstancesChanged()
 }
@@ -134,21 +134,28 @@ func (scheduler *autoDLInstanceScheduler) AcquireNew(ctx context.Context, reques
 			scheduler.mu.Unlock()
 			continue
 		}
-		available := candidates[:0]
-		for _, candidate := range candidates {
-			if scheduler.slots[candidate.instanceID] == nil {
-				available = append(available, candidate)
+		selectedIndex := -1
+		if len(candidates) > 0 {
+			start := 0
+			if request.SelectedInstanceProfileID == "" {
+				start = int(scheduler.autoCursor % uint64(len(candidates)))
+			}
+			for offset := 0; offset < len(candidates); offset++ {
+				index := (start + offset) % len(candidates)
+				if scheduler.slots[candidates[index].instanceID] == nil {
+					selectedIndex = index
+					break
+				}
 			}
 		}
-		if len(available) > 0 {
+		if selectedIndex >= 0 {
 			if err := ctx.Err(); err != nil {
 				scheduler.mu.Unlock()
 				return nil, err
 			}
-			selected := available[0]
+			selected := candidates[selectedIndex]
 			if request.SelectedInstanceProfileID == "" {
-				selected = available[scheduler.autoCursor%uint64(len(available))]
-				scheduler.autoCursor++
+				scheduler.autoCursor = uint64((selectedIndex + 1) % len(candidates))
 			}
 			scheduler.nextToken++
 			reservation := &autoDLInstanceReservation{
@@ -280,21 +287,6 @@ func (scheduler *autoDLInstanceScheduler) RestoreReservations(reservations []Per
 	return nil
 }
 
-func (scheduler *autoDLInstanceScheduler) Quarantine(instanceProfileID string, reason string) {
-	if scheduler == nil || !validSchedulerID(instanceProfileID) || strings.TrimSpace(reason) == "" {
-		return
-	}
-	scheduler.mu.Lock()
-	defer scheduler.mu.Unlock()
-	reservation := scheduler.slots[instanceProfileID]
-	if reservation == nil {
-		return
-	}
-	reservation.quarantined = true
-	reservation.quarantineReason = strings.TrimSpace(reason)
-	scheduler.signalLocked()
-}
-
 func (scheduler *autoDLInstanceScheduler) ReconcileQuarantine(instanceProfileID string, taskID string) error {
 	if scheduler == nil {
 		return ErrAutoDLSchedulerUnavailable
@@ -419,6 +411,22 @@ func (lease *autoDLInstanceLease) BindPrompt(promptID string) error {
 		return ErrAutoDLReservationConflict
 	}
 	reservation.promptID = promptID
+	return nil
+}
+
+func (lease *autoDLInstanceLease) Quarantine(reason string) error {
+	if lease == nil || lease.scheduler == nil || strings.TrimSpace(reason) == "" {
+		return ErrAutoDLSchedulerInvalidRequest
+	}
+	lease.scheduler.mu.Lock()
+	defer lease.scheduler.mu.Unlock()
+	reservation := lease.scheduler.slots[lease.instanceID]
+	if reservation == nil || reservation.taskID != lease.taskID || reservation.token != lease.token || reservation.quarantined {
+		return ErrAutoDLReservationConflict
+	}
+	reservation.quarantined = true
+	reservation.quarantineReason = strings.TrimSpace(reason)
+	lease.scheduler.signalLocked()
 	return nil
 }
 

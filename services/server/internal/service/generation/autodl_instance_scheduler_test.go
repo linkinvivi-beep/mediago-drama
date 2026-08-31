@@ -42,6 +42,42 @@ func TestAutoDLInstanceSchedulerStableRoundRobin(t *testing.T) {
 	}
 }
 
+func TestAutoDLInstanceSchedulerRoundRobinUsesFullCompatibleOrderWhileBusy(t *testing.T) {
+	t.Parallel()
+
+	fixture := newSchedulerFixture(
+		enabledInstance("instance-c"),
+		enabledInstance("instance-a"),
+		enabledInstance("instance-b"),
+	)
+	for _, instanceID := range []string{"instance-a", "instance-b", "instance-c"} {
+		fixture.setReady(instanceID, "image", true)
+	}
+	scheduler := fixture.scheduler()
+
+	first := acquireLease(t, scheduler, InstanceRequest{TaskID: "task-a", WorkflowProfileID: "image"})
+	second := acquireLease(t, scheduler, InstanceRequest{TaskID: "task-b", WorkflowProfileID: "image"})
+	third := acquireLease(t, scheduler, InstanceRequest{TaskID: "task-c", WorkflowProfileID: "image"})
+	got := []string{first.InstanceProfileID(), second.InstanceProfileID(), third.InstanceProfileID()}
+	want := []string{"instance-a", "instance-b", "instance-c"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("concurrent round robin = %v, want %v", got, want)
+	}
+	first.ReleaseBeforeSubmit()
+	second.ReleaseBeforeSubmit()
+	third.ReleaseBeforeSubmit()
+
+	for index, wantInstanceID := range []string{"instance-a", "instance-b", "instance-c"} {
+		next := acquireLease(t, scheduler, InstanceRequest{
+			TaskID: fmt.Sprintf("task-next-%d", index), WorkflowProfileID: "image",
+		})
+		if got := next.InstanceProfileID(); got != wantInstanceID {
+			t.Fatalf("round robin after release at %d = %q, want %q", index, got, wantInstanceID)
+		}
+		next.ReleaseBeforeSubmit()
+	}
+}
+
 func TestAutoDLInstanceSchedulerAllowsConcurrentDistinctInstances(t *testing.T) {
 	t.Parallel()
 
@@ -354,13 +390,19 @@ func TestAutoDLInstanceSchedulerStaleLeaseCannotMutateNewReservation(t *testing.
 	if err := stale.BindPrompt("stale-prompt"); !errors.Is(err, ErrAutoDLReservationConflict) {
 		t.Fatalf("stale BindPrompt() error = %v, want reservation conflict", err)
 	}
+	if err := stale.Quarantine("submission_outcome_unknown"); !errors.Is(err, ErrAutoDLReservationConflict) {
+		t.Fatalf("stale Quarantine() error = %v, want reservation conflict", err)
+	}
 	stale.ReleaseTerminal()
 	stale.ReleaseTerminal()
 
 	blocked := acquireAsync(scheduler, InstanceRequest{TaskID: "third-task", WorkflowProfileID: "image"})
 	assertAcquireBlocked(t, blocked)
-	current.ReleaseBeforeSubmit()
-	current.ReleaseBeforeSubmit()
+	if err := current.BindPrompt("current-prompt"); err != nil {
+		t.Fatalf("current BindPrompt() error = %v", err)
+	}
+	current.ReleaseTerminal()
+	current.ReleaseTerminal()
 	next := receiveAcquire(t, blocked)
 	next.ReleaseBeforeSubmit()
 }
@@ -440,8 +482,14 @@ func TestAutoDLInstanceSchedulerQuarantineHoldsSlotUntilExactReconciliation(t *t
 	fixture.setReady("instance-a", "image", true)
 	scheduler := fixture.scheduler()
 	lease := acquireLease(t, scheduler, InstanceRequest{TaskID: "unknown-task", WorkflowProfileID: "image"})
-	scheduler.Quarantine("instance-a", "submission_outcome_unknown")
+	if err := lease.Quarantine("submission_outcome_unknown"); err != nil {
+		t.Fatalf("Quarantine() error = %v", err)
+	}
+	if err := lease.Quarantine("submission_outcome_unknown"); !errors.Is(err, ErrAutoDLReservationConflict) {
+		t.Fatalf("second Quarantine() error = %v, want reservation conflict", err)
+	}
 	lease.ReleaseBeforeSubmit()
+	lease.ReleaseTerminal()
 
 	blocked := acquireAsync(scheduler, InstanceRequest{TaskID: "next-task", WorkflowProfileID: "image"})
 	assertAcquireBlocked(t, blocked)
