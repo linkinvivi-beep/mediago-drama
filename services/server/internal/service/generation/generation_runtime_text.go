@@ -419,14 +419,26 @@ func (workflow *GenerationService) prepareTextPromptOptimization(
 		Prompt:          executionPrompt,
 		ProtectedBodies: promptOptimizationSensitiveBodies(protectedBodies, ordered),
 	}
-	instruction := promptOptimizationSystemInstructionText
-	if strings.Contains(stringGenerationParam(payload.Params, "system_instruction"), "这是图片生成提示词") {
-		instruction = imagePromptOptimizationSystemInstructionText
+	targetKind := coregeneration.Kind(stringGenerationParam(payload.Params, promptOptimizationTargetKindParam))
+	if targetKind == "" && strings.Contains(stringGenerationParam(payload.Params, "system_instruction"), "这是图片生成提示词") {
+		targetKind = coregeneration.KindImage
 	}
+	targetRouteID := stringGenerationParam(payload.Params, promptOptimizationTargetRouteParam)
+	promptGuide := boundedAutoDLPromptGuide(stringGenerationParam(payload.Params, promptOptimizationWorkflowGuideParam))
+	if targetKind == coregeneration.KindVideo && targetRouteID == coregeneration.RouteAutoDLH3 {
+		execution.MaxOutputRunes = maxH3PromptOptimizationOutputRunes
+	}
+	instruction := promptOptimizationSystemInstructionForTarget(targetKind, targetRouteID, payload.Params, promptGuide)
 	params := make(map[string]any, len(payload.Params)+1)
 	for key, value := range payload.Params {
 		params[key] = value
 	}
+	delete(params, promptOptimizationTargetKindParam)
+	delete(params, promptOptimizationTargetRouteParam)
+	delete(params, promptOptimizationWorkflowGuideParam)
+	delete(params, promptOptimizationTargetDurationParam)
+	delete(params, promptOptimizationTargetAspectRatioParam)
+	delete(params, promptOptimizationTargetResolutionParam)
 	params["system_instruction"] = instruction
 	params[generationSensitivePromptParam] = true
 	payload.Params = params

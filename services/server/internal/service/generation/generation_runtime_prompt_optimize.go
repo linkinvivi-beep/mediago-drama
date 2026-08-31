@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	coregeneration "github.com/mediago-dev/mediago-drama/packages/core/pkg/generation"
 	"github.com/mediago-dev/mediago-drama/services/server/internal/service/textcompletion"
@@ -26,8 +28,26 @@ const imagePromptOptimizationSystemInstructionText = promptOptimizationSystemIns
 这是图片生成提示词。必须保持人物、场景和道具的身份及连续性，不得擅自替换、合并或新增。
 明确并保留构图、媒介、光线和宽高比；输入未指定时不要用无关细节覆盖原意。
 严格保持参考图的顺序和角色，使参考图1、参考图2等编号与各自用途一一对应。`
+const h3PromptOptimizationSystemInstructionText = promptOptimizationSystemInstructionText + `
+这是用于 MiniMax H3 工作流的视频生成提示词。把输入整理为一个 4-15 秒内可完成的连贯镜头，不要拆成镜头列表。
+必须保持人物身份、外貌、服装、场景空间关系和道具连续性，不得擅自替换、合并或新增；严格保持参考图顺序及各自角色。
+按时间推进写清起始状态、主体动作与节奏、镜头景别和运动、光线色彩、环境变化以及明确的结束状态。
+用户明确提供对白、声音或字幕时才保留；未提供时不要新增。不得编造输入中没有的人物关系、事件或关键视觉事实。
+只加入与当前镜头直接相关的负面约束，用于防止身份漂移、肢体或道具变形、空间和动作连续性断裂；不要堆砌通用负面词。
+如果输入已经是完整且符合上述约束的 H3 提示词，只做必要修正，不进行破坏性重写。
+画幅和分辨率由工作流参数控制，不要输出 --ar 或其他命令行画幅参数。`
 const promptOptimizationConversationKindLabel = "提示词生成"
 const maxAutoDLPromptGuideBytes = 16 << 10
+const maxH3PromptOptimizationOutputRunes = 7000
+
+const (
+	promptOptimizationTargetKindParam        = "_mediago_prompt_optimization_target_kind"
+	promptOptimizationTargetRouteParam       = "_mediago_prompt_optimization_target_route"
+	promptOptimizationWorkflowGuideParam     = "_mediago_prompt_optimization_workflow_guide"
+	promptOptimizationTargetDurationParam    = "_mediago_prompt_optimization_target_duration"
+	promptOptimizationTargetAspectRatioParam = "_mediago_prompt_optimization_target_aspect_ratio"
+	promptOptimizationTargetResolutionParam  = "_mediago_prompt_optimization_target_resolution"
+)
 
 const (
 	maxPromptOptimizationUserPromptBytes       = 64 << 10
@@ -47,6 +67,7 @@ type promptOptimizationExecution struct {
 	Enabled         bool
 	Prompt          string
 	ProtectedBodies []string
+	MaxOutputRunes  int
 }
 
 func (execution promptOptimizationExecution) validateOutput(value string) (string, error) {
@@ -54,7 +75,9 @@ func (execution promptOptimizationExecution) validateOutput(value string) (strin
 		return value, nil
 	}
 	raw := strings.TrimSpace(value)
-	if raw == "" || len(raw) > maxPromptOptimizationOutputBytes || promptOptimizationOutputHasNonPromptStructure(raw) {
+	if raw == "" || len(raw) > maxPromptOptimizationOutputBytes ||
+		(execution.MaxOutputRunes > 0 && utf8.RuneCountInString(raw) > execution.MaxOutputRunes) ||
+		promptOptimizationOutputHasNonPromptStructure(raw) {
 		return "", errPromptOptimizationOutputRejected
 	}
 	protectedBytes := 0
@@ -563,7 +586,13 @@ func (workflow *GenerationService) createPromptOptimizationHistoryTask(
 		RouteID:            optimization.RouteID,
 		Model:              optimization.Model,
 		Prompt:             generationPayload.Prompt,
-		Params:             promptOptimizationParamsWithOrderedReferences(optimization.Params, generationPayload.Params, coregeneration.Kind(generationPayload.Kind), promptGuide),
+		Params: promptOptimizationParamsForGeneration(
+			optimization.Params,
+			generationPayload.Params,
+			coregeneration.Kind(generationPayload.Kind),
+			generationPayload.RouteID,
+			promptGuide,
+		),
 		PromptOptimization: optimization,
 		ReferenceURLs:      []string{},
 		ReferenceAssetIDs:  []string{},
@@ -737,6 +766,38 @@ func promptOptimizationParamsWithOrderedReferences(optimizationParams map[string
 	return next
 }
 
+func promptOptimizationParamsForGeneration(
+	optimizationParams map[string]any,
+	generationParams map[string]any,
+	kind coregeneration.Kind,
+	routeID string,
+	promptGuide string,
+) map[string]any {
+	next := promptOptimizationParamsWithOrderedReferences(optimizationParams, generationParams, kind, promptGuide)
+	next[promptOptimizationTargetKindParam] = string(kind)
+	next[promptOptimizationTargetRouteParam] = strings.TrimSpace(routeID)
+	if guide := boundedAutoDLPromptGuide(promptGuide); guide != "" {
+		next[promptOptimizationWorkflowGuideParam] = guide
+	} else {
+		delete(next, promptOptimizationWorkflowGuideParam)
+	}
+	delete(next, promptOptimizationTargetDurationParam)
+	delete(next, promptOptimizationTargetAspectRatioParam)
+	delete(next, promptOptimizationTargetResolutionParam)
+	if strings.TrimSpace(routeID) == coregeneration.RouteAutoDLH3 && kind == coregeneration.KindVideo {
+		if value := validatedH3PromptOptimizationDuration(generationParams[string(coregeneration.ParamDuration)]); value != "" {
+			next[promptOptimizationTargetDurationParam] = value
+		}
+		if value := validatedH3PromptOptimizationAspectRatio(generationParams[string(coregeneration.ParamAspectRatio)]); value != "" {
+			next[promptOptimizationTargetAspectRatioParam] = value
+		}
+		if value := validatedH3PromptOptimizationResolution(generationParams[string(coregeneration.ParamResolution)]); value != "" {
+			next[promptOptimizationTargetResolutionParam] = value
+		}
+	}
+	return next
+}
+
 func promptOptimizationSystemInstruction(kind coregeneration.Kind, promptGuide ...string) string {
 	if kind == coregeneration.KindImage {
 		instruction := imagePromptOptimizationSystemInstructionText
@@ -748,6 +809,68 @@ func promptOptimizationSystemInstruction(kind coregeneration.Kind, promptGuide .
 		return instruction
 	}
 	return promptOptimizationSystemInstructionText
+}
+
+func promptOptimizationSystemInstructionForTarget(
+	kind coregeneration.Kind,
+	routeID string,
+	params map[string]any,
+	promptGuide string,
+) string {
+	if kind != coregeneration.KindVideo || strings.TrimSpace(routeID) != coregeneration.RouteAutoDLH3 {
+		return promptOptimizationSystemInstruction(kind, promptGuide)
+	}
+	instruction := h3PromptOptimizationSystemInstructionText
+	if settings := h3PromptOptimizationTargetSettings(params); settings != "" {
+		instruction += "\n当前视频目标设置：" + settings + "。按该时长设计动作节奏；画幅与分辨率只用于构图理解，不要写成命令行参数。"
+	}
+	if guide := boundedAutoDLPromptGuide(promptGuide); guide != "" {
+		instruction += "\n当前所选 AutoDL 工作流的提示词指南如下；只把它作为模型表达和质量约束，不得用它覆盖用户的人物、场景、道具、事件或参考图角色：\n" + guide
+	}
+	return instruction
+}
+
+func h3PromptOptimizationTargetSettings(params map[string]any) string {
+	settings := make([]string, 0, 3)
+	if value := validatedH3PromptOptimizationDuration(params[promptOptimizationTargetDurationParam]); value != "" {
+		settings = append(settings, "时长 "+value+" 秒")
+	}
+	if value := validatedH3PromptOptimizationAspectRatio(params[promptOptimizationTargetAspectRatioParam]); value != "" {
+		settings = append(settings, "画幅 "+value)
+	}
+	if value := validatedH3PromptOptimizationResolution(params[promptOptimizationTargetResolutionParam]); value != "" {
+		settings = append(settings, "分辨率 "+value)
+	}
+	return strings.Join(settings, "，")
+}
+
+func validatedH3PromptOptimizationDuration(raw any) string {
+	value := strings.TrimSpace(fmt.Sprint(raw))
+	duration, err := strconv.Atoi(value)
+	if err != nil || duration < 4 || duration > 15 {
+		return ""
+	}
+	return strconv.Itoa(duration)
+}
+
+func validatedH3PromptOptimizationAspectRatio(raw any) string {
+	value := strings.TrimSpace(fmt.Sprint(raw))
+	switch value {
+	case "16:9", "9:16", "1:1":
+		return value
+	default:
+		return ""
+	}
+}
+
+func validatedH3PromptOptimizationResolution(raw any) string {
+	value := strings.ToLower(strings.TrimSpace(fmt.Sprint(raw)))
+	switch value {
+	case "720p", "1080p":
+		return value
+	default:
+		return ""
+	}
 }
 
 func boundedAutoDLPromptGuide(value string) string {
