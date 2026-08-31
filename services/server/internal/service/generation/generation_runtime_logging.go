@@ -211,6 +211,7 @@ func sanitizedLogValue(value any) any {
 			"codexTurnId":   typed.CodexTurnID,
 			"codexItemId":   typed.CodexItemID,
 			"revisedPrompt": typed.RevisedPrompt,
+			"autoDLSubmissionState": typed.AutoDLSubmissionState,
 			"comfyPromptId": typed.ComfyPromptID,
 			"submittedAt":   typed.SubmittedAt,
 		}

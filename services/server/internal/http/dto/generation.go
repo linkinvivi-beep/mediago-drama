@@ -310,6 +310,7 @@ type GenerationUsage struct {
 
 // GenerationTaskRuntimeState contains only non-secret identifiers and recovery data.
 type GenerationTaskRuntimeState struct {
+	LocalTaskID            string `json:"-"`
 	CodexThreadID          string `json:"codexThreadId,omitempty"`
 	CodexTurnID            string `json:"codexTurnId,omitempty"`
 	CodexItemID            string `json:"codexItemId,omitempty"`
@@ -320,6 +321,7 @@ type GenerationTaskRuntimeState struct {
 	WorkflowProfileVersion string `json:"workflowProfileVersion,omitempty"`
 	WorkflowDigest         string `json:"workflowDigest,omitempty"`
 	APITemplateDigest      string `json:"apiTemplateDigest,omitempty"`
+	AutoDLSubmissionState string `json:"autoDLSubmissionState,omitempty"`
 	ComfyPromptID          string `json:"comfyPromptId,omitempty"`
 	SubmittedAt            string `json:"submittedAt,omitempty"`
 }

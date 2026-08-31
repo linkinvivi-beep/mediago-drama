@@ -23,6 +23,7 @@ import (
 	appworkspace "github.com/mediago-dev/mediago-drama/services/server/internal/app/workspace"
 	corecapability "github.com/mediago-dev/mediago-drama/services/server/internal/capability"
 	platformautodl "github.com/mediago-dev/mediago-drama/services/server/internal/platform/autodl"
+	platformcomfyui "github.com/mediago-dev/mediago-drama/services/server/internal/platform/comfyui"
 	platformkeychain "github.com/mediago-dev/mediago-drama/services/server/internal/platform/keychain"
 	platformprotectedpack "github.com/mediago-dev/mediago-drama/services/server/internal/platform/protectedpack"
 	"github.com/mediago-dev/mediago-drama/services/server/internal/repository"
@@ -244,6 +245,25 @@ func newAPIHandler(config Config) *apiHandler {
 	)
 	generationService := servicegeneration.NewGenerationService(settings, generationTasks, mediaAssets, generationPreferences)
 	generationService.SetGenerationRuntimeContext(shutdownCtx)
+	autoDLScheduler := servicegeneration.NewAutoDLInstanceScheduler(
+		func(ctx context.Context) ([]servicesettings.AutoDLInstanceProfile, error) {
+			configured, err := settings.GetAutoDLSettings(ctx)
+			if err != nil {
+				return nil, err
+			}
+			profiles := make([]servicesettings.AutoDLInstanceProfile, 0, len(configured.Instances))
+			for _, instance := range configured.Instances {
+				profiles = append(profiles, instance.AutoDLInstanceProfile)
+			}
+			return profiles, nil
+		},
+		autoDLAdmin.Readiness,
+	)
+	autoDLImageProvider := servicegeneration.NewAutoDLImageProvider(
+		servicegeneration.NewAutoDLWorkflowResolver(settings),
+		autoDLScheduler,
+		platformcomfyui.NewClient,
+	)
 	var codexImageProvider *servicegeneration.CodexImageProvider
 	if codexPath != "" {
 		codexImageProvider = servicegeneration.NewManagedCodexImageProvider(shutdownCtx, codexPath, serviceshared.DefaultUserDataDir())
@@ -255,19 +275,69 @@ func newAPIHandler(config Config) *apiHandler {
 			},
 		)
 	}
-	generationService.SetMediaLinkProviders(codexImageProvider, nil, func(ctx context.Context, routeID string) (bool, string) {
+	generationService.SetMediaLinkProvidersWithAutoDLImage(codexImageProvider, autoDLImageProvider, nil, func(ctx context.Context, routeID string) (bool, string) {
 		switch routeID {
 		case coregeneration.RouteCodexImage:
 			if codexImageProvider == nil {
 				return false, "Codex executable is unavailable"
 			}
 			return codexImageProvider.Ready(ctx)
+		case coregeneration.RouteAutoDLImage:
+			configured, err := settings.GetAutoDLSettings(ctx)
+			if err != nil {
+				return false, "AutoDL settings are unavailable"
+			}
+			hasInstance := false
+			for _, instance := range configured.Instances {
+				if instance.Enabled {
+					hasInstance = true
+					break
+				}
+			}
+			hasWorkflow := false
+			for _, profile := range configured.WorkflowProfiles {
+				if profile.Enabled && !profile.Archived && profile.Ready {
+					hasWorkflow = true
+					break
+				}
+			}
+			if !hasInstance || !hasWorkflow {
+				return false, "AutoDL instance or image workflow is not configured"
+			}
+			return true, ""
 		case coregeneration.RouteAutoDLH3:
 			return false, "AutoDL MiniMax H3 is not configured"
 		default:
 			return false, fmt.Sprintf("MediaLink route %q is not available", routeID)
 		}
 	})
+	if tasks, err := generationTasks.List(); err != nil {
+		slog.Error("AutoDL reservations could not be restored", "error", err)
+	} else {
+		reservations := make([]servicegeneration.PersistedInstanceReservation, 0)
+		for _, task := range tasks {
+			state := task.RuntimeState
+			recoverableSubmission := state.AutoDLSubmissionState == "accepted" || state.AutoDLSubmissionState == "outcome_unknown"
+			if (!servicegeneration.IsActiveGenerationStatus(task.Status) && !recoverableSubmission) ||
+				(task.RouteID != coregeneration.RouteAutoDLImage && task.RouteID != coregeneration.RouteAutoDLH3) ||
+				state.InstanceProfileID == "" || state.WorkflowProfileID == "" || state.WorkflowProfileVersion == "" {
+				continue
+			}
+			quarantineReason := ""
+			if state.AutoDLSubmissionState == "outcome_unknown" {
+				quarantineReason = "submission_outcome_unknown"
+			}
+			reservations = append(reservations, servicegeneration.PersistedInstanceReservation{
+				TaskID: task.ID, InstanceProfileID: state.InstanceProfileID,
+				WorkflowProfileID: state.WorkflowProfileID, WorkflowVersionID: state.WorkflowProfileVersion,
+				PromptID: state.ComfyPromptID, Quarantined: state.AutoDLSubmissionState == "outcome_unknown",
+				QuarantineReason: quarantineReason,
+			})
+		}
+		if err := autoDLScheduler.RestoreReservations(reservations); err != nil {
+			slog.Error("AutoDL reservations could not be restored", "error", err)
+		}
+	}
 	generationService.SetJimengCLIPaths(config.JimengBinPath, config.JimengBinDir)
 	generationService.SetLibTVCLIConfig(config.LibTVBinPath, config.LibTVBinDir, config.LibTVProjectID)
 	generationService.SetPippitCLIPaths(config.PippitBinPath, config.PippitBinDir)
@@ -345,6 +415,7 @@ func newAPIHandler(config Config) *apiHandler {
 		settings:          settings,
 		autoDLTunnels:     autoDLTunnels,
 		autoDLAdmin:       autoDLAdmin,
+		autoDLScheduler:   autoDLScheduler,
 		capability:        capabilityService,
 		billing:           billingService,
 		backendService:    backendService,

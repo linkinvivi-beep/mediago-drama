@@ -121,9 +121,21 @@ func (workflow *GenerationService) SetMediaLinkProviders(
 	autodlH3 coregeneration.Provider,
 	readiness func(context.Context, string) (bool, string),
 ) {
+	workflow.SetMediaLinkProvidersWithAutoDLImage(codexImage, nil, autodlH3, readiness)
+}
+
+// SetMediaLinkProvidersWithAutoDLImage installs the configurable ComfyUI image
+// provider while preserving the original three-argument setup surface.
+func (workflow *GenerationService) SetMediaLinkProvidersWithAutoDLImage(
+	codexImage coregeneration.Provider,
+	autodlImage coregeneration.Provider,
+	autodlH3 coregeneration.Provider,
+	readiness func(context.Context, string) (bool, string),
+) {
 	providers := mediaLinkRouteProviders{
-		codexImage: codexImage,
-		autodlH3:   autodlH3,
+		codexImage:  codexImage,
+		autodlImage: autodlImage,
+		autodlH3:    autodlH3,
 	}
 	workflow.generationProviderFactory = providers.providerForRoute
 	workflow.mediaLinkReadiness = readiness

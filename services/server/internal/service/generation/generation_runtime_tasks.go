@@ -177,6 +177,24 @@ func (workflow *GenerationService) RetryGenerationTask(ctx context.Context, id s
 		return generationMessageResponse{}, http.StatusNotFound, fmt.Errorf("generation task not found")
 	}
 	projectID := workflow.projectIDForTask(task)
+	if task.RouteID == coregeneration.RouteAutoDLImage {
+		submissionState := strings.ToLower(strings.TrimSpace(task.RuntimeState.AutoDLSubmissionState))
+		if submissionState == "outcome_unknown" {
+			return GenerationResponseFromTask(task), http.StatusConflict, fmt.Errorf("AutoDL submission outcome is unknown; reconcile the instance before retrying")
+		}
+		if submissionState == "accepted" {
+			if strings.TrimSpace(task.ProviderTaskID) == "" || strings.TrimSpace(task.RuntimeState.ComfyPromptID) == "" {
+				return GenerationResponseFromTask(task), http.StatusConflict, fmt.Errorf("AutoDL accepted prompt checkpoint is incomplete")
+			}
+			resuming := SubmittedGenerationResponse(task.ID, coregeneration.KindImage)
+			nextTask := GenerationTaskWithMessage(task, resuming)
+			nextTask.ProviderTaskID = task.ProviderTaskID
+			if err := workflow.generationTasks.Upsert(nextTask); err != nil {
+				return generationMessageResponse{}, http.StatusInternalServerError, err
+			}
+			return workflow.GetGenerationVideo(ctx, task.ID)
+		}
+	}
 	if task.RouteID == coregeneration.RouteCodexImage {
 		switch status := strings.ToLower(strings.TrimSpace(task.Status)); status {
 		case "failed":
@@ -256,6 +274,27 @@ func (workflow *GenerationService) RetryGenerationTask(ctx context.Context, id s
 	task.Model = payload.Model
 
 	generationRequest := GenerationRequestFromMessage(payload, route, referenceURLs)
+	if route.ID == coregeneration.RouteAutoDLImage && task.RuntimeState.WorkflowProfileID != "" && task.RuntimeState.WorkflowProfileVersion != "" {
+		if workflow.autoDLWorkflowResolver == nil {
+			return generationMessageResponse{}, http.StatusServiceUnavailable, fmt.Errorf("AutoDL workflow registry is unavailable")
+		}
+		resolved, resolveErr := workflow.autoDLWorkflowResolver.ResolveVersion(
+			ctx,
+			task.RuntimeState.WorkflowProfileID,
+			task.RuntimeState.WorkflowProfileVersion,
+		)
+		if resolveErr != nil || resolved.WorkflowDigest != task.RuntimeState.WorkflowDigest || resolved.APITemplateDigest != task.RuntimeState.APITemplateDigest {
+			if resolveErr != nil {
+				return generationMessageResponse{}, http.StatusServiceUnavailable, resolveErr
+			}
+			return generationMessageResponse{}, http.StatusConflict, fmt.Errorf("AutoDL retry workflow snapshot does not match persisted state")
+		}
+		generationRequest.WorkflowProfileID = resolved.ProfileID
+		if generationRequest.Options == nil {
+			generationRequest.Options = make(map[string]any)
+		}
+		generationRequest.Options[generationAutoDLWorkflowSnapshotOption] = resolved
+	}
 	generationRequest.Prompt = workflow.providerPromptForGeneration(route, payload)
 	if err := coregeneration.ValidateRequestForRoute(generationRequest, route); err != nil {
 		return generationMessageResponse{}, http.StatusBadRequest, err
@@ -1117,6 +1156,8 @@ func (workflow *GenerationService) completeSubmittedGeneration(
 
 	if task.RouteID == coregeneration.RouteCodexImage {
 		request = requestWithCodexImageTaskID(request, task.ID)
+	} else if task.RouteID == coregeneration.RouteAutoDLImage {
+		request = requestWithAutoDLImageTaskID(request, task.ID)
 	}
 	request = workflow.requestWithGenerationProgressCallback(request, runningTask, projectID, conversationID)
 	response, err := workflow.generateWithProvider(

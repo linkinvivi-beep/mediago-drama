@@ -953,6 +953,7 @@ func generationRuntimeStateUpdateForRoute(routeID string, state GenerationTaskRu
 	state.WorkflowProfileVersion = ""
 	state.WorkflowDigest = ""
 	state.APITemplateDigest = ""
+	state.AutoDLSubmissionState = ""
 	return state
 }
 
@@ -1096,6 +1097,9 @@ func mergeGenerationTaskRuntimeState(
 	}
 	if update.APITemplateDigest != "" {
 		current.APITemplateDigest = strings.TrimSpace(update.APITemplateDigest)
+	}
+	if update.AutoDLSubmissionState != "" {
+		current.AutoDLSubmissionState = strings.TrimSpace(update.AutoDLSubmissionState)
 	}
 	if update.ComfyPromptID != "" {
 		current.ComfyPromptID = strings.TrimSpace(update.ComfyPromptID)
