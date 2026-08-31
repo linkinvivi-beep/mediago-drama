@@ -89,6 +89,7 @@ export interface AutoDLWorkflowProfile {
 
 export interface AutoDLWorkflowDefault {
 	id: string;
+	routeId?: string;
 	minReferences: number;
 	maxReferences: number;
 	workflowProfileId: string;
@@ -129,6 +130,8 @@ export interface AutoDLInstanceMutation {
 
 export interface AutoDLWorkflowMutation {
 	instanceProfileId: string;
+	mediaKind?: "image" | "video";
+	routeId?: "autodl.image" | "autodl.minimax-h3";
 	id?: string;
 	name?: string;
 	description?: string;

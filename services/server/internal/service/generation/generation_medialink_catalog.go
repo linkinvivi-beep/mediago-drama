@@ -17,6 +17,16 @@ type mediaLinkRouteProviders struct {
 	autodlH3    coregeneration.Provider
 }
 
+type autoDLRouteTaskCancellers map[string]autoDLTaskCanceller
+
+func (cancellers autoDLRouteTaskCancellers) CancelTask(ctx context.Context, task GenerationTaskRecord) error {
+	canceller := cancellers[task.RouteID]
+	if canceller == nil {
+		return fmt.Errorf("AutoDL task route %q cannot be canceled safely", task.RouteID)
+	}
+	return canceller.CancelTask(ctx, task)
+}
+
 func mediaLinkCatalog(source coregeneration.ModelCatalog) coregeneration.ModelCatalog {
 	allowed := map[string]struct{}{
 		coregeneration.RouteCodexImage:  {},
@@ -138,9 +148,16 @@ func (workflow *GenerationService) SetMediaLinkProvidersWithAutoDLImage(
 		autodlH3:    autodlH3,
 	}
 	workflow.generationProviderFactory = providers.providerForRoute
-	workflow.autoDLTaskCanceller = nil
+	cancellers := autoDLRouteTaskCancellers{}
 	if canceller, ok := autodlImage.(autoDLTaskCanceller); ok {
-		workflow.autoDLTaskCanceller = canceller
+		cancellers[coregeneration.RouteAutoDLImage] = canceller
+	}
+	if canceller, ok := autodlH3.(autoDLTaskCanceller); ok {
+		cancellers[coregeneration.RouteAutoDLH3] = canceller
+	}
+	workflow.autoDLTaskCanceller = nil
+	if len(cancellers) > 0 {
+		workflow.autoDLTaskCanceller = cancellers
 	}
 	workflow.mediaLinkReadiness = readiness
 }

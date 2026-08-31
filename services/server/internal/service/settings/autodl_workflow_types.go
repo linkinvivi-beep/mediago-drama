@@ -17,6 +17,12 @@ var (
 )
 
 const (
+	AutoDLWorkflowMediaImage = "image"
+	AutoDLWorkflowMediaVideo = "video"
+
+	AutoDLWorkflowRouteImage = "autodl.image"
+	AutoDLWorkflowRouteH3    = "autodl.minimax-h3"
+
 	AutoDLBindingStatusUnconfirmed = "unconfirmed"
 	AutoDLBindingStatusConfirmed   = "confirmed"
 
@@ -118,6 +124,7 @@ type AutoDLWorkflowProfileResponse struct {
 
 type AutoDLWorkflowDefault struct {
 	ID                string `json:"id"`
+	RouteID           string `json:"routeId,omitempty"`
 	MinReferences     int    `json:"minReferences"`
 	MaxReferences     int    `json:"maxReferences"`
 	WorkflowProfileID string `json:"workflowProfileId"`
@@ -126,6 +133,7 @@ type AutoDLWorkflowDefault struct {
 type AutoDLWorkflowResolveRequest struct {
 	WorkflowProfileID string
 	VersionID         string
+	RouteID           string
 	ReferenceCount    int
 	ForNewTask        bool
 }
@@ -134,6 +142,8 @@ type AutoDLWorkflowCreateMutation struct {
 	ID          string
 	Name        string
 	Description string
+	MediaKind   string
+	RouteID     string
 	Compiled    comfyui.CompiledWorkflow
 	References  AutoDLReferenceContract
 	PromptGuide string
@@ -162,6 +172,8 @@ type ResolvedAutoDLWorkflow struct {
 	ProfileID         string
 	VersionID         string
 	Name              string
+	MediaKind         string
+	RouteID           string
 	WorkflowDigest    string
 	APITemplateDigest string
 	UIWorkflow        json.RawMessage

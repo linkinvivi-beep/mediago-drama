@@ -463,9 +463,16 @@ func buildAutoDLSettingsResponseFromStates(document autoDLSettingsDocument, pass
 
 func normalizeAutoDLDocumentValidations(document *autoDLSettingsDocument) {
 	versionsByProfileID := make(map[string]AutoDLWorkflowVersion, len(document.WorkflowProfiles))
+	routesByProfileID := make(map[string]string, len(document.WorkflowProfiles))
 	for _, profile := range document.WorkflowProfiles {
+		routesByProfileID[profile.ID] = profile.RouteID
 		if version, ok := currentAutoDLWorkflowVersion(profile); ok {
 			versionsByProfileID[profile.ID] = version
+		}
+	}
+	for index := range document.WorkflowDefaults {
+		if document.WorkflowDefaults[index].RouteID == "" {
+			document.WorkflowDefaults[index].RouteID = routesByProfileID[document.WorkflowDefaults[index].WorkflowProfileID]
 		}
 	}
 	for instanceIndex := range document.Instances {
@@ -553,6 +560,11 @@ func validateAutoDLDocument(document autoDLSettingsDocument) error {
 			strings.TrimSpace(profile.MediaKind) == "" || strings.TrimSpace(profile.RouteID) == "" ||
 			profile.CurrentVersionID == "" || len(profile.Versions) == 0 {
 			return fmt.Errorf("invalid workflow profile")
+		}
+		if profile.RouteID != "autodl.legacy" {
+			if _, _, err := normalizeAutoDLWorkflowRoute(profile.MediaKind, profile.RouteID); err != nil {
+				return fmt.Errorf("invalid workflow profile route")
+			}
 		}
 		if _, duplicate := profileIDs[profile.ID]; duplicate {
 			return fmt.Errorf("duplicate workflow profile")

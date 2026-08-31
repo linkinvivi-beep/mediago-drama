@@ -259,8 +259,14 @@ func newAPIHandler(config Config) *apiHandler {
 		},
 		autoDLAdmin.Readiness,
 	)
+	autoDLWorkflowResolver := servicegeneration.NewAutoDLWorkflowResolver(settings)
 	autoDLImageProvider := servicegeneration.NewAutoDLImageProvider(
-		servicegeneration.NewAutoDLWorkflowResolver(settings),
+		autoDLWorkflowResolver,
+		autoDLScheduler,
+		platformcomfyui.NewClient,
+	)
+	autoDLH3Provider := servicegeneration.NewAutoDLH3Provider(
+		autoDLWorkflowResolver,
 		autoDLScheduler,
 		platformcomfyui.NewClient,
 	)
@@ -275,21 +281,21 @@ func newAPIHandler(config Config) *apiHandler {
 			},
 		)
 	}
-	generationService.SetMediaLinkProvidersWithAutoDLImage(codexImageProvider, autoDLImageProvider, nil, func(ctx context.Context, routeID string) (bool, string) {
+	generationService.SetMediaLinkProvidersWithAutoDLImage(codexImageProvider, autoDLImageProvider, autoDLH3Provider, func(ctx context.Context, routeID string) (bool, string) {
 		switch routeID {
 		case coregeneration.RouteCodexImage:
 			if codexImageProvider == nil {
 				return false, "Codex executable is unavailable"
 			}
 			return codexImageProvider.Ready(ctx)
-		case coregeneration.RouteAutoDLImage:
+		case coregeneration.RouteAutoDLImage, coregeneration.RouteAutoDLH3:
 			configured, err := settings.GetAutoDLSettings(ctx)
 			if err != nil {
 				return false, "AutoDL settings are unavailable"
 			}
 			hasReadyWorkflow := false
 			for _, profile := range configured.WorkflowProfiles {
-				if !profile.Enabled || profile.Archived {
+				if profile.RouteID != routeID || !profile.Enabled || profile.Archived {
 					continue
 				}
 				for _, version := range profile.Versions {
@@ -324,11 +330,12 @@ func newAPIHandler(config Config) *apiHandler {
 				}
 			}
 			if !hasReadyWorkflow {
+				if routeID == coregeneration.RouteAutoDLH3 {
+					return false, "AutoDL instance or H3 workflow is not configured"
+				}
 				return false, "AutoDL instance or image workflow is not configured"
 			}
 			return true, ""
-		case coregeneration.RouteAutoDLH3:
-			return false, "AutoDL MiniMax H3 is not configured"
 		default:
 			return false, fmt.Sprintf("MediaLink route %q is not available", routeID)
 		}

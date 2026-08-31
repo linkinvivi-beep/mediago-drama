@@ -92,6 +92,7 @@ var mediaLinkFamilySpecs = []familySpec{
 				"https://docs.comfy.org/development/core-concepts/api",
 				autoDLH3Params(),
 				true,
+				withReferenceURLLimit(8),
 			),
 		},
 	},
@@ -177,10 +178,6 @@ func autoDLH3Params() RouteParamConfig {
 			{Label: "1080p", Value: "1080p"},
 		}),
 		optionalNumberRouteParam(ParamSeed, -1, 2147483647),
-		selectRouteParam(ParamProfileKind, "ref2va", []ParamOption{
-			{Label: "REF2VA", Value: "ref2va"},
-			{Label: "FL2VA", Value: "fl2va"},
-		}),
 	})
 }
 

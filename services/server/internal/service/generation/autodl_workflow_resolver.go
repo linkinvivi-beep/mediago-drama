@@ -41,11 +41,13 @@ func (resolver *autoDLWorkflowResolver) Resolve(ctx context.Context, request cor
 	if ctx == nil || ctx.Err() != nil {
 		return settingsservice.ResolvedAutoDLWorkflow{}, fmt.Errorf("AutoDL workflow resolution was canceled")
 	}
-	if strings.TrimSpace(request.RouteID) != coregeneration.RouteAutoDLImage {
-		return settingsservice.ResolvedAutoDLWorkflow{}, fmt.Errorf("generation route %q does not use a configurable AutoDL image workflow", request.RouteID)
+	routeID := strings.TrimSpace(request.RouteID)
+	if routeID != coregeneration.RouteAutoDLImage && routeID != coregeneration.RouteAutoDLH3 {
+		return settingsservice.ResolvedAutoDLWorkflow{}, fmt.Errorf("generation route %q does not use a configurable AutoDL workflow", request.RouteID)
 	}
 	resolved, err := resolver.store.ResolveAutoDLWorkflow(ctx, settingsservice.AutoDLWorkflowResolveRequest{
 		WorkflowProfileID: strings.TrimSpace(request.WorkflowProfileID),
+		RouteID:           routeID,
 		ReferenceCount:    len(request.ReferenceURLs),
 		ForNewTask:        true,
 	})

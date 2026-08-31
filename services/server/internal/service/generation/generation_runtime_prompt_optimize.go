@@ -468,7 +468,7 @@ func (workflow *GenerationService) CreatePromptOptimizedGenerationMessage(
 		return GenerationOptimizeAndGenerateResponse{}, http.StatusBadRequest, err
 	}
 	promptGuide := ""
-	if route.ID == coregeneration.RouteAutoDLImage {
+	if isAutoDLGenerationRouteID(route.ID) {
 		resolved, resolveErr := workflow.resolveAutoDLWorkflowForNewTask(ctx, coregeneration.Request{
 			RouteID: route.ID, WorkflowProfileID: payload.WorkflowProfileID, ReferenceURLs: referenceURLs,
 		})

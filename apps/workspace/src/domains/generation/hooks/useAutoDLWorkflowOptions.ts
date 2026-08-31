@@ -25,7 +25,7 @@ export const useAutoDLWorkflowOptions = (
 	referenceCount: number,
 	workflowProfileId?: string,
 ): AutoDLWorkflowOptionState => {
-	const enabled = routeId === "autodl.image";
+	const enabled = isAutoDLRoute(routeId);
 	const { data, error, isLoading } = useSWR(enabled ? autoDLSettingsKey : null, getAutoDLSettings, {
 		shouldRetryOnError: false,
 	});
@@ -33,24 +33,26 @@ export const useAutoDLWorkflowOptions = (
 		() =>
 			resolveAutoDLWorkflowOptions(
 				data,
+				routeId,
 				referenceCount,
 				workflowProfileId,
 				enabled ? error : undefined,
 				enabled && isLoading,
 			),
-		[data, enabled, error, isLoading, referenceCount, workflowProfileId],
+		[data, enabled, error, isLoading, referenceCount, routeId, workflowProfileId],
 	);
 };
 
 export const resolveAutoDLWorkflowOptions = (
 	settings: AutoDLSettingsResponse | undefined,
+	routeId: string,
 	referenceCount: number,
 	workflowProfileId?: string,
 	loadError?: unknown,
 	isLoading = false,
 ): AutoDLWorkflowOptionState => {
 	const compatibleProfiles = (settings?.workflowProfiles ?? []).filter((profile) =>
-		isCompatibleAutoDLWorkflow(settings, profile, referenceCount),
+		isCompatibleAutoDLWorkflow(settings, profile, routeId, referenceCount),
 	);
 	const selectedProfile =
 		(settings?.workflowProfiles ?? []).find((profile) => profile.id === workflowProfileId) ?? null;
@@ -62,7 +64,10 @@ export const resolveAutoDLWorkflowOptions = (
 				)
 			: [];
 	const defaults = (settings?.workflowDefaults ?? []).filter(
-		(item) => referenceCount >= item.minReferences && referenceCount <= item.maxReferences,
+		(item) =>
+			(item.routeId === routeId || (!item.routeId && routeId === "autodl.image")) &&
+			referenceCount >= item.minReferences &&
+			referenceCount <= item.maxReferences,
 	);
 	let automaticError: string | null = null;
 	if (!isLoading && settings) {
@@ -94,13 +99,15 @@ export const resolveAutoDLWorkflowOptions = (
 const isCompatibleAutoDLWorkflow = (
 	settings: AutoDLSettingsResponse | undefined,
 	profile: AutoDLWorkflowProfile,
+	routeId: string,
 	referenceCount: number,
 ) => {
+	const expectedMediaKind = routeId === "autodl.minimax-h3" ? "video" : "image";
 	if (
 		!profile.enabled ||
 		profile.archived ||
-		profile.mediaKind !== "image" ||
-		profile.routeId !== "autodl.image"
+		profile.mediaKind !== expectedMediaKind ||
+		profile.routeId !== routeId
 	)
 		return false;
 	const version = currentWorkflowVersion(profile);
@@ -115,6 +122,9 @@ const isCompatibleAutoDLWorkflow = (
 		isReadyAutoDLInstance(instance, profile, version),
 	);
 };
+
+const isAutoDLRoute = (routeId: string) =>
+	routeId === "autodl.image" || routeId === "autodl.minimax-h3";
 
 const currentWorkflowVersion = (profile: AutoDLWorkflowProfile) =>
 	profile.versions.find((version) => version.versionId === profile.currentVersionId) ?? null;

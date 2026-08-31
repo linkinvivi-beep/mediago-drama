@@ -49,6 +49,8 @@ type AutoDLWorkflowCreateRequest struct {
 	ID                string
 	Name              string
 	Description       string
+	MediaKind         string
+	RouteID           string
 	UIWorkflow        json.RawMessage
 	Bindings          comfyui.WorkflowBindings
 	References        settings.AutoDLReferenceContract
@@ -209,7 +211,7 @@ func (admin *AutoDLWorkflowAdmin) Create(ctx context.Context, request AutoDLWork
 		return settings.AutoDLWorkflowProfileResponse{}, err
 	}
 	return admin.settings.CreateAutoDLWorkflow(ctx, settings.AutoDLWorkflowCreateMutation{
-		ID: request.ID, Name: request.Name, Description: request.Description,
+		ID: request.ID, Name: request.Name, Description: request.Description, MediaKind: request.MediaKind, RouteID: request.RouteID,
 		Compiled: compiled, References: request.References, PromptGuide: request.PromptGuide,
 	})
 }

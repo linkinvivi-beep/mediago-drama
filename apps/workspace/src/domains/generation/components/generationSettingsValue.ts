@@ -199,7 +199,7 @@ const normalizeAutoDLSelection = (
 	GenerationSettingsValue,
 	"instanceProfileId" | "workflowParameters" | "workflowProfileId"
 > => {
-	if (routeId !== "autodl.image") return {};
+	if (routeId !== "autodl.image" && routeId !== "autodl.minimax-h3") return {};
 	const instanceProfileId = stringValue(raw?.instanceProfileId);
 	const workflowProfileId = stringValue(raw?.workflowProfileId);
 	const rawParameters = recordValue(raw?.workflowParameters);

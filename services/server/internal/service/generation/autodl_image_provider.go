@@ -81,6 +81,9 @@ func (provider *AutoDLImageProvider) Generate(ctx context.Context, request coreg
 			return coregeneration.Response{}, err
 		}
 	}
+	if resolved.RouteID != coregeneration.RouteAutoDLImage || resolved.MediaKind != string(coregeneration.KindImage) {
+		return coregeneration.Response{}, fmt.Errorf("selected workflow is not an AutoDL image workflow")
+	}
 	lease, err := provider.scheduler.AcquireNew(ctx, InstanceRequest{
 		TaskID: taskID, WorkflowProfileID: resolved.ProfileID, WorkflowVersionID: resolved.VersionID,
 		SelectedInstanceProfileID: strings.TrimSpace(request.InstanceProfileID),
@@ -160,7 +163,7 @@ func (provider *AutoDLImageProvider) Get(ctx context.Context, id string) (corege
 	if err != nil {
 		return coregeneration.Response{}, err
 	}
-	if resolved.WorkflowDigest != state.WorkflowDigest || resolved.APITemplateDigest != state.APITemplateDigest {
+	if resolved.RouteID != coregeneration.RouteAutoDLImage || resolved.WorkflowDigest != state.WorkflowDigest || resolved.APITemplateDigest != state.APITemplateDigest {
 		return coregeneration.Response{}, fmt.Errorf("AutoDL image workflow snapshot digest mismatch")
 	}
 	lease, err := provider.scheduler.Resume(ctx, taskIDForAutoDLResume(state), state.InstanceProfileID, state.ComfyPromptID)
@@ -200,6 +203,15 @@ func (provider *AutoDLImageProvider) CancelTask(ctx context.Context, task Genera
 	if err := provider.validate(); err != nil {
 		return err
 	}
+	return cancelAutoDLTask(ctx, provider.scheduler, provider.client, task)
+}
+
+func cancelAutoDLTask(
+	ctx context.Context,
+	scheduler InstanceScheduler,
+	clientFactory func(string) (comfyui.Client, error),
+	task GenerationTaskRecord,
+) error {
 	state := task.RuntimeState
 	submissionState := strings.ToLower(strings.TrimSpace(state.AutoDLSubmissionState))
 	if submissionState == "pre_submit" || submissionState == "" {
@@ -211,11 +223,11 @@ func (provider *AutoDLImageProvider) CancelTask(ctx context.Context, task Genera
 	if strings.TrimSpace(task.ID) == "" || strings.TrimSpace(state.InstanceProfileID) == "" || strings.TrimSpace(state.ComfyPromptID) == "" {
 		return fmt.Errorf("AutoDL task cancellation checkpoint is incomplete")
 	}
-	lease, err := provider.scheduler.Resume(ctx, task.ID, state.InstanceProfileID, state.ComfyPromptID)
+	lease, err := scheduler.Resume(ctx, task.ID, state.InstanceProfileID, state.ComfyPromptID)
 	if err != nil {
 		return err
 	}
-	client, err := provider.client(lease.Tunnel().BaseURL)
+	client, err := clientFactory(lease.Tunnel().BaseURL)
 	if err != nil {
 		_ = lease.Quarantine("cancel_client_unavailable")
 		return err
@@ -275,7 +287,7 @@ func autoDLImageTaskID(request coregeneration.Request) (string, error) {
 	value, _ := request.Options[autoDLImageTaskIDRequestOption].(string)
 	value = strings.TrimSpace(value)
 	if !safeAutoDLImageTaskID.MatchString(value) || value == "." || value == ".." {
-		return "", fmt.Errorf("AutoDL image task ID is missing or unsafe")
+		return "", fmt.Errorf("AutoDL task ID is missing or unsafe")
 	}
 	return value, nil
 }

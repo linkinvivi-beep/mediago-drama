@@ -322,6 +322,10 @@ func (service *Settings) CreateAutoDLWorkflow(ctx context.Context, mutation Auto
 	if err := validateCompiledWorkflow(mutation.Compiled, mutation.References); err != nil {
 		return AutoDLWorkflowProfileResponse{}, err
 	}
+	mediaKind, routeID, err := normalizeAutoDLWorkflowRoute(mutation.MediaKind, mutation.RouteID)
+	if err != nil {
+		return AutoDLWorkflowProfileResponse{}, err
+	}
 	service.autoDLSettingsMu.Lock()
 	defer service.autoDLSettingsMu.Unlock()
 	document, err := service.loadAutoDLDocumentLocked()
@@ -333,7 +337,7 @@ func (service *Settings) CreateAutoDLWorkflow(ctx context.Context, mutation Auto
 	}
 	version := autoDLVersionFromCompiled(id, 1, "", mutation.Compiled, mutation.References, promptGuide)
 	profile := AutoDLWorkflowProfile{
-		ID: id, Name: name, Description: description, MediaKind: "image", RouteID: "autodl.image",
+		ID: id, Name: name, Description: description, MediaKind: mediaKind, RouteID: routeID,
 		CurrentVersionID: version.VersionID, Versions: []AutoDLWorkflowVersion{version},
 	}
 	document.WorkflowProfiles = append(document.WorkflowProfiles, profile)
@@ -412,8 +416,9 @@ func (service *Settings) DuplicateAutoDLWorkflow(ctx context.Context, sourceProf
 	version.CreatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	version.UIWorkflow = bytes.Clone(sourceVersion.UIWorkflow)
 	version.APITemplate = bytes.Clone(sourceVersion.APITemplate)
+	sourceProfile := document.WorkflowProfiles[sourceIndex]
 	profile := AutoDLWorkflowProfile{
-		ID: id, Name: name, Description: description, MediaKind: "image", RouteID: "autodl.image",
+		ID: id, Name: name, Description: description, MediaKind: sourceProfile.MediaKind, RouteID: sourceProfile.RouteID,
 		CurrentVersionID: version.VersionID, Versions: []AutoDLWorkflowVersion{version},
 	}
 	document.WorkflowProfiles = append(document.WorkflowProfiles, profile)
@@ -482,12 +487,20 @@ func (service *Settings) SetAutoDLWorkflowDefaults(ctx context.Context, defaults
 	for index := range normalized {
 		item := &normalized[index]
 		item.ID = strings.TrimSpace(item.ID)
+		item.RouteID = strings.TrimSpace(item.RouteID)
 		item.WorkflowProfileID = strings.TrimSpace(item.WorkflowProfileID)
 		profileIndex := findAutoDLWorkflowProfile(document.WorkflowProfiles, item.WorkflowProfileID)
 		if !autoDLProfileIDPattern.MatchString(item.ID) || item.MinReferences < 0 || item.MaxReferences < item.MinReferences || item.MaxReferences > 8 || profileIndex < 0 {
 			return AutoDLSettingsResponse{}, fmt.Errorf("%w: workflow default", ErrAutoDLSettingsInvalid)
 		}
-		version, found := currentAutoDLWorkflowVersion(document.WorkflowProfiles[profileIndex])
+		profile := document.WorkflowProfiles[profileIndex]
+		if item.RouteID == "" {
+			item.RouteID = profile.RouteID
+		}
+		if item.RouteID != profile.RouteID {
+			return AutoDLSettingsResponse{}, fmt.Errorf("%w: workflow default route", ErrAutoDLSettingsInvalid)
+		}
+		version, found := currentAutoDLWorkflowVersion(profile)
 		if !found || item.MinReferences < version.References.Min || item.MaxReferences > version.References.Max {
 			return AutoDLSettingsResponse{}, fmt.Errorf("%w: workflow default reference range", ErrAutoDLSettingsInvalid)
 		}
@@ -496,12 +509,15 @@ func (service *Settings) SetAutoDLWorkflowDefaults(ctx context.Context, defaults
 		}
 		seenIDs[item.ID] = struct{}{}
 		for previous := 0; previous < index; previous++ {
-			if item.MinReferences <= normalized[previous].MaxReferences && normalized[previous].MinReferences <= item.MaxReferences {
+			if item.RouteID == normalized[previous].RouteID && item.MinReferences <= normalized[previous].MaxReferences && normalized[previous].MinReferences <= item.MaxReferences {
 				return AutoDLSettingsResponse{}, ErrAutoDLWorkflowDefaultOverlap
 			}
 		}
 	}
 	sort.Slice(normalized, func(left, right int) bool {
+		if normalized[left].RouteID != normalized[right].RouteID {
+			return normalized[left].RouteID < normalized[right].RouteID
+		}
 		if normalized[left].MinReferences == normalized[right].MinReferences {
 			return normalized[left].ID < normalized[right].ID
 		}
@@ -532,11 +548,12 @@ func (service *Settings) ResolveAutoDLWorkflow(ctx context.Context, request Auto
 		return ResolvedAutoDLWorkflow{}, err
 	}
 	profileID := strings.TrimSpace(request.WorkflowProfileID)
+	routeID := strings.TrimSpace(request.RouteID)
 	selectedByDefault := profileID == ""
 	if selectedByDefault {
 		matches := make([]AutoDLWorkflowDefault, 0, 1)
 		for _, candidate := range document.WorkflowDefaults {
-			if request.ReferenceCount >= candidate.MinReferences && request.ReferenceCount <= candidate.MaxReferences {
+			if (routeID == "" || candidate.RouteID == routeID) && request.ReferenceCount >= candidate.MinReferences && request.ReferenceCount <= candidate.MaxReferences {
 				matches = append(matches, candidate)
 			}
 		}
@@ -553,6 +570,9 @@ func (service *Settings) ResolveAutoDLWorkflow(ctx context.Context, request Auto
 		return ResolvedAutoDLWorkflow{}, ErrAutoDLWorkflowNotFound
 	}
 	profile := document.WorkflowProfiles[index]
+	if routeID != "" && profile.RouteID != routeID {
+		return ResolvedAutoDLWorkflow{}, ErrAutoDLWorkflowUnavailable
+	}
 	versionID := strings.TrimSpace(request.VersionID)
 	if versionID == "" {
 		versionID = profile.CurrentVersionID
@@ -583,6 +603,18 @@ func normalizeWorkflowIdentity(id, name, description, promptGuide string) (strin
 		return "", "", "", "", fmt.Errorf("%w: workflow identity", ErrAutoDLSettingsInvalid)
 	}
 	return id, name, description, promptGuide, nil
+}
+
+func normalizeAutoDLWorkflowRoute(mediaKind, routeID string) (string, string, error) {
+	mediaKind, routeID = strings.TrimSpace(mediaKind), strings.TrimSpace(routeID)
+	if mediaKind == "" && routeID == "" {
+		return AutoDLWorkflowMediaImage, AutoDLWorkflowRouteImage, nil
+	}
+	if (mediaKind == AutoDLWorkflowMediaImage && routeID == AutoDLWorkflowRouteImage) ||
+		(mediaKind == AutoDLWorkflowMediaVideo && routeID == AutoDLWorkflowRouteH3) {
+		return mediaKind, routeID, nil
+	}
+	return "", "", fmt.Errorf("%w: workflow route", ErrAutoDLSettingsInvalid)
 }
 
 func validateCompiledWorkflow(compiled comfyui.CompiledWorkflow, references AutoDLReferenceContract) error {
@@ -652,7 +684,7 @@ func findAutoDLWorkflowVersion(versions []AutoDLWorkflowVersion, versionID strin
 
 func resolvedAutoDLWorkflow(profile AutoDLWorkflowProfile, version AutoDLWorkflowVersion) ResolvedAutoDLWorkflow {
 	return ResolvedAutoDLWorkflow{
-		ProfileID: profile.ID, VersionID: version.VersionID, Name: profile.Name,
+		ProfileID: profile.ID, VersionID: version.VersionID, Name: profile.Name, MediaKind: profile.MediaKind, RouteID: profile.RouteID,
 		WorkflowDigest: version.WorkflowDigest, APITemplateDigest: version.APITemplateDigest,
 		UIWorkflow: bytes.Clone(version.UIWorkflow), APITemplate: bytes.Clone(version.APITemplate), Bindings: version.Bindings,
 		References: version.References, PromptGuide: version.PromptGuide, AutoSelectable: profile.AutoSelectable,

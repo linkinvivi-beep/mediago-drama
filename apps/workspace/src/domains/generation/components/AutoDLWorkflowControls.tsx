@@ -9,7 +9,7 @@ export const AutoDLWorkflowControls: React.FC<{
 	controller: GenerationSettingsFormController;
 	disabled?: boolean;
 }> = ({ controller, disabled = false }) => {
-	if (controller.value.routeId !== "autodl.image") return null;
+	if (!isAutoDLRoute(controller.value.routeId)) return null;
 	const options = controller.autoDLWorkflowOptions;
 	const selectedProfileAvailable =
 		!controller.value.workflowProfileId ||
@@ -130,3 +130,6 @@ const parseScalarInput = (value: string): string | number | undefined => {
 	}
 	return value;
 };
+
+const isAutoDLRoute = (routeId: string) =>
+	routeId === "autodl.image" || routeId === "autodl.minimax-h3";

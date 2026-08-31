@@ -177,7 +177,7 @@ func (workflow *GenerationService) RetryGenerationTask(ctx context.Context, id s
 		return generationMessageResponse{}, http.StatusNotFound, fmt.Errorf("generation task not found")
 	}
 	projectID := workflow.projectIDForTask(task)
-	if task.RouteID == coregeneration.RouteAutoDLImage {
+	if isAutoDLGenerationRouteID(task.RouteID) {
 		submissionState := strings.ToLower(strings.TrimSpace(task.RuntimeState.AutoDLSubmissionState))
 		if submissionState == "outcome_unknown" {
 			return GenerationResponseFromTask(task), http.StatusConflict, fmt.Errorf("AutoDL submission outcome is unknown; reconcile the instance before retrying")
@@ -186,7 +186,7 @@ func (workflow *GenerationService) RetryGenerationTask(ctx context.Context, id s
 			if strings.TrimSpace(task.ProviderTaskID) == "" || strings.TrimSpace(task.RuntimeState.ComfyPromptID) == "" {
 				return GenerationResponseFromTask(task), http.StatusConflict, fmt.Errorf("AutoDL accepted prompt checkpoint is incomplete")
 			}
-			resuming := SubmittedGenerationResponse(task.ID, coregeneration.KindImage)
+			resuming := SubmittedGenerationResponse(task.ID, coregeneration.Kind(task.Kind))
 			nextTask := GenerationTaskWithMessage(task, resuming)
 			nextTask.ProviderTaskID = task.ProviderTaskID
 			if err := workflow.generationTasks.Upsert(nextTask); err != nil {
@@ -274,7 +274,7 @@ func (workflow *GenerationService) RetryGenerationTask(ctx context.Context, id s
 	task.Model = payload.Model
 
 	generationRequest := GenerationRequestFromMessage(payload, route, referenceURLs)
-	if route.ID == coregeneration.RouteAutoDLImage && task.RuntimeState.WorkflowProfileID != "" && task.RuntimeState.WorkflowProfileVersion != "" {
+	if isAutoDLGenerationRouteID(route.ID) && task.RuntimeState.WorkflowProfileID != "" && task.RuntimeState.WorkflowProfileVersion != "" {
 		if workflow.autoDLWorkflowResolver == nil {
 			return generationMessageResponse{}, http.StatusServiceUnavailable, fmt.Errorf("AutoDL workflow registry is unavailable")
 		}
@@ -283,7 +283,7 @@ func (workflow *GenerationService) RetryGenerationTask(ctx context.Context, id s
 			task.RuntimeState.WorkflowProfileID,
 			task.RuntimeState.WorkflowProfileVersion,
 		)
-		if resolveErr != nil || resolved.WorkflowDigest != task.RuntimeState.WorkflowDigest || resolved.APITemplateDigest != task.RuntimeState.APITemplateDigest {
+		if resolveErr != nil || resolved.RouteID != route.ID || resolved.WorkflowDigest != task.RuntimeState.WorkflowDigest || resolved.APITemplateDigest != task.RuntimeState.APITemplateDigest {
 			if resolveErr != nil {
 				return generationMessageResponse{}, http.StatusServiceUnavailable, resolveErr
 			}
@@ -774,7 +774,7 @@ func (workflow *GenerationService) DeleteGenerationTask(id string) (generationTa
 		return generationTasksResponse{}, false, err
 	}
 	workflow.cancelGenerationTask(id)
-	if task.RouteID == coregeneration.RouteAutoDLImage && workflow.autoDLTaskCanceller != nil {
+	if isAutoDLGenerationRouteID(task.RouteID) && workflow.autoDLTaskCanceller != nil {
 		cancelCtx, cancel := context.WithTimeout(workflow.generationRootCtx, 30*time.Second)
 		defer cancel()
 		if err := workflow.autoDLTaskCanceller.CancelTask(cancelCtx, task); err != nil {
@@ -1165,7 +1165,7 @@ func (workflow *GenerationService) completeSubmittedGeneration(
 
 	if task.RouteID == coregeneration.RouteCodexImage {
 		request = requestWithCodexImageTaskID(request, task.ID)
-	} else if task.RouteID == coregeneration.RouteAutoDLImage {
+	} else if isAutoDLGenerationRouteID(task.RouteID) {
 		request = requestWithAutoDLImageTaskID(request, task.ID)
 	}
 	request = workflow.requestWithGenerationProgressCallback(request, runningTask, projectID, conversationID)

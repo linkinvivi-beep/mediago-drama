@@ -82,7 +82,7 @@ func (workflow *GenerationService) newGenerationProviderForStoredTaskContext(
 		return nil, err
 	}
 	var provider coregeneration.Provider
-	if route.ID == coregeneration.RouteAutoDLImage && workflow.generationProviderFactory != nil {
+	if isAutoDLGenerationRouteID(route.ID) && workflow.generationProviderFactory != nil {
 		provider, err = workflow.generationProviderFactory(route)
 	} else {
 		provider, err = workflow.newGenerationProviderContext(ctx, route)
@@ -90,12 +90,12 @@ func (workflow *GenerationService) newGenerationProviderForStoredTaskContext(
 	if err != nil {
 		return nil, err
 	}
-	if route.ID == coregeneration.RouteAutoDLImage {
+	if isAutoDLGenerationRouteID(route.ID) {
 		bound, ok := provider.(interface {
 			ForRuntimeState(GenerationTaskRuntimeState) coregeneration.Provider
 		})
 		if !ok {
-			return nil, fmt.Errorf("AutoDL image provider does not support persisted runtime state")
+			return nil, fmt.Errorf("AutoDL provider does not support persisted runtime state")
 		}
 		state := task.RuntimeState
 		state.LocalTaskID = task.ID

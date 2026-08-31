@@ -747,7 +747,7 @@ export const useGenerationSettingsForm = ({
 	const isBusy =
 		!isReady ||
 		isUploadingReference ||
-		(value.routeId === "autodl.image" && autoDLWorkflowOptions.isLoading);
+		(isAutoDLRoute(value.routeId) && autoDLWorkflowOptions.isLoading);
 	const workflowParameterNames = new Set(autoDLWorkflowOptions.parameterNames);
 	const workflowParametersValid =
 		!value.workflowParameters ||
@@ -755,7 +755,7 @@ export const useGenerationSettingsForm = ({
 		(Boolean(value.workflowProfileId) &&
 			Object.keys(value.workflowParameters).every((name) => workflowParameterNames.has(name)));
 	const autoDLSelectionValid =
-		value.routeId !== "autodl.image" ||
+		!isAutoDLRoute(value.routeId) ||
 		(!autoDLWorkflowOptions.error &&
 			(value.workflowProfileId
 				? autoDLWorkflowOptions.compatibleProfiles.some(
@@ -826,6 +826,9 @@ export const useGenerationSettingsForm = ({
 		uploadReferenceAsset,
 	};
 };
+
+const isAutoDLRoute = (routeId: string) =>
+	routeId === "autodl.image" || routeId === "autodl.minimax-h3";
 
 const emptyGenerationSettingsValue = (kind: GenerationSettingsKind): GenerationSettingsValue => ({
 	kind,

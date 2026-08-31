@@ -439,7 +439,7 @@ func (workflow *GenerationService) CreateGenerationMessage(ctx context.Context, 
 	payload.Model = generationModelForReferences(route, payload.Model, referenceURLs)
 
 	generationRequest := GenerationRequestFromMessage(payload, route, referenceURLs)
-	if route.ID == coregeneration.RouteAutoDLImage {
+	if isAutoDLGenerationRouteID(route.ID) {
 		resolved, resolveErr := workflow.resolveAutoDLWorkflowForNewTask(ctx, generationRequest)
 		if resolveErr != nil {
 			return generationMessageResponse{}, http.StatusServiceUnavailable, resolveErr

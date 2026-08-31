@@ -55,6 +55,7 @@ export const AutoDLWorkflowDialog: React.FC<AutoDLWorkflowDialogProps> = ({
 	const [profileId, setProfileId] = useState("");
 	const [name, setName] = useState("");
 	const [description, setDescription] = useState("");
+	const [routeId, setRouteId] = useState<"autodl.image" | "autodl.minimax-h3">("autodl.image");
 	const [promptGuide, setPromptGuide] = useState("");
 	const [uiWorkflow, setUIWorkflow] = useState<unknown>();
 	const [fileName, setFileName] = useState("");
@@ -74,6 +75,7 @@ export const AutoDLWorkflowDialog: React.FC<AutoDLWorkflowDialogProps> = ({
 		setProfileId(mode === "create" ? "" : (profile?.id ?? ""));
 		setName(mode === "create" ? "" : (profile?.name ?? ""));
 		setDescription(mode === "create" ? "" : (profile?.description ?? ""));
+		setRouteId(profile?.routeId === "autodl.minimax-h3" ? "autodl.minimax-h3" : "autodl.image");
 		setPromptGuide(current?.promptGuide ?? "");
 		setMinReferences(current?.references.min ?? 0);
 		setMaxReferences(current?.references.max ?? 0);
@@ -139,6 +141,8 @@ export const AutoDLWorkflowDialog: React.FC<AutoDLWorkflowDialogProps> = ({
 			if (mode === "create") {
 				await createAutoDLWorkflow({
 					instanceProfileId: instanceId,
+					mediaKind: routeId === "autodl.minimax-h3" ? "video" : "image",
+					routeId,
 					id: profileId.trim(),
 					name: name.trim(),
 					description: description.trim(),
@@ -182,6 +186,24 @@ export const AutoDLWorkflowDialog: React.FC<AutoDLWorkflowDialogProps> = ({
 				</AlertDialogHeader>
 
 				<div className="grid gap-4 py-1 md:grid-cols-2">
+					<Field label="用途">
+						{mode === "create" ? (
+							<Select
+								value={routeId}
+								onValueChange={(value) => setRouteId(value as typeof routeId)}
+							>
+								<SelectTrigger aria-label="工作流用途">
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									<SelectItem value="autodl.image">云端生图</SelectItem>
+									<SelectItem value="autodl.minimax-h3">MiniMax H3 视频</SelectItem>
+								</SelectContent>
+							</Select>
+						) : (
+							<Input value={routeLabel(routeId)} readOnly />
+						)}
+					</Field>
 					{mode === "create" ? (
 						<>
 							<Field label="工作流 ID">
@@ -384,3 +406,6 @@ const errorMessage = (error: unknown) =>
 	typeof error === "object" && error !== null && "message" in error
 		? String(error.message)
 		: "操作失败，请稍后重试。";
+
+const routeLabel = (routeId: "autodl.image" | "autodl.minimax-h3") =>
+	routeId === "autodl.minimax-h3" ? "MiniMax H3 视频" : "云端生图";

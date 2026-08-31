@@ -421,10 +421,11 @@ const WorkflowCard: React.FC<{
 					<div>
 						<div className="flex items-center gap-2">
 							<CardTitle>{profile.name}</CardTitle>
+							<Badge variant="secondary">{workflowRouteLabel(profile.routeId)}</Badge>
 							<Badge variant="outline">{profile.currentVersionId}</Badge>
 							{profile.archived ? <Badge variant="secondary">已归档</Badge> : null}
 						</div>
-						<CardDescription>{profile.description || "通用 AutoDL 云端图像工作流"}</CardDescription>
+						<CardDescription>{profile.description || "通用 AutoDL 云端工作流"}</CardDescription>
 					</div>
 					<div className="flex flex-wrap gap-2">
 						<Button type="button" size="sm" variant="outline" onClick={onReplace}>
@@ -695,6 +696,8 @@ const validationLabel = (status?: string) =>
 			: status === "stale"
 				? "需重验"
 				: "验证";
+const workflowRouteLabel = (routeId: string) =>
+	routeId === "autodl.minimax-h3" ? "H3 视频" : routeId === "autodl.image" ? "云端生图" : routeId;
 const sshCommand = (instance: AutoDLInstance) =>
 	`ssh -p ${instance.sshPort} ${instance.sshUser}@${instance.host}`;
 const errorMessage = (error: unknown) =>

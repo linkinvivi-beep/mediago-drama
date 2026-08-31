@@ -77,7 +77,7 @@ func TestMediaLinkCatalogRouteContracts(t *testing.T) {
 			wantProvider:      ProviderAutoDL,
 			wantAdapter:       AdapterAutoDLComfyH3Video,
 			wantAsync:         true,
-			wantParams:        []string{"duration", "aspectRatio", "resolution", "seed", "profileKind"},
+			wantParams:        []string{"duration", "aspectRatio", "resolution", "seed"},
 			wantReferenceURLs: true,
 		},
 	}
@@ -127,10 +127,6 @@ func TestMediaLinkH3CanonicalOptions(t *testing.T) {
 	wantDuration := []string{"4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"}
 	if !reflect.DeepEqual(duration, wantDuration) {
 		t.Fatalf("duration options = %v, want %v", duration, wantDuration)
-	}
-	profile := routeParamValues(mustParam(t, route, string(ParamProfileKind)))
-	if want := []string{"ref2va", "fl2va"}; !reflect.DeepEqual(profile, want) {
-		t.Fatalf("profile options = %v, want %v", profile, want)
 	}
 }
 

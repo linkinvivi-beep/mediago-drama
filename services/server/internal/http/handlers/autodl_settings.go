@@ -79,6 +79,8 @@ type autoDLWorkflowCreateRequest struct {
 	ID                string                                  `json:"id"`
 	Name              string                                  `json:"name"`
 	Description       string                                  `json:"description,omitempty"`
+	MediaKind         string                                  `json:"mediaKind"`
+	RouteID           string                                  `json:"routeId"`
 	UIWorkflow        json.RawMessage                         `json:"uiWorkflow"`
 	Bindings          comfyui.WorkflowBindings                `json:"bindings"`
 	References        servicesettings.AutoDLReferenceContract `json:"references"`
@@ -247,7 +249,7 @@ func (handler AutoDLSettings) HandleCreateWorkflow(context *gin.Context) {
 		return
 	}
 	result, err := handler.admin.Create(context.Request.Context(), servicegeneration.AutoDLWorkflowCreateRequest{
-		InstanceProfileID: payload.InstanceProfileID, ID: payload.ID, Name: payload.Name, Description: payload.Description,
+		InstanceProfileID: payload.InstanceProfileID, ID: payload.ID, Name: payload.Name, Description: payload.Description, MediaKind: payload.MediaKind, RouteID: payload.RouteID,
 		UIWorkflow: payload.UIWorkflow, Bindings: payload.Bindings, References: payload.References, PromptGuide: payload.PromptGuide,
 	})
 	if err != nil {

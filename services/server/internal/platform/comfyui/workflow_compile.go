@@ -522,15 +522,19 @@ func suggestWorkflowBindings(parsed parsedUIWorkflow, objectInfo ObjectInfo, tem
 			}
 			lowerName := strings.ToLower(name)
 			target := WorkflowTarget{NodeID: nodeID, InputName: name}
-			if lowerName == "text" && strings.Contains(strings.ToLower(node.Type), "textencode") {
+			if (lowerName == "text" && strings.Contains(strings.ToLower(node.Type), "textencode")) || lowerName == "prompt" {
 				suggestions.Prompts = append(suggestions.Prompts, target)
 			}
 			if lowerName == "image" && strings.Contains(strings.ToLower(node.Type), "loadimage") {
 				suggestions.References = append(suggestions.References, ReferenceBinding{Index: len(suggestions.References), Target: target})
 			}
 			switch lowerName {
-			case "seed", "width", "height", "denoise", "cfg", "steps":
+			case "seed", "width", "height", "length", "frames", "duration", "fps", "denoise", "cfg", "steps":
 				suggestions.Parameters = append(suggestions.Parameters, ParameterBinding{Name: lowerName, Target: target})
+			case "noise_seed":
+				suggestions.Parameters = append(suggestions.Parameters, ParameterBinding{Name: "seed", Target: target})
+			case "num_frames", "frame_count":
+				suggestions.Parameters = append(suggestions.Parameters, ParameterBinding{Name: "length", Target: target})
 			}
 		}
 		if definition.OutputNode {
