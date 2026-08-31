@@ -21,6 +21,29 @@ Generation routes expose canonical parameter names to UI, storage, and HTTP call
 
 Unknown params are passed through. Stored legacy preference params are upgraded on read, and stored task params are upgraded before retry.
 
+## MediaLink AutoDL Workflow Routing
+
+`autodl.image` is backed by a user-managed workflow registry rather than a model-specific provider. Each workflow profile has a stable profile ID and immutable versions. A version contains the original UI workflow, a server-compiled API template, confirmed semantic bindings, a reference-count contract, and both workflow and API-template digests. Replacing a workflow creates a new version; it does not alter a task that already captured an older version.
+
+An instance validation belongs to one exact tuple of workflow profile, workflow version, workflow digest, API-template digest, object-info digest, and SSH host fingerprint. A profile is schedulable on an instance only while that complete validation remains ready. Connection, fingerprint, workflow-version, or live ComfyUI node changes make the validation stale and fail closed.
+
+New requests may provide `workflowProfileId`. An empty value uses the single configured default whose reference-count range matches the request. More than one matching default is an error. `instanceProfileId` is optional: an empty value uses automatic scheduling; a non-empty value is a strict manual selection and is never replaced by another instance.
+
+Workflow parameters are limited to the scalar names declared by the selected version's confirmed bindings. The application never executes JavaScript, shell, Python, URLs, or embedded workflow code. It only copies bounded task values into confirmed ComfyUI node inputs on a deep-cloned API template.
+
+### Submit-once checkpoint order
+
+1. Resolve and freeze the exact workflow version and digests.
+2. Reserve one compatible instance and persist the pre-submit runtime checkpoint.
+3. Upload bounded ordered references and instantiate a cloned template.
+4. Call ComfyUI `/prompt` once.
+5. Persist the returned `prompt_id`, instance ID, version ID, digests, and submission time before polling.
+6. Resume only that prompt on that instance and version after reconnect or restart.
+
+If prompt acceptance is unknown, the instance reservation is quarantined and retry is blocked until explicit reconciliation. The application never guesses and never submits a replacement prompt. A task deletion removes a remote prompt only when `/queue` proves that exact prompt is still pending. Running, missing, or indeterminate prompts keep the task and instance quarantined so recovery information is not discarded.
+
+Codex imagegen is a separate, explicit route and uses the signed-in Codex capability rather than OpenAI Images API credentials. It is not an automatic retry for an AutoDL failure. The user must deliberately create a new Codex attempt; the original AutoDL task and its history remain unchanged.
+
 ## Resolution Vocabulary
 
 `resolution` vocabularies are isolated by kind dictionaries:

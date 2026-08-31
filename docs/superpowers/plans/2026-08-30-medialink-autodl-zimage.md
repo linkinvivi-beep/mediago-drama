@@ -1,5 +1,7 @@
 # MediaLink AutoDL Cloud Image and Instance Pool Implementation Plan
 
+> **Superseded scope note (2026-08-31):** Task 6 and Tasks 8-15 of this historical model-specific plan are superseded by `2026-08-31-medialink-configurable-comfy-workflows.md`. Keep the completed live evidence below as history, but do not reintroduce hardcoded Z-Image/FLUX profiles or repeat their workflow runs.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add `AutoDL · 云端生图` to every existing MediaLink image-generation entry and run nine validated Z-Image/FLUX workflow profiles or MiniMax H3 jobs through a shared, secure, multi-instance AutoDL pool with automatic scheduling and optional manual instance selection.
