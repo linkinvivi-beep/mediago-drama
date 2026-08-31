@@ -90,8 +90,10 @@ type QueueItem struct {
 }
 
 type UploadImageRequest struct {
-	Filename  string
-	Content   io.Reader
+	Filename string
+	// Content ownership transfers to UploadImage. Close must unblock any
+	// concurrent Read so cancellation and connection failure can terminate.
+	Content   io.ReadCloser
 	Size      int64
 	Type      string
 	Subfolder string

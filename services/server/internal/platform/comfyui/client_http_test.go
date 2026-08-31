@@ -5,28 +5,38 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
-func TestNewHTTPClientAcceptsOnlyBareLoopbackHTTPOrigins(t *testing.T) {
+func TestNewClientAcceptsOnlyBareLoopbackHTTPOrigins(t *testing.T) {
 	t.Parallel()
 
-	valid := []string{
-		"http://127.0.0.1:8188",
-		"http://localhost:8188",
-		"http://LOCALHOST:8188",
-		"http://[::1]:8188",
+	valid := []struct {
+		baseURL string
+		want    string
+	}{
+		{baseURL: "http://127.0.0.1:8188", want: "http://127.0.0.1:8188"},
+		{baseURL: "http://localhost:8188", want: "http://localhost:8188"},
+		{baseURL: "http://LOCALHOST:8188", want: "http://localhost:8188"},
+		{baseURL: "http://[::1]:8188", want: "http://[::1]:8188"},
 	}
-	for _, baseURL := range valid {
-		baseURL := baseURL
-		t.Run("accept "+baseURL, func(t *testing.T) {
+	for _, test := range valid {
+		test := test
+		t.Run("accept "+test.baseURL, func(t *testing.T) {
 			t.Parallel()
-			if _, err := NewHTTPClient(baseURL, nil); err != nil {
-				t.Fatalf("NewHTTPClient(%q) error = %v", baseURL, err)
+			client, err := NewClient(test.baseURL)
+			if err != nil {
+				t.Fatalf("NewClient(%q) error = %v", test.baseURL, err)
+			}
+			if got := client.(*httpClient).baseURL; got != test.want {
+				t.Fatalf("NewClient(%q) baseURL = %q, want canonical %q", test.baseURL, got, test.want)
 			}
 		})
 	}
@@ -38,6 +48,12 @@ func TestNewHTTPClientAcceptsOnlyBareLoopbackHTTPOrigins(t *testing.T) {
 		"http://0.0.0.0:8188",
 		"http://[::]:8188",
 		"http://localhost.example:8188",
+		"http://127.0.0.1",
+		"http://127.0.0.1:",
+		"http://127.0.0.1:0",
+		"http://127.0.0.1:65536",
+		"http://127.0.0.1:http",
+		"http://127.0.0.1:08188",
 		"http://user:secret@127.0.0.1:8188",
 		"http://127.0.0.1:8188/",
 		"http://127.0.0.1:8188/comfy",
@@ -48,10 +64,42 @@ func TestNewHTTPClientAcceptsOnlyBareLoopbackHTTPOrigins(t *testing.T) {
 		baseURL := baseURL
 		t.Run("reject "+baseURL, func(t *testing.T) {
 			t.Parallel()
-			if _, err := NewHTTPClient(baseURL, nil); !errors.Is(err, ErrInvalidBaseURL) {
-				t.Fatalf("NewHTTPClient(%q) error = %v, want ErrInvalidBaseURL", baseURL, err)
+			if _, err := NewClient(baseURL); !errors.Is(err, ErrInvalidBaseURL) {
+				t.Fatalf("NewClient(%q) error = %v, want ErrInvalidBaseURL", baseURL, err)
 			}
 		})
+	}
+}
+
+func TestNewClientIgnoresProxyEnvironmentForLoopback(t *testing.T) {
+	var proxyRequests atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		proxyRequests.Add(1)
+		http.Error(writer, "proxy must not receive loopback traffic", http.StatusBadGateway)
+	}))
+	defer proxy.Close()
+	t.Setenv("HTTP_PROXY", proxy.URL)
+	t.Setenv("http_proxy", proxy.URL)
+	t.Setenv("ALL_PROXY", proxy.URL)
+	t.Setenv("all_proxy", proxy.URL)
+	t.Setenv("NO_PROXY", "")
+	t.Setenv("no_proxy", "")
+
+	target := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, writer, `{"system":{"os":"linux"},"devices":[]}`)
+	}))
+	defer target.Close()
+
+	client, err := NewClient(target.URL)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	stats, err := client.SystemStats(context.Background())
+	if err != nil || stats.System.OS != "linux" {
+		t.Fatalf("SystemStats() = (%#v, %v)", stats, err)
+	}
+	if proxyRequests.Load() != 0 {
+		t.Fatalf("proxy received %d requests, want 0", proxyRequests.Load())
 	}
 }
 
@@ -143,7 +191,7 @@ func TestHTTPClientTypedEndpointContracts(t *testing.T) {
 		t.Fatalf("Queue() = (%#v, %v)", queue, err)
 	}
 	uploaded, err := client.UploadImage(ctx, UploadImageRequest{
-		Filename: "reference.png", Content: strings.NewReader("png-data"), Size: 8,
+		Filename: "reference.png", Content: io.NopCloser(strings.NewReader("png-data")), Size: 8,
 		Type: "input", Subfolder: "references", Overwrite: true,
 	})
 	if err != nil || uploaded.Name != "reference.png" || uploaded.Subfolder != "references" || uploaded.Type != "input" {
@@ -329,12 +377,83 @@ func TestUploadImageStreamsAndRejectsOversizedInput(t *testing.T) {
 
 	_, err := newTestClient(t, server).UploadImage(context.Background(), UploadImageRequest{
 		Filename: "too-large.png",
-		Content:  io.LimitReader(zeroReader{}, maxUploadImageBytes+1),
+		Content:  io.NopCloser(io.LimitReader(zeroReader{}, maxUploadImageBytes+1)),
 		Size:     -1,
 		Type:     "input",
 	})
 	if !errors.Is(err, ErrUploadTooLarge) {
 		t.Fatalf("UploadImage() error = %v, want ErrUploadTooLarge", err)
+	}
+}
+
+func TestUploadImageCancellationClosesOwnedBlockingContent(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.Copy(io.Discard, request.Body)
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	content := newCloseBlockingReader()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := newTestClient(t, server).UploadImage(ctx, UploadImageRequest{
+			Filename: "blocked.png",
+			Content:  content,
+			Size:     -1,
+			Type:     "input",
+		})
+		done <- err
+	}()
+	waitForSignal(t, content.started, "upload reader to start")
+	cancel()
+
+	err := waitForUploadResult(t, done, content)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("UploadImage() error = %v, want context.Canceled", err)
+	}
+	if content.closeCalls.Load() != 1 {
+		t.Fatalf("content Close calls = %d, want 1", content.closeCalls.Load())
+	}
+	waitForSignal(t, content.readExited, "owned reader Read to exit")
+}
+
+func TestUploadImageEarlyConnectionFailureClosesOwnedContent(t *testing.T) {
+	t.Parallel()
+
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	baseURL := "http://" + listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatalf("listener.Close() error = %v", err)
+	}
+	client, err := NewClient(baseURL)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	content := newCloseBlockingReader()
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.UploadImage(context.Background(), UploadImageRequest{
+			Filename: "blocked.png",
+			Content:  content,
+			Size:     -1,
+			Type:     "input",
+		})
+		done <- err
+	}()
+
+	err = waitForUploadResult(t, done, content)
+	if err == nil {
+		t.Fatal("UploadImage() error = nil, want connection failure")
+	}
+	if content.closeCalls.Load() != 1 {
+		t.Fatalf("content Close calls = %d, want 1", content.closeCalls.Load())
 	}
 }
 
@@ -380,6 +499,176 @@ func TestSubmitPromptFailsClosedWhenOutcomeIsUnknown(t *testing.T) {
 				t.Fatalf("error leaked URL: %v", err)
 			}
 		})
+	}
+}
+
+func TestSubmitPromptAmbiguousHTTPStatusesAreUnknown(t *testing.T) {
+	t.Parallel()
+
+	for _, status := range []int{
+		http.StatusInternalServerError,
+		http.StatusServiceUnavailable,
+		http.StatusRequestTimeout,
+		http.StatusTooManyRequests,
+		http.StatusFound,
+	} {
+		status := status
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.WriteHeader(status)
+				writeJSON(t, writer, `{"error":"not accepted"}`)
+			}))
+			defer server.Close()
+
+			_, err := submitTestPrompt(t, server.URL, context.Background())
+			if !errors.Is(err, ErrSubmissionOutcomeUnknown) {
+				t.Fatalf("SubmitPrompt() error = %v, want ErrSubmissionOutcomeUnknown", err)
+			}
+			var statusErr *HTTPStatusError
+			if !errors.As(err, &statusErr) || statusErr.StatusCode != status {
+				t.Fatalf("SubmitPrompt() error = %v, want preserved status %d", err, status)
+			}
+		})
+	}
+}
+
+func TestSubmitPromptOnlyTreatsParseableExplicit4xxAsDefinite(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		body        string
+		wantUnknown bool
+	}{
+		{name: "parseable", body: `{"error":"invalid prompt"}`, wantUnknown: false},
+		{name: "malformed", body: `not-json`, wantUnknown: true},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(writer, test.body)
+			}))
+			defer server.Close()
+
+			_, err := submitTestPrompt(t, server.URL, context.Background())
+			if errors.Is(err, ErrSubmissionOutcomeUnknown) != test.wantUnknown {
+				t.Fatalf("SubmitPrompt() error = %v, unknown = %v, want %v", err, errors.Is(err, ErrSubmissionOutcomeUnknown), test.wantUnknown)
+			}
+			var statusErr *HTTPStatusError
+			if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusBadRequest {
+				t.Fatalf("SubmitPrompt() error = %v, want preserved status 400", err)
+			}
+		})
+	}
+}
+
+func TestSubmitPromptResponseFailuresAreUnknownAndPreserveCause(t *testing.T) {
+	t.Parallel()
+
+	t.Run("oversized error body", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			writer.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.CopyN(writer, zeroReader{}, maxErrorResponseBytes+1)
+		}))
+		defer server.Close()
+
+		_, err := submitTestPrompt(t, server.URL, context.Background())
+		if !errors.Is(err, ErrSubmissionOutcomeUnknown) || !errors.Is(err, ErrResponseTooLarge) {
+			t.Fatalf("SubmitPrompt() error = %v, want unknown and response-too-large", err)
+		}
+		var statusErr *HTTPStatusError
+		if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusInternalServerError {
+			t.Fatalf("SubmitPrompt() error = %v, want preserved status 500", err)
+		}
+	})
+
+	t.Run("truncated success body", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			writer.Header().Set("Content-Length", "100")
+			writer.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(writer, `{"prompt_id":"truncated"`)
+		}))
+		defer server.Close()
+
+		_, err := submitTestPrompt(t, server.URL, context.Background())
+		if !errors.Is(err, ErrSubmissionOutcomeUnknown) || !strings.Contains(err.Error(), "could not be read") {
+			t.Fatalf("SubmitPrompt() error = %v, want unknown with stable read failure", err)
+		}
+	})
+
+	t.Run("malformed success body", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, writer, `{"prompt_id":`)
+		}))
+		defer server.Close()
+
+		_, err := submitTestPrompt(t, server.URL, context.Background())
+		if !errors.Is(err, ErrSubmissionOutcomeUnknown) || !strings.Contains(err.Error(), "malformed JSON") {
+			t.Fatalf("SubmitPrompt() error = %v, want unknown with malformed JSON cause", err)
+		}
+	})
+
+	t.Run("oversized success body", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			writer.WriteHeader(http.StatusOK)
+			_, _ = io.CopyN(writer, zeroReader{}, maxJSONResponseBytes+1)
+		}))
+		defer server.Close()
+
+		_, err := submitTestPrompt(t, server.URL, context.Background())
+		if !errors.Is(err, ErrSubmissionOutcomeUnknown) || !errors.Is(err, ErrResponseTooLarge) {
+			t.Fatalf("SubmitPrompt() error = %v, want unknown and response-too-large", err)
+		}
+	})
+
+	t.Run("stalled error body", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			writer.WriteHeader(http.StatusServiceUnavailable)
+			writer.(http.Flusher).Flush()
+			<-request.Context().Done()
+		}))
+		defer server.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		_, err := submitTestPrompt(t, server.URL, ctx)
+		if !errors.Is(err, ErrSubmissionOutcomeUnknown) || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("SubmitPrompt() error = %v, want unknown and context deadline", err)
+		}
+		var statusErr *HTTPStatusError
+		if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("SubmitPrompt() error = %v, want preserved status 503", err)
+		}
+	})
+}
+
+func TestSubmitPromptRedirectIsUnknownAndNotFollowed(t *testing.T) {
+	t.Parallel()
+
+	var redirected atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		redirected.Add(1)
+	}))
+	defer target.Close()
+	origin := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		http.Redirect(writer, request, target.URL+"/prompt", http.StatusFound)
+	}))
+	defer origin.Close()
+
+	_, err := submitTestPrompt(t, origin.URL, context.Background())
+	if !errors.Is(err, ErrSubmissionOutcomeUnknown) {
+		t.Fatalf("SubmitPrompt() error = %v, want ErrSubmissionOutcomeUnknown", err)
+	}
+	var statusErr *HTTPStatusError
+	if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusFound {
+		t.Fatalf("SubmitPrompt() error = %v, want preserved status 302", err)
+	}
+	if redirected.Load() != 0 {
+		t.Fatalf("redirect target received %d requests, want 0", redirected.Load())
 	}
 }
 
@@ -439,11 +728,20 @@ func TestHistoryRejectsPromptIDPathTraversalBeforeRequest(t *testing.T) {
 
 func newTestClient(t *testing.T, server *httptest.Server) Client {
 	t.Helper()
-	client, err := NewHTTPClient(server.URL, server.Client())
+	client, err := NewClient(server.URL)
 	if err != nil {
-		t.Fatalf("NewHTTPClient() error = %v", err)
+		t.Fatalf("NewClient() error = %v", err)
 	}
 	return client
+}
+
+func submitTestPrompt(t *testing.T, baseURL string, ctx context.Context) (PromptSubmission, error) {
+	t.Helper()
+	client, err := NewClient(baseURL)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	return client.SubmitPrompt(ctx, json.RawMessage(`{"1":{"class_type":"KSampler"}}`), "client-1")
 }
 
 func assertMethod(t *testing.T, request *http.Request, want string) {
@@ -468,4 +766,57 @@ func (zeroReader) Read(buffer []byte) (int, error) {
 		buffer[index] = 'x'
 	}
 	return len(buffer), nil
+}
+
+type closeBlockingReader struct {
+	started    chan struct{}
+	readExited chan struct{}
+	closed     chan struct{}
+	startOnce  sync.Once
+	exitOnce   sync.Once
+	closeOnce  sync.Once
+	closeCalls atomic.Int32
+}
+
+func newCloseBlockingReader() *closeBlockingReader {
+	return &closeBlockingReader{
+		started:    make(chan struct{}),
+		readExited: make(chan struct{}),
+		closed:     make(chan struct{}),
+	}
+}
+
+func (reader *closeBlockingReader) Read([]byte) (int, error) {
+	reader.startOnce.Do(func() { close(reader.started) })
+	<-reader.closed
+	reader.exitOnce.Do(func() { close(reader.readExited) })
+	return 0, errors.New("reader closed")
+}
+
+func (reader *closeBlockingReader) Close() error {
+	reader.closeCalls.Add(1)
+	reader.closeOnce.Do(func() { close(reader.closed) })
+	return nil
+}
+
+func waitForUploadResult(t *testing.T, done <-chan error, content *closeBlockingReader) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(time.Second):
+		_ = content.Close()
+		err := <-done
+		t.Fatalf("UploadImage() did not return after cancellation/failure; eventual error = %v", err)
+		return nil
+	}
+}
+
+func waitForSignal(t *testing.T, signal <-chan struct{}, description string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for %s", description)
+	}
 }

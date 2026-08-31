@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 const (
@@ -30,31 +31,20 @@ type httpClient struct {
 
 // NewClient creates a ComfyUI client using a loopback-only transport.
 func NewClient(baseURL string) (Client, error) {
-	return NewHTTPClient(baseURL, nil)
-}
-
-// NewHTTPClient creates a ComfyUI client. A custom HTTP client is intended for
-// controlled tests; redirects are disabled in all cases.
-func NewHTTPClient(baseURL string, provided *http.Client) (Client, error) {
 	origin, err := validateBaseURL(baseURL)
 	if err != nil {
 		return nil, err
 	}
 
-	var client http.Client
-	if provided == nil {
-		transport := http.DefaultTransport.(*http.Transport).Clone()
-		transport.Proxy = nil
-		transport.DialContext = dialLoopback
-		client.Transport = transport
-	} else {
-		client = *provided
-	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.DialContext = dialLoopback
+	client := &http.Client{Transport: transport}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
 
-	return &httpClient{baseURL: origin, client: &client}, nil
+	return &httpClient{baseURL: origin, client: client}, nil
 }
 
 func validateBaseURL(raw string) (string, error) {
@@ -71,7 +61,18 @@ func validateBaseURL(raw string) (string, error) {
 	if !isAllowedLoopbackHost(parsed.Hostname()) {
 		return "", ErrInvalidBaseURL
 	}
-	return parsed.String(), nil
+	host, portText, err := net.SplitHostPort(parsed.Host)
+	if err != nil || portText == "" || (len(portText) > 1 && portText[0] == '0') {
+		return "", ErrInvalidBaseURL
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 {
+		return "", ErrInvalidBaseURL
+	}
+	if strings.EqualFold(host, "localhost") {
+		host = "localhost"
+	}
+	return "http://" + net.JoinHostPort(host, strconv.Itoa(port)), nil
 }
 
 func isAllowedLoopbackHost(host string) bool {
@@ -136,23 +137,38 @@ func (client *httpClient) Queue(ctx context.Context) (QueueState, error) {
 
 func (client *httpClient) UploadImage(ctx context.Context, input UploadImageRequest) (UploadedImage, error) {
 	var result UploadedImage
-	if err := requireContext(ctx); err != nil {
-		return result, err
-	}
-	if strings.TrimSpace(input.Filename) == "" || len(input.Filename) > maxIdentifierBytes || strings.ContainsRune(input.Filename, 0) {
-		return result, errors.New("comfyui upload filename is invalid")
-	}
 	if input.Content == nil {
 		return result, errors.New("comfyui upload content is required")
 	}
+	if err := requireContext(ctx); err != nil {
+		_ = input.Content.Close()
+		return result, err
+	}
+	if strings.TrimSpace(input.Filename) == "" || len(input.Filename) > maxIdentifierBytes || strings.ContainsRune(input.Filename, 0) {
+		_ = input.Content.Close()
+		return result, errors.New("comfyui upload filename is invalid")
+	}
 	if input.Size > maxUploadImageBytes {
+		_ = input.Content.Close()
 		return result, ErrUploadTooLarge
 	}
 	if len(input.Type) > maxIdentifierBytes || len(input.Subfolder) > maxIdentifierBytes {
+		_ = input.Content.Close()
 		return result, errors.New("comfyui upload metadata is invalid")
 	}
 
 	pipeReader, pipeWriter := io.Pipe()
+	var cleanupOnce sync.Once
+	cleanup := func(cause error) {
+		cleanupOnce.Do(func() {
+			_ = input.Content.Close()
+			if cause == nil {
+				_ = pipeReader.Close()
+			} else {
+				_ = pipeReader.CloseWithError(cause)
+			}
+		})
+	}
 	writer := multipart.NewWriter(pipeWriter)
 	contentType := writer.FormDataContentType()
 	uploadDone := make(chan error, 1)
@@ -171,14 +187,26 @@ func (client *httpClient) UploadImage(ctx context.Context, input UploadImageRequ
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, client.baseURL+"/upload/image", pipeReader)
 	if err != nil {
-		_ = pipeReader.CloseWithError(err)
+		cleanup(err)
 		<-uploadDone
 		return result, errors.New("comfyui upload request is invalid")
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", contentType)
+	stopCancellationWatch := make(chan struct{})
+	cancellationWatchDone := make(chan struct{})
+	go func() {
+		defer close(cancellationWatchDone)
+		select {
+		case <-ctx.Done():
+			cleanup(ctx.Err())
+		case <-stopCancellationWatch:
+		}
+	}()
 	response, requestErr := client.client.Do(request)
-	_ = pipeReader.Close()
+	close(stopCancellationWatch)
+	cleanup(requestErr)
+	<-cancellationWatchDone
 	uploadErr := <-uploadDone
 	if errors.Is(uploadErr, ErrUploadTooLarge) || errors.Is(requestErr, ErrUploadTooLarge) {
 		if response != nil {
@@ -265,16 +293,34 @@ func (client *httpClient) SubmitPrompt(ctx context.Context, prompt json.RawMessa
 		return result, ErrSubmissionOutcomeUnknown
 	}
 	defer response.Body.Close()
-	if err := checkStatus(response, "prompt submission"); err != nil {
+	if err := classifyPromptSubmissionStatus(response); err != nil {
 		return result, err
 	}
 	if err := decodeJSONBody(response.Body, &result, "prompt submission"); err != nil {
-		return result, ErrSubmissionOutcomeUnknown
+		return result, errors.Join(ErrSubmissionOutcomeUnknown, err)
 	}
 	if strings.TrimSpace(result.PromptID) == "" {
-		return result, ErrSubmissionOutcomeUnknown
+		return result, errors.Join(ErrSubmissionOutcomeUnknown, errors.New("comfyui prompt submission response is incomplete"))
 	}
 	return result, nil
+}
+
+func classifyPromptSubmissionStatus(response *http.Response) error {
+	if response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices {
+		return nil
+	}
+	statusErr := &HTTPStatusError{Operation: "prompt submission", StatusCode: response.StatusCode}
+	payload, err := readBounded(response.Body, maxErrorResponseBytes)
+	if err != nil {
+		return errors.Join(ErrSubmissionOutcomeUnknown, statusErr, err)
+	}
+	if response.StatusCode < http.StatusBadRequest || response.StatusCode >= http.StatusInternalServerError || response.StatusCode == http.StatusRequestTimeout || response.StatusCode == http.StatusTooManyRequests {
+		return errors.Join(ErrSubmissionOutcomeUnknown, statusErr)
+	}
+	if !json.Valid(payload) || firstJSONByte(payload) != '{' {
+		return errors.Join(ErrSubmissionOutcomeUnknown, statusErr, errors.New("comfyui prompt submission returned malformed JSON"))
+	}
+	return statusErr
 }
 
 func firstJSONByte(raw json.RawMessage) byte {
@@ -449,7 +495,14 @@ func decodeJSONBody(body io.Reader, target any, operation string) error {
 func readBounded(reader io.Reader, limit int64) ([]byte, error) {
 	payload, err := io.ReadAll(io.LimitReader(reader, limit+1))
 	if err != nil {
-		return nil, errors.New("comfyui response body could not be read")
+		stable := errors.New("comfyui response body could not be read")
+		if errors.Is(err, context.Canceled) {
+			return nil, errors.Join(stable, context.Canceled)
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, errors.Join(stable, context.DeadlineExceeded)
+		}
+		return nil, stable
 	}
 	if int64(len(payload)) > limit {
 		return nil, ErrResponseTooLarge
