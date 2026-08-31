@@ -44,6 +44,7 @@ type WorkflowInspection struct {
 }
 
 type CompiledWorkflow struct {
+	UIWorkflow        json.RawMessage  `json:"-"`
 	APITemplate       json.RawMessage  `json:"apiTemplate"`
 	Bindings          WorkflowBindings `json:"bindings"`
 	WorkflowDigest    string           `json:"workflowDigest"`
@@ -140,7 +141,7 @@ func CompileUIWorkflow(raw json.RawMessage, objectInfo ObjectInfo, bindings Work
 		return CompiledWorkflow{}, fmt.Errorf("%w: encode API template", ErrInvalidUIWorkflow)
 	}
 	return CompiledWorkflow{
-		APITemplate: apiRaw, Bindings: bindings,
+		UIWorkflow: parsed.RawCanonical, APITemplate: apiRaw, Bindings: bindings,
 		WorkflowDigest: digestJSON(parsed.RawCanonical), APITemplateDigest: digestJSON(apiRaw),
 		RequiredNodes: requiredNodes, RequiredModels: requiredModels,
 	}, nil

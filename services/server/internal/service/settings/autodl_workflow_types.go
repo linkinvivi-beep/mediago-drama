@@ -2,8 +2,18 @@ package settings
 
 import (
 	"encoding/json"
+	"errors"
 
 	"github.com/mediago-dev/mediago-drama/services/server/internal/platform/comfyui"
+)
+
+var (
+	ErrAutoDLWorkflowAlreadyExists    = errors.New("AutoDL workflow profile already exists")
+	ErrAutoDLWorkflowVersionNotFound  = errors.New("AutoDL workflow version was not found")
+	ErrAutoDLWorkflowVersionConflict  = errors.New("AutoDL workflow current version changed")
+	ErrAutoDLWorkflowUnavailable      = errors.New("AutoDL workflow is unavailable for a new task")
+	ErrAutoDLWorkflowDefaultAmbiguous = errors.New("AutoDL workflow default is ambiguous")
+	ErrAutoDLWorkflowDefaultOverlap   = errors.New("AutoDL workflow default ranges overlap")
 )
 
 const (
@@ -111,6 +121,54 @@ type AutoDLWorkflowDefault struct {
 	MinReferences     int    `json:"minReferences"`
 	MaxReferences     int    `json:"maxReferences"`
 	WorkflowProfileID string `json:"workflowProfileId"`
+}
+
+type AutoDLWorkflowResolveRequest struct {
+	WorkflowProfileID string
+	VersionID         string
+	ReferenceCount    int
+	ForNewTask        bool
+}
+
+type AutoDLWorkflowCreateMutation struct {
+	ID          string
+	Name        string
+	Description string
+	Compiled    comfyui.CompiledWorkflow
+	References  AutoDLReferenceContract
+	PromptGuide string
+}
+
+type AutoDLWorkflowVersionMutation struct {
+	ExpectedCurrentVersionID string
+	Compiled                 comfyui.CompiledWorkflow
+	References               AutoDLReferenceContract
+	PromptGuide              string
+}
+
+type AutoDLWorkflowDuplicateMutation struct {
+	ID          string
+	Name        string
+	Description string
+}
+
+type AutoDLWorkflowStateMutation struct {
+	Enabled        *bool `json:"enabled,omitempty"`
+	AutoSelectable *bool `json:"autoSelectable,omitempty"`
+	Archived       *bool `json:"archived,omitempty"`
+}
+
+type ResolvedAutoDLWorkflow struct {
+	ProfileID         string
+	VersionID         string
+	Name              string
+	WorkflowDigest    string
+	APITemplateDigest string
+	APITemplate       json.RawMessage
+	Bindings          AutoDLWorkflowBindings
+	References        AutoDLReferenceContract
+	PromptGuide       string
+	AutoSelectable    bool
 }
 
 // AutoDLWorkflowProfileMutation is retained as a narrow compatibility input

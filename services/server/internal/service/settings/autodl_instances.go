@@ -92,6 +92,7 @@ type AutoDLInstanceMutation struct {
 type AutoDLSettingsResponse struct {
 	Instances        []AutoDLInstanceResponse        `json:"instances"`
 	WorkflowProfiles []AutoDLWorkflowProfileResponse `json:"workflowProfiles"`
+	WorkflowDefaults []AutoDLWorkflowDefault         `json:"workflowDefaults"`
 }
 
 type autoDLSettingsDocument struct {
@@ -408,7 +409,9 @@ func buildAutoDLSettingsResponseFromStates(document autoDLSettingsDocument, pass
 	response := AutoDLSettingsResponse{
 		Instances:        make([]AutoDLInstanceResponse, 0, len(document.Instances)),
 		WorkflowProfiles: make([]AutoDLWorkflowProfileResponse, 0, len(document.WorkflowProfiles)),
+		WorkflowDefaults: make([]AutoDLWorkflowDefault, len(document.WorkflowDefaults)),
 	}
+	copy(response.WorkflowDefaults, document.WorkflowDefaults)
 	for _, profile := range document.Instances {
 		response.Instances = append(response.Instances, AutoDLInstanceResponse{AutoDLInstanceProfile: profile, HasPassword: passwordStates[profile.CredentialRef]})
 	}
@@ -543,6 +546,20 @@ func validateAutoDLDocument(document autoDLSettingsDocument) error {
 		if !currentFound {
 			return fmt.Errorf("current workflow version not found")
 		}
+	}
+	defaultIDs := make(map[string]struct{}, len(document.WorkflowDefaults))
+	for _, workflowDefault := range document.WorkflowDefaults {
+		if !autoDLProfileIDPattern.MatchString(workflowDefault.ID) || workflowDefault.MinReferences < 0 ||
+			workflowDefault.MaxReferences < workflowDefault.MinReferences || workflowDefault.MaxReferences > 8 {
+			return fmt.Errorf("invalid workflow default")
+		}
+		if _, found := profileIDs[workflowDefault.WorkflowProfileID]; !found {
+			return fmt.Errorf("workflow default profile not found")
+		}
+		if _, duplicate := defaultIDs[workflowDefault.ID]; duplicate {
+			return fmt.Errorf("duplicate workflow default")
+		}
+		defaultIDs[workflowDefault.ID] = struct{}{}
 	}
 	return nil
 }
