@@ -43,6 +43,16 @@ func TestCompileUIWorkflowProducesDeterministicAPITemplate(t *testing.T) {
 	}
 }
 
+func TestCompileUIWorkflowRejectsUnavailableModelEnumeration(t *testing.T) {
+	objectInfo := loadObjectInfo(t)
+	definition := objectInfo["CheckpointLoaderSimple"]
+	definition.Input.Required["ckpt_name"] = json.RawMessage(`[["different-model.safetensors"]]`)
+	objectInfo["CheckpointLoaderSimple"] = definition
+	if _, err := CompileUIWorkflow(loadFixture(t, "ui_t2i.json"), objectInfo, confirmedT2IBindings()); !errors.Is(err, ErrInvalidUIWorkflow) {
+		t.Fatalf("error = %v, want ErrInvalidUIWorkflow", err)
+	}
+}
+
 func TestInstantiateWorkflowDoesNotMutateTemplate(t *testing.T) {
 	compiled := mustCompileFixture(t, "ui_i2i.json")
 	before := append([]byte(nil), compiled.APITemplate...)

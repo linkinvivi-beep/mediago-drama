@@ -105,6 +105,40 @@ func TestAutoDLReplacingInstanceKeepsStableIdentityAndWorkflowValidation(t *test
 	}
 }
 
+func TestAutoDLChangingOnlyFingerprintMarksValidationStale(t *testing.T) {
+	service, _, _ := newAutoDLSettingsForTest()
+	instance, err := service.SaveAutoDLInstance(context.Background(), AutoDLInstanceMutation{
+		Name: "GPU A", SSHCommand: "ssh -p 16109 root@gpu-a.example.com", ComfyPort: 6006,
+		HostFingerprint: "SHA256:old", Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, err := service.SaveValidatedAutoDLWorkflowProfile(context.Background(), AutoDLWorkflowProfileMutation{
+		ID: "portrait", Name: "Portrait", Workflow: json.RawMessage(`{"nodes":[],"links":[]}`),
+		APITemplate: json.RawMessage(`{"1":{"class_type":"Test","inputs":{}}}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SaveAutoDLWorkflowValidation(context.Background(), instance.ID, AutoDLWorkflowValidation{
+		WorkflowProfileID: profile.ID, Status: AutoDLWorkflowValidationReady,
+		WorkflowDigest: profile.WorkflowDigest, APITemplateDigest: profile.APITemplateDigest,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := service.SaveAutoDLInstance(context.Background(), AutoDLInstanceMutation{
+		ID: instance.ID, Name: "GPU A", SSHCommand: "ssh -p 16109 root@gpu-a.example.com", ComfyPort: 6006,
+		HostFingerprint: "SHA256:new", Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := updated.WorkflowValidations[0]; got.Status != AutoDLWorkflowValidationStale || got.Reason != "connection_changed" {
+		t.Fatalf("validation = %#v, want stale connection_changed", got)
+	}
+}
+
 func TestAutoDLListResponseRedactsPasswords(t *testing.T) {
 	service, _, _ := newAutoDLSettingsForTest()
 	saved, err := service.SaveAutoDLInstance(context.Background(), AutoDLInstanceMutation{
@@ -131,6 +165,39 @@ func TestAutoDLListResponseRedactsPasswords(t *testing.T) {
 	}
 	if strings.Contains(string(encoded), "only-in-keychain") || strings.Contains(string(encoded), `"password"`) || strings.Contains(string(encoded), `"sshCommand"`) {
 		t.Fatalf("redacted response leaked a secret input: %s", encoded)
+	}
+}
+
+func TestAutoDLGetInstanceAndPasswordStayBackendOnly(t *testing.T) {
+	service, _, _ := newAutoDLSettingsForTest()
+	saved, err := service.SaveAutoDLInstance(context.Background(), AutoDLInstanceMutation{
+		Name: "GPU A", SSHCommand: "ssh -p 16109 root@gpu-a.example.com", Password: "keychain-only", ComfyPort: 6006, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	profile, err := service.GetAutoDLInstance(context.Background(), saved.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.ID != saved.ID || profile.Host != "gpu-a.example.com" || profile.SSHPort != 16109 {
+		t.Fatalf("GetAutoDLInstance() = %#v", profile)
+	}
+	password, err := service.Password(context.Background(), profile.CredentialRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(password) != "keychain-only" {
+		t.Fatalf("Password() = %q", password)
+	}
+	password[0] = 'X'
+	again, err := service.Password(context.Background(), profile.CredentialRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(again) != "keychain-only" {
+		t.Fatalf("Password() did not return an owned copy: %q", again)
 	}
 }
 

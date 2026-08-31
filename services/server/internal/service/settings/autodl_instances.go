@@ -129,6 +129,46 @@ func (service *Settings) GetAutoDLSettings(ctx context.Context) (AutoDLSettingsR
 	return buildAutoDLSettingsResponse(ctx, passwordStore, document)
 }
 
+// GetAutoDLInstance returns one non-secret connection profile for trusted
+// backend orchestration. Password material remains in the Keychain.
+func (service *Settings) GetAutoDLInstance(ctx context.Context, instanceID string) (AutoDLInstanceProfile, error) {
+	if err := requireAutoDLContext(ctx); err != nil {
+		return AutoDLInstanceProfile{}, err
+	}
+	service.autoDLSettingsMu.Lock()
+	defer service.autoDLSettingsMu.Unlock()
+	document, err := service.loadAutoDLDocumentLocked()
+	if err != nil {
+		return AutoDLInstanceProfile{}, err
+	}
+	index := findAutoDLInstance(document.Instances, strings.TrimSpace(instanceID))
+	if index < 0 {
+		return AutoDLInstanceProfile{}, ErrAutoDLInstanceNotFound
+	}
+	return document.Instances[index], nil
+}
+
+// Password implements autodl.TunnelPasswordSource for backend-only tunnel
+// construction. The returned byte slice is newly owned by the caller.
+func (service *Settings) Password(ctx context.Context, credentialRef string) ([]byte, error) {
+	if err := requireAutoDLContext(ctx); err != nil {
+		return nil, err
+	}
+	service.autoDLSettingsMu.Lock()
+	passwordStore := service.autoDLPasswords
+	service.autoDLSettingsMu.Unlock()
+	if passwordStore == nil {
+		return nil, ErrAutoDLPasswordStoreUnavailable
+	}
+	secret, err := passwordStore.Get(ctx, autoDLKeychainService, strings.TrimSpace(credentialRef))
+	if err != nil {
+		return nil, fmt.Errorf("reading AutoDL password: %w", err)
+	}
+	password := make([]byte, len(secret))
+	copy(password, secret)
+	return password, nil
+}
+
 // SaveAutoDLInstance creates or replaces a named instance while preserving its
 // stable identity, credential reference, and workflow validation records.
 func (service *Settings) SaveAutoDLInstance(ctx context.Context, mutation AutoDLInstanceMutation) (AutoDLInstanceResponse, error) {

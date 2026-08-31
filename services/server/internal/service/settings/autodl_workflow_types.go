@@ -164,6 +164,7 @@ type ResolvedAutoDLWorkflow struct {
 	Name              string
 	WorkflowDigest    string
 	APITemplateDigest string
+	UIWorkflow        json.RawMessage
 	APITemplate       json.RawMessage
 	Bindings          AutoDLWorkflowBindings
 	References        AutoDLReferenceContract

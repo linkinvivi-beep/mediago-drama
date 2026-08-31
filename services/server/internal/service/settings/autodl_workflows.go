@@ -654,7 +654,7 @@ func resolvedAutoDLWorkflow(profile AutoDLWorkflowProfile, version AutoDLWorkflo
 	return ResolvedAutoDLWorkflow{
 		ProfileID: profile.ID, VersionID: version.VersionID, Name: profile.Name,
 		WorkflowDigest: version.WorkflowDigest, APITemplateDigest: version.APITemplateDigest,
-		APITemplate: bytes.Clone(version.APITemplate), Bindings: version.Bindings,
+		UIWorkflow: bytes.Clone(version.UIWorkflow), APITemplate: bytes.Clone(version.APITemplate), Bindings: version.Bindings,
 		References: version.References, PromptGuide: version.PromptGuide, AutoSelectable: profile.AutoSelectable,
 	}
 }

@@ -448,6 +448,9 @@ func compileAPITemplate(parsed parsedUIWorkflow, objectInfo ObjectInfo) (map[str
 			if err := decoder.Decode(&value); err != nil {
 				return nil, nil, nil, ErrInvalidUIWorkflow
 			}
+			if !widgetValueAvailable(rawDefinition, value) {
+				return nil, nil, nil, fmt.Errorf("%w: unavailable widget value", ErrInvalidUIWorkflow)
+			}
 			inputs[name] = value
 			widgetIndex++
 			lowerName := strings.ToLower(name)
@@ -478,6 +481,30 @@ func isWidgetInput(raw json.RawMessage) bool {
 	case string:
 		switch strings.ToUpper(typed) {
 		case "STRING", "INT", "FLOAT", "BOOLEAN", "COMBO", "IMAGEUPLOAD":
+			return true
+		}
+	}
+	return false
+}
+
+func widgetValueAvailable(raw json.RawMessage, value any) bool {
+	var definition []any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&definition); err != nil || len(definition) == 0 {
+		return false
+	}
+	options, isEnumeration := definition[0].([]any)
+	if !isEnumeration {
+		return true
+	}
+	candidate, err := json.Marshal(value)
+	if err != nil {
+		return false
+	}
+	for _, option := range options {
+		encoded, err := json.Marshal(option)
+		if err == nil && bytes.Equal(candidate, encoded) {
 			return true
 		}
 	}
@@ -612,4 +639,14 @@ func sortedSet(values map[string]struct{}) []string {
 func digestJSON(raw json.RawMessage) string {
 	digest := sha256.Sum256(raw)
 	return fmt.Sprintf("%x", digest[:])
+}
+
+// DigestObjectInfo creates the exact compatibility identity persisted for one
+// read-only /object_info snapshot.
+func DigestObjectInfo(objectInfo ObjectInfo) (string, error) {
+	raw, err := json.Marshal(objectInfo)
+	if err != nil {
+		return "", fmt.Errorf("encode ComfyUI object info: %w", err)
+	}
+	return digestJSON(raw), nil
 }
