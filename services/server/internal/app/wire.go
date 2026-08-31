@@ -22,6 +22,7 @@ import (
 	appevents "github.com/mediago-dev/mediago-drama/services/server/internal/app/events"
 	appworkspace "github.com/mediago-dev/mediago-drama/services/server/internal/app/workspace"
 	corecapability "github.com/mediago-dev/mediago-drama/services/server/internal/capability"
+	platformautodl "github.com/mediago-dev/mediago-drama/services/server/internal/platform/autodl"
 	platformkeychain "github.com/mediago-dev/mediago-drama/services/server/internal/platform/keychain"
 	platformprotectedpack "github.com/mediago-dev/mediago-drama/services/server/internal/platform/protectedpack"
 	"github.com/mediago-dev/mediago-drama/services/server/internal/repository"
@@ -144,6 +145,8 @@ func newAPIHandler(config Config) *apiHandler {
 	settings.SetModelPlatforms(config.ModelPlatforms)
 	settings.SetGenerationCLIs(config.GenerationCLIs)
 	settings.SetMediagoBaseURL(config.MediagoBaseURL)
+	autoDLTunnels := platformautodl.NewTunnelManager(settings)
+	autoDLAdmin := servicegeneration.NewAutoDLWorkflowAdmin(settings, autoDLTunnels, platformautodl.NewSSHHostKeyScanner())
 	codexSkills := servicecodexskill.NewService(
 		workspaceState.Dir(),
 		func(ctx context.Context) (servicecodexskill.RuntimeHomeDescriptor, error) {
@@ -340,6 +343,8 @@ func newAPIHandler(config Config) *apiHandler {
 		agentBridgeURL:    agentBridgeURL,
 		agentBridgeToken:  agentBridgeToken,
 		settings:          settings,
+		autoDLTunnels:     autoDLTunnels,
+		autoDLAdmin:       autoDLAdmin,
 		capability:        capabilityService,
 		billing:           billingService,
 		backendService:    backendService,

@@ -155,6 +155,7 @@ func NewHandlerWithConfig(staticFS fs.FS, config Config) http.Handler {
 		middleware.RecoveryLogger(writeError),
 	)
 	settingsHandler := httphandlers.NewSettings(api.settings)
+	autoDLSettingsHandler := httphandlers.NewAutoDLSettings(api.settings, api.autoDLAdmin, api.autoDLScheduler)
 	capabilityHandler := httphandlers.NewCapabilities(api.capability)
 	billingHandler := httphandlers.NewBilling(api.billing)
 	mediaHandler := httphandlers.NewMediaAssets(api.mediaAssets)
@@ -221,6 +222,7 @@ func NewHandlerWithConfig(staticFS fs.FS, config Config) http.Handler {
 		Health:                healthHandler,
 		MCP:                   mcpHandler,
 		Settings:              settingsHandler,
+		AutoDLSettings:        autoDLSettingsHandler,
 		Capabilities:          capabilityHandler,
 		Billing:               billingHandler,
 		MediaAssets:           mediaHandler,

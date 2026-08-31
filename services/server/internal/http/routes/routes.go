@@ -12,6 +12,7 @@ type Handlers struct {
 	Health                httphandlers.Health
 	MCP                   httphandlers.MCP
 	Settings              httphandlers.Settings
+	AutoDLSettings        httphandlers.AutoDLSettings
 	Capabilities          httphandlers.Capabilities
 	Billing               httphandlers.Billing
 	MediaAssets           httphandlers.MediaAssets
@@ -126,6 +127,24 @@ func registerCoreRoutes(apiRoutes *gin.RouterGroup, handlers Handlers) {
 }
 
 func registerSettingsRoutes(apiRoutes *gin.RouterGroup, handlers Handlers) {
+	apiRoutes.GET("/settings/autodl", handlers.AutoDLSettings.HandleGet)
+	apiRoutes.POST("/settings/autodl/instances", handlers.AutoDLSettings.HandlePostInstance)
+	apiRoutes.PUT("/settings/autodl/instances/:instanceId", handlers.AutoDLSettings.HandlePutInstance)
+	apiRoutes.PUT("/settings/autodl/instances/:instanceId/password", handlers.AutoDLSettings.HandlePutPassword)
+	apiRoutes.DELETE("/settings/autodl/instances/:instanceId/password", handlers.AutoDLSettings.HandleDeletePassword)
+	apiRoutes.DELETE("/settings/autodl/instances/:instanceId", handlers.AutoDLSettings.HandleDeleteInstance)
+	apiRoutes.POST("/settings/autodl/instances/:instanceId/scan-fingerprint", handlers.AutoDLSettings.HandleScanFingerprint)
+	apiRoutes.POST("/settings/autodl/instances/:instanceId/check", handlers.AutoDLSettings.HandleCheckInstance)
+	apiRoutes.POST("/settings/autodl/workflows/preview", handlers.AutoDLSettings.HandlePreviewWorkflow)
+	apiRoutes.POST("/settings/autodl/workflows", handlers.AutoDLSettings.HandleCreateWorkflow)
+	apiRoutes.POST("/settings/autodl/workflows/:profileId/versions", handlers.AutoDLSettings.HandleReplaceWorkflow)
+	apiRoutes.POST("/settings/autodl/workflows/:profileId/duplicate", handlers.AutoDLSettings.HandleDuplicateWorkflow)
+	apiRoutes.PATCH("/settings/autodl/workflows/:profileId", handlers.AutoDLSettings.HandlePatchWorkflow)
+	apiRoutes.PUT("/settings/autodl/defaults", handlers.AutoDLSettings.HandlePutDefaults)
+	apiRoutes.POST(
+		"/settings/autodl/workflows/:profileId/versions/:versionId/validate/:instanceId",
+		handlers.AutoDLSettings.HandleValidateWorkflow,
+	)
 	apiRoutes.GET("/settings/jianying-draft", handlers.Settings.HandleJianyingDraftSettings)
 	apiRoutes.PUT("/settings/jianying-draft", handlers.Settings.HandlePutJianyingDraftSettings)
 	apiRoutes.GET("/settings/codex-account", handlers.Settings.HandleCodexAccount)
