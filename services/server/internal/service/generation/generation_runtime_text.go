@@ -407,6 +407,13 @@ func (workflow *GenerationService) prepareTextPromptOptimization(
 		return promptOptimizationExecution{}, http.StatusBadRequest, err
 	}
 	ordered := orderedGenerationReferencesFromParams(payload.Params)
+	if len(ordered) == 0 {
+		ordered = canonicalOrderedGenerationReferences(*payload)
+		if err := validateOrderedGenerationReferences(ordered); err != nil {
+			return promptOptimizationExecution{}, http.StatusBadRequest, err
+		}
+		payload.Params = generationParamsWithOrderedReferences(payload.Params, ordered)
+	}
 	if err := validatePromptOptimizationInput(optimization, payload.Prompt, ordered, protectedBodies); err != nil {
 		return promptOptimizationExecution{}, http.StatusBadRequest, err
 	}
@@ -429,6 +436,16 @@ func (workflow *GenerationService) prepareTextPromptOptimization(
 	}
 	targetRouteID := stringGenerationParam(payload.Params, promptOptimizationTargetRouteParam)
 	promptGuide := boundedAutoDLPromptGuide(stringGenerationParam(payload.Params, promptOptimizationWorkflowGuideParam))
+	if promptGuide == "" && isAutoDLGenerationRouteID(targetRouteID) {
+		resolved, resolveErr := workflow.resolveAutoDLWorkflowForNewTask(ctx, coregeneration.Request{
+			RouteID:       targetRouteID,
+			ReferenceURLs: make([]string, len(ordered)),
+		})
+		if resolveErr != nil {
+			return promptOptimizationExecution{}, http.StatusServiceUnavailable, resolveErr
+		}
+		promptGuide = boundedAutoDLPromptGuide(resolved.PromptGuide)
+	}
 	if targetKind == coregeneration.KindVideo && targetRouteID == coregeneration.RouteAutoDLH3 {
 		execution.MaxOutputRunes = maxH3PromptOptimizationOutputRunes
 	}

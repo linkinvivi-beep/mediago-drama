@@ -511,11 +511,17 @@ export const MediaGenerationWorkspace: React.FC<MediaGenerationWorkspaceProps> =
 		conversationId: promptOptimizeConversationId,
 		conversationScopeId: promptOptimizeConversationScopeId,
 		conversationTitle: promptOptimizeConversationTitle,
+		documentContext,
 		kind: ws.kind,
 		onSuccess: refreshPromptOptimizeHistory,
 		preferCodex: codexAvailable && !selectedPromptOptimizeModel,
 		projectId: resolvedMediaAssetProjectId || projectId,
+		referenceAssetIds: ws.effectiveReferenceAssetIds,
+		referenceBindings: ws.effectiveReferenceBindings,
+		referenceUrls: ws.effectiveReferenceUrls,
 		route: selectedPromptOptimizeModel?.route,
+		targetParams: ws.selectedParams,
+		targetRoute: ws.selectedRoute,
 		onOptimized: ws.setPrompt,
 	});
 	useEffect(() => {
