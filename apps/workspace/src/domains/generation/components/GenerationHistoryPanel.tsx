@@ -8,6 +8,7 @@ import {
 	type GenerationEntry,
 } from "@/domains/generation/hooks/useGenerationWorkspace.helpers";
 import { GenerationVideoThumbnail } from "@/domains/generation/components/GenerationVideoThumbnail";
+import { isPendingGenerationStatus } from "@/domains/generation/components/mediaGenerationHelpers";
 import { cn } from "@/shared/lib/utils";
 
 export const GenerationHistoryPanel: React.FC<{
@@ -49,7 +50,7 @@ const GenerationHistoryItem: React.FC<{
 }> = ({ entry, onSelect, selected }) => {
 	const thumbnail = entry.assets?.find((asset) => generationAssetSource(asset));
 	const source = thumbnail ? generationAssetSource(thumbnail) : "";
-	const isLoading = entry.status === "loading";
+	const isLoading = isPendingGenerationStatus(entry.status);
 
 	return (
 		<button

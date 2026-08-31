@@ -8,7 +8,10 @@ import {
 	GenerationImagePreviewSlider,
 	type GenerationImagePreviewItem,
 } from "@/domains/generation/components/GenerationImagePreviewSlider";
-import { entryGeneratedAssets } from "@/domains/generation/components/mediaGenerationHelpers";
+import {
+	entryGeneratedAssets,
+	isPendingGenerationStatus,
+} from "@/domains/generation/components/mediaGenerationHelpers";
 import {
 	generationAssetPosterSource,
 	generationAssetSelectionKey,
@@ -120,7 +123,7 @@ const GenerationResultEntry: React.FC<{
 	savingAssetKeys,
 }) => {
 	const generatedAssets = entryGeneratedAssets(entry, kind);
-	const loading = entry.status === "loading";
+	const loading = isPendingGenerationStatus(entry.status);
 
 	if (generatedAssets.length === 0) {
 		return (

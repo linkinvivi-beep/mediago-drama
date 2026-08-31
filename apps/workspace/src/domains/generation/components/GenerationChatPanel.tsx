@@ -534,12 +534,15 @@ const isPendingGenerationStatus = (status?: string) =>
 	[
 		"loading",
 		"streaming",
+		"preparing",
 		"submitting",
 		"submitted",
 		"running",
 		"pending",
 		"processing",
 		"queued",
+		"waiting_reconnect",
+		"importing",
 	].includes(String(status ?? "").toLowerCase());
 
 const isFailedGenerationStatus = (status?: string) =>
@@ -561,6 +564,9 @@ const generationFailureSummary = ({
 		return readableMessage;
 	}
 	const normalizedType = `${errorType ?? ""} ${errorCode ?? ""}`.toLowerCase();
+	if (normalizedType.includes("submission_outcome_unknown")) {
+		return "AutoDL 提交结果未知。请先在 ComfyUI 中确认是否已产生任务，再决定是否重新提交。";
+	}
 	if (normalizedType.includes("policy_violation")) {
 		return "生成结果触发供应商内容安全策略，未返回可用结果。";
 	}
@@ -580,6 +586,9 @@ const generationFailureSummary = ({
 	const detail = visibleGenerationErrorDetail(rawError) || compactGenerationError(rawError);
 	const normalized = detail.toLowerCase();
 	if (!normalized) return "生成服务没有返回错误详情。";
+	if (normalized.includes("submission outcome is unknown")) {
+		return "AutoDL 提交结果未知。请先在 ComfyUI 中确认是否已产生任务，再决定是否重新提交。";
+	}
 
 	// Legacy fallback for locally cached messages created before backend error mapping.
 	if (normalized.includes("空的图片数据") || normalized.includes("empty image")) {

@@ -100,8 +100,41 @@ export const assistantGenerationDetails = (item: {
 	return details;
 };
 
-export const assistantTaskDetails = (task: GenerationTask): ChatMessageDetail[] =>
-	assistantGenerationDetails(task);
+export const assistantTaskDetails = (task: GenerationTask): ChatMessageDetail[] => {
+	const details = assistantGenerationDetails(task);
+	const runtime = task.runtimeState;
+	if (task.routeId === "codex.imagegen") {
+		if (runtime?.revisedPrompt?.trim()) {
+			details.push({ label: "Codex 修订提示词", value: runtime.revisedPrompt.trim() });
+		}
+		details.push({ label: "额度", value: "使用 Codex 共享额度" });
+		return details;
+	}
+	if (task.routeId !== "autodl.image" && task.routeId !== "autodl.minimax-h3") {
+		return details;
+	}
+	if (runtime?.workflowProfileId?.trim()) {
+		const version = runtime.workflowProfileVersion?.trim();
+		details.push({
+			label: "工作流",
+			value: version
+				? `${runtime.workflowProfileId.trim()} @ ${version}`
+				: runtime.workflowProfileId.trim(),
+		});
+	}
+	if (runtime?.comfyPromptId?.trim()) {
+		details.push({ label: "Prompt ID", value: shortGenerationIdentifier(runtime.comfyPromptId) });
+	}
+	if (runtime?.autoDLSubmissionState === "outcome_unknown") {
+		details.push({ label: "提交状态", value: "结果未知，请先检查 ComfyUI" });
+	}
+	return details;
+};
+
+const shortGenerationIdentifier = (value: string) => {
+	const normalized = value.trim();
+	return normalized.length <= 12 ? normalized : `…${normalized.slice(-12)}`;
+};
 
 export const generationCreatedAtDetail = (createdAt?: string): ChatMessageDetail | null => {
 	const createdTime = formatGenerationTime(createdAt);
@@ -271,12 +304,15 @@ export const generationStatusLabel = (status: string) => {
 	const labels: Record<string, string> = {
 		loading: "加载中",
 		streaming: "流式生成中",
-		submitting: "提交中",
+		preparing: "准备中",
+		submitting: "正在提交",
 		submitted: "已提交",
-		running: "运行中",
+		running: "生成中",
 		pending: "等待中",
 		processing: "处理中",
 		queued: "排队中",
+		waiting_reconnect: "等待重连",
+		importing: "正在导入素材",
 		completed: "已完成",
 		succeeded: "已成功",
 		success: "已成功",
