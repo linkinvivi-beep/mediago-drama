@@ -86,6 +86,7 @@ type tunnelOperation struct {
 	instanceID string
 	targetKey  string
 	revision   uint64
+	waiters    int
 	done       chan struct{}
 	cancel     context.CancelFunc
 	ctx        context.Context
@@ -153,12 +154,15 @@ func (manager *tunnelManager) Ensure(ctx context.Context, target TunnelTarget) (
 			return manager.startTunnelOperationLocked(ctx, target, targetKey, instance, current)
 		}
 		if current := instance.operation; current != nil {
-			if current.targetKey == targetKey && current.revision == instance.revision {
+			if current.targetKey == targetKey && current.revision == instance.revision && current.reason == nil {
+				current.waiters++
 				manager.mu.Unlock()
-				return waitTunnelOperation(ctx, current)
+				return manager.waitTunnelOperation(ctx, current)
 			}
 			instance.revision++
-			current.reason = ErrTunnelSuperseded
+			if current.reason == nil {
+				current.reason = ErrTunnelSuperseded
+			}
 			current.cancel()
 		}
 		return manager.startTunnelOperationLocked(ctx, target, targetKey, instance, nil)
@@ -172,11 +176,12 @@ func (manager *tunnelManager) startTunnelOperationLocked(
 	instance *tunnelInstance,
 	retired *managedTunnel,
 ) (Tunnel, error) {
-	operationContext, cancel := context.WithCancel(ctx)
+	operationContext, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	operation := &tunnelOperation{
 		instanceID: target.InstanceProfileID,
 		targetKey:  targetKey,
 		revision:   instance.revision,
+		waiters:    1,
 		done:       make(chan struct{}),
 		cancel:     cancel,
 		ctx:        operationContext,
@@ -185,12 +190,21 @@ func (manager *tunnelManager) startTunnelOperationLocked(
 	manager.operations[operation] = struct{}{}
 	manager.mu.Unlock()
 
+	go manager.runTunnelOperation(operation, target, targetKey, retired)
+	return manager.waitTunnelOperation(ctx, operation)
+}
+
+func (manager *tunnelManager) runTunnelOperation(
+	operation *tunnelOperation,
+	target TunnelTarget,
+	targetKey string,
+	retired *managedTunnel,
+) {
 	if retired != nil {
 		retired.closeAndWait()
 	}
-	created, openErr := openManagedTunnel(operationContext, manager.passwords, target, targetKey, manager.hooks)
+	created, openErr := openManagedTunnel(operation.ctx, manager.passwords, target, targetKey, manager.hooks)
 	manager.finishTunnelOperation(operation, created, openErr)
-	return operation.result, operation.err
 }
 
 func (manager *tunnelManager) finishTunnelOperation(operation *tunnelOperation, created *managedTunnel, openErr error) {
@@ -250,12 +264,32 @@ func (manager *tunnelManager) finalizeTunnelOperationLocked(instance *tunnelInst
 	close(operation.done)
 }
 
-func waitTunnelOperation(ctx context.Context, operation *tunnelOperation) (Tunnel, error) {
+func (manager *tunnelManager) waitTunnelOperation(ctx context.Context, operation *tunnelOperation) (Tunnel, error) {
 	select {
 	case <-operation.done:
+		manager.releaseTunnelWaiter(operation, false)
 		return operation.result, operation.err
 	case <-ctx.Done():
+		manager.releaseTunnelWaiter(operation, true)
 		return Tunnel{}, ctx.Err()
+	}
+}
+
+func (manager *tunnelManager) releaseTunnelWaiter(operation *tunnelOperation, callerCanceled bool) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if operation.waiters > 0 {
+		operation.waiters--
+	}
+	if !callerCanceled || operation.waiters != 0 || operation.reason != nil {
+		return
+	}
+	select {
+	case <-operation.done:
+		return
+	default:
+		operation.reason = context.Canceled
+		operation.cancel()
 	}
 }
 

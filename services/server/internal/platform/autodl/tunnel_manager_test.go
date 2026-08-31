@@ -123,6 +123,63 @@ func TestTunnelManagerDeduplicatesConcurrentEnsure(t *testing.T) {
 	}
 }
 
+func TestTunnelManagerOwnerCancellationDoesNotCancelSameTargetWaiter(t *testing.T) {
+	server := newFakeSSHServer(t, "password")
+	passwords := &sharedOperationPasswordSource{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	manager := NewTunnelManager(passwords)
+	t.Cleanup(func() { _ = manager.CloseAll() })
+	target := fakeTunnelTarget("instance", "credential", server, 6006)
+
+	ownerContext, cancelOwner := context.WithCancel(context.Background())
+	ownerResult := make(chan error, 1)
+	go func() {
+		_, err := manager.Ensure(ownerContext, target)
+		ownerResult <- err
+	}()
+	<-passwords.started
+
+	waiterContext := newObservedDoneContext()
+	waiterResult := make(chan struct {
+		tunnel Tunnel
+		err    error
+	}, 1)
+	go func() {
+		tunnel, err := manager.Ensure(waiterContext, target)
+		waiterResult <- struct {
+			tunnel Tunnel
+			err    error
+		}{tunnel: tunnel, err: err}
+	}()
+	<-waiterContext.observed
+
+	cancelOwner()
+	select {
+	case err := <-ownerResult:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("owner Ensure error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("owner Ensure did not honor cancellation")
+	}
+
+	close(passwords.release)
+	select {
+	case result := <-waiterResult:
+		if result.err != nil {
+			t.Fatalf("same-target waiter error = %v, want successful shared tunnel", result.err)
+		}
+		assertTunnelEcho(t, tunnelAddress(t, result.tunnel), "waiter-survived")
+	case <-time.After(time.Second):
+		t.Fatal("same-target waiter did not receive the shared tunnel")
+	}
+	if calls := passwords.calls.Load(); calls != 1 {
+		t.Fatalf("password lookup calls = %d, want one shared operation", calls)
+	}
+}
+
 func TestTunnelManagerLatestDifferentTargetWins(t *testing.T) {
 	firstServer := newFakeSSHServer(t, "first-password")
 	secondServer := newFakeSSHServer(t, "second-password")
@@ -804,6 +861,44 @@ type blockingTunnelPasswordSource struct {
 	started chan struct{}
 	once    sync.Once
 	release atomic.Bool
+}
+
+type sharedOperationPasswordSource struct {
+	started chan struct{}
+	release chan struct{}
+	calls   atomic.Int64
+	once    sync.Once
+}
+
+func (source *sharedOperationPasswordSource) Password(ctx context.Context, _ string) ([]byte, error) {
+	source.calls.Add(1)
+	source.once.Do(func() { close(source.started) })
+	select {
+	case <-source.release:
+		return []byte("password"), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+type observedDoneContext struct {
+	context.Context
+	done     chan struct{}
+	observed chan struct{}
+	once     sync.Once
+}
+
+func newObservedDoneContext() *observedDoneContext {
+	return &observedDoneContext{
+		Context:  context.Background(),
+		done:     make(chan struct{}),
+		observed: make(chan struct{}),
+	}
+}
+
+func (ctx *observedDoneContext) Done() <-chan struct{} {
+	ctx.once.Do(func() { close(ctx.observed) })
+	return ctx.done
 }
 
 func (source *blockingTunnelPasswordSource) Password(ctx context.Context, _ string) ([]byte, error) {
