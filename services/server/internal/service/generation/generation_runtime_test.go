@@ -2557,6 +2557,10 @@ func TestGenerationAssetClaimsProtectCrossProviderDedupeBeforeAssociation(t *tes
 
 func newAutoDLH3DispatchWorkflow(store *GenerationTaskService, mediaAssets *media.MediaAssets, provider coregeneration.Provider) *GenerationService {
 	workflow := NewGenerationService(nil, store, mediaAssets)
+	workflow.autoDLWorkflowResolver = fixedAutoDLWorkflowResolver{resolved: settings.ResolvedAutoDLWorkflow{
+		ProfileID: "h3-ref2va", VersionID: "v1", MediaKind: string(coregeneration.KindVideo),
+		RouteID: coregeneration.RouteAutoDLH3, WorkflowDigest: "sha256:one",
+	}}
 	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		if route.ID != coregeneration.RouteAutoDLH3 {
 			return nil, fmt.Errorf("unexpected route %q", route.ID)
@@ -2565,6 +2569,18 @@ func newAutoDLH3DispatchWorkflow(store *GenerationTaskService, mediaAssets *medi
 	}
 	workflow.mediaLinkReadiness = func(context.Context, string) (bool, string) { return true, "" }
 	return workflow
+}
+
+type fixedAutoDLWorkflowResolver struct {
+	resolved settings.ResolvedAutoDLWorkflow
+}
+
+func (resolver fixedAutoDLWorkflowResolver) Resolve(context.Context, coregeneration.Request) (settings.ResolvedAutoDLWorkflow, error) {
+	return resolver.resolved, nil
+}
+
+func (resolver fixedAutoDLWorkflowResolver) ResolveVersion(context.Context, string, string) (settings.ResolvedAutoDLWorkflow, error) {
+	return resolver.resolved, nil
 }
 
 func autoDLH3GenerationRequest() GenerationMessageRequest {
@@ -4521,6 +4537,10 @@ type stubImageProvider struct {
 }
 
 func (provider *stubImageProvider) Name() string { return "stub-image" }
+
+func (provider *stubImageProvider) ForRuntimeState(GenerationTaskRuntimeState) coregeneration.Provider {
+	return provider
+}
 
 func (provider *stubImageProvider) Generate(context.Context, coregeneration.Request) (coregeneration.Response, error) {
 	provider.generateCalls.Add(1)

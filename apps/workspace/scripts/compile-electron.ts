@@ -25,6 +25,21 @@ if (result.error) {
 if (result.status !== 0) process.exit(result.status ?? 1);
 
 buildSync({
+	banner: {
+		js: 'import { createRequire as __medialinkCreateRequire } from "node:module"; const require = __medialinkCreateRequire(import.meta.url);',
+	},
+	bundle: true,
+	entryPoints: [join(workspaceDir, "electron", "src", "main.ts")],
+	external: ["electron"],
+	format: "esm",
+	logLevel: "info",
+	outfile: join(electronDistDir, "main.js"),
+	platform: "node",
+	sourcemap: false,
+	target: "node22",
+});
+
+buildSync({
 	bundle: true,
 	entryPoints: [join(workspaceDir, "electron", "src", "preload.ts")],
 	external: ["electron"],

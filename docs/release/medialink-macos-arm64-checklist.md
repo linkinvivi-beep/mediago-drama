@@ -14,7 +14,7 @@
 - [x] Codex 图片路线使用当前 Codex 登录与内置生图能力，不调用 OpenAI Images API。
 - [x] MediaLink 全局数据目录为 `~/Library/Application Support/MediaLink`；项目内部 `.mediago-drama` 标记保持兼容，不执行旧数据迁移。
 
-以上项目仅依据当前源码和构建配置静态核对，未证明安装包能够启动。
+以上项目已通过源码、构建配置、产物元数据和本机启动冒烟交叉核对。
 
 ## 2. AutoDL 与工作流前提
 
@@ -30,36 +30,35 @@
 
 ## 3. 离线质量门
 
-以下命令在本轮未执行，因为用户已要求停止重复测试：
+本机没有安装 Task CLI，因此使用对应的底层命令完成质量门；未连接 AutoDL、未调用 ComfyUI `/prompt`，也未运行任何真实工作流：
 
-- [ ] `task -d packages/core check`
-- [ ] `task -d packages/core test`
-- [ ] `task -d services/server check`
-- [ ] `task -d services/server test`
-- [ ] `go build ./...`（目录：`services/server`）
-- [ ] `pnpm check`（目录：`apps/workspace`）
-- [ ] `pnpm test`（目录：`apps/workspace`）
-- [ ] `pnpm build`（目录：`apps/workspace`）
-
-已执行的有限检查：
-
-- [x] 当前提交的 staged TypeScript 文件通过提交钩子的 `oxlint --fix` 与 `oxfmt`。
-- [x] 本轮提交前执行 `git diff --check`，没有空白错误。
+- [x] `go test ./... -count=1 -timeout=5m`（目录：`packages/core`）。
+- [x] `go vet ./...`（目录：`services/server`）。
+- [x] `go test ./... -count=1 -timeout=5m`（目录：`services/server`）。
+- [x] `node scripts/build-server-target.mjs darwin-arm64`，成功构建服务器和两个 MCP sidecar。
+- [x] `pnpm check`（目录：`apps/workspace`），0 条 lint/format 错误。
+- [x] `pnpm test`（目录：`apps/workspace`），214 个测试文件、1406 个测试通过。
+- [x] `pnpm build`（目录：`apps/workspace`）。
+- [x] Electron staged package 契约测试通过，且 `electron-updater` 已内联到主进程 ASAR。
+- [x] 提交前执行 `git diff --check`，没有空白错误。
 - [x] 未跟踪的 `work/` 目录保持未修改、未暂存。
 
 ## 4. Apple Silicon 构建与安装检查
 
-本轮未构建安装包，以下项目仍待执行：
+- [x] 从仓库根目录准备 arm64 sidecar 与资源。
+- [x] 完成 `pnpm electron:build:darwin-arm64` 的编译、staging 与 arm64 DMG/ZIP 打包步骤。
+- [x] 输出目录只生成 MediaLink arm64 `.app`、DMG 和 ZIP，没有 Windows、Linux 或 Intel Mac 产物。
+- [x] DMG 以只读方式挂载到 `/private/tmp`，校验和验证通过，检查后正常卸载；没有覆盖现有应用。
+- [x] release 目录中的临时应用启动 8 秒，服务器在随机 loopback 端口正常启动后退出；没有遗留 MediaLink/sidecar 进程。
+- [x] 应用主可执行文件及三个 Go sidecar 经 `file` 确认为 `Mach-O 64-bit executable arm64`。
+- [x] `Info.plist` 的 `CFBundleIdentifier` 为 `app.medialink.desktop`，显示名与可执行文件名均为 `MediaLink`。
+- [x] 当前本地包明确配置为不签名、不公证；`codesign --verify --deep --strict` 和 `spctl --assess` 均未通过，不宣称可直接通过 Gatekeeper 分发。
+- [x] 启动日志确认应用数据写入 `~/Library/Application Support/MediaLink`。本轮没有执行旧数据迁移或清理。
 
-- [ ] 从仓库根目录准备 arm64 sidecar 与资源。
-- [ ] 在 `apps/workspace` 执行 `pnpm electron:build:darwin-arm64`。
-- [ ] 确认输出目录只出现 MediaLink arm64 DMG/ZIP，没有 Windows、Linux 或 Intel Mac 产物。
-- [ ] 将 DMG 挂载到临时位置，不覆盖现有 MediaGo Drama 或 MediaLink 应用。
-- [ ] 启动临时应用，检查窗口标题、图标、MediaLink 配置页和三条可见路线，再正常退出。
-- [ ] 对应用主可执行文件运行 `file`，确认只包含 `arm64`。
-- [ ] 运行 `codesign -dv --verbose=4`，确认 identifier 为 `app.medialink.desktop`。
-- [ ] 运行 `spctl --assess --type execute`；若本地包未签名或未公证，记录真实失败，不宣称已公证。
-- [ ] 确认只创建 `~/Library/Application Support/MediaLink`，旧 MediaGo Drama 数据目录时间戳和内容未变化。
+产物：
+
+- `apps/workspace/release/MediaLink-0.1.0-beta.0-macos-arm64.dmg`，SHA-256 `2097cfeea37339ae46f08f0ad1e39cf2b18119b49bb4c38e643a1449a4d84719`。
+- `apps/workspace/release/MediaLink-0.1.0-beta.0-macos-arm64.zip`，SHA-256 `46dbc3bc7287025e6d999b641c0a2858f9b84fd202e264ff4ce51f8c8d55bfba`。
 
 ## 5. 真实生成验收
 
@@ -75,4 +74,4 @@
 
 ## 6. 当前结论
 
-当前代码具备进入离线质量门和 arm64 构建检查的条件，但这些检查尚未执行，因此本清单不将 MediaLink 标记为“已发布”“已通过构建”或“真实工作流已验收”。
+MediaLink 已通过本地离线质量门、macOS Apple Silicon 构建、DMG 只读挂载和临时启动冒烟。当前产物仍是未签名、未公证的开发验收包，不标记为公开发布版；真实 Codex/AutoDL 生成继续保持“未授权、未执行”。

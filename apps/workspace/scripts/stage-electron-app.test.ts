@@ -19,6 +19,7 @@ describe("MediaLink Electron staging", () => {
 		expect(stagedPackage.build.artifactName).toContain("MediaLink");
 		expect(stagedPackage.build.artifactName).toBe("MediaLink-${version}-macos-arm64.${ext}");
 		expect(stagedPackage.build.mac.icon).toBe("../../build/icons/icon.icns");
+		expect(stagedPackage).not.toHaveProperty("dependencies");
 		const config = stagedPackage.build as Record<string, unknown>;
 		expect(config.win).toBeUndefined();
 		expect(config.publish).toBeUndefined();

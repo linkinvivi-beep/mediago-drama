@@ -61,13 +61,6 @@ export function createElectronAppPackage(
 	electronVersion: string,
 	requiresCodeSigning: boolean,
 ) {
-	const electronUpdaterVersion =
-		workspacePackage.dependencies?.["electron-updater"] ??
-		workspacePackage.devDependencies?.["electron-updater"];
-	if (!electronUpdaterVersion) {
-		throw new Error("missing electron-updater dependency in workspace package");
-	}
-
 	return {
 		name: "medialink",
 		productName: "MediaLink",
@@ -77,7 +70,6 @@ export function createElectronAppPackage(
 		private: true,
 		type: "module",
 		main: "main.js",
-		dependencies: { "electron-updater": electronUpdaterVersion },
 		build: {
 			appId: "app.medialink.desktop",
 			productName: "MediaLink",

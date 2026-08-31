@@ -181,6 +181,7 @@ func TestAutoDLInstanceSchedulerManualSelectionWaitsWithoutFallback(t *testing.T
 	result := acquireAsync(scheduler, InstanceRequest{
 		TaskID:                    "task-manual",
 		WorkflowProfileID:         "image",
+		WorkflowVersionID:         "image-v1",
 		SelectedInstanceProfileID: "instance-a",
 	})
 	assertAcquireBlocked(t, result)
@@ -205,11 +206,13 @@ func TestAutoDLInstanceSchedulerManualSelectionWaitsForBusySelectedInstance(t *t
 	holder := acquireLease(t, scheduler, InstanceRequest{
 		TaskID:                    "holder",
 		WorkflowProfileID:         "image",
+		WorkflowVersionID:         "image-v1",
 		SelectedInstanceProfileID: "instance-a",
 	})
 	result := acquireAsync(scheduler, InstanceRequest{
 		TaskID:                    "waiter",
 		WorkflowProfileID:         "image",
+		WorkflowVersionID:         "image-v1",
 		SelectedInstanceProfileID: "instance-a",
 	})
 	assertAcquireBlocked(t, result)

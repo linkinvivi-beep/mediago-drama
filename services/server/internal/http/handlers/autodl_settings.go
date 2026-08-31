@@ -106,6 +106,14 @@ type autoDLWorkflowDefaultsRequest struct {
 	Defaults []servicesettings.AutoDLWorkflowDefault `json:"defaults"`
 }
 
+// HandleGet godoc
+// @Summary 获取 AutoDL 配置
+// @Description 返回脱敏实例、工作流版本和默认工作流配置。
+// @Tags Settings
+// @Produce json
+// @Success 200 {object} SwaggerEnvelope
+// @Failure 500 {object} SwaggerEnvelope
+// @Router /api/v1/settings/autodl [get]
 func (handler AutoDLSettings) HandleGet(context *gin.Context) {
 	result, err := handler.settings.GetAutoDLSettings(context.Request.Context())
 	if err != nil {
@@ -115,6 +123,16 @@ func (handler AutoDLSettings) HandleGet(context *gin.Context) {
 	httpresponse.OK(context, result)
 }
 
+// HandlePostInstance godoc
+// @Summary 新增 AutoDL 实例
+// @Description 保存 SSH 登录参数；密码仅写入系统凭据存储。
+// @Tags Settings
+// @Accept json
+// @Produce json
+// @Success 200 {object} SwaggerEnvelope
+// @Failure 400 {object} SwaggerEnvelope
+// @Failure 503 {object} SwaggerEnvelope
+// @Router /api/v1/settings/autodl/instances [post]
 func (handler AutoDLSettings) HandlePostInstance(context *gin.Context) {
 	payload, ok := decodeAutoDLJSON[autoDLInstanceRequest](context)
 	if !ok {
@@ -123,6 +141,18 @@ func (handler AutoDLSettings) HandlePostInstance(context *gin.Context) {
 	handler.saveInstance(context, "", payload)
 }
 
+// HandlePutInstance godoc
+// @Summary 更新 AutoDL 实例
+// @Description 更新指定实例的 SSH、ComfyUI 端口和启用状态。
+// @Tags Settings
+// @Accept json
+// @Produce json
+// @Param instanceId path string true "Instance ID"
+// @Success 200 {object} SwaggerEnvelope
+// @Failure 400 {object} SwaggerEnvelope
+// @Failure 404 {object} SwaggerEnvelope
+// @Failure 503 {object} SwaggerEnvelope
+// @Router /api/v1/settings/autodl/instances/{instanceId} [put]
 func (handler AutoDLSettings) HandlePutInstance(context *gin.Context) {
 	instanceID, ok := requiredPathParam(context, "instanceId", "instanceId")
 	if !ok {
@@ -152,6 +182,18 @@ func (handler AutoDLSettings) saveInstance(context *gin.Context, instanceID stri
 	httpresponse.OK(context, result)
 }
 
+// HandlePutPassword godoc
+// @Summary 保存 AutoDL 实例密码
+// @Description 将指定实例密码写入 macOS Keychain，不回传明文。
+// @Tags Settings
+// @Accept json
+// @Produce json
+// @Param instanceId path string true "Instance ID"
+// @Success 200 {object} SwaggerEnvelope
+// @Failure 400 {object} SwaggerEnvelope
+// @Failure 404 {object} SwaggerEnvelope
+// @Failure 503 {object} SwaggerEnvelope
+// @Router /api/v1/settings/autodl/instances/{instanceId}/password [put]
 func (handler AutoDLSettings) HandlePutPassword(context *gin.Context) {
 	instanceID, ok := requiredPathParam(context, "instanceId", "instanceId")
 	if !ok {
@@ -174,6 +216,16 @@ func (handler AutoDLSettings) HandlePutPassword(context *gin.Context) {
 	httpresponse.OK(context, result)
 }
 
+// HandleDeletePassword godoc
+// @Summary 清除 AutoDL 实例密码
+// @Description 从 macOS Keychain 删除指定实例密码。
+// @Tags Settings
+// @Produce json
+// @Param instanceId path string true "Instance ID"
+// @Success 200 {object} SwaggerEnvelope
+// @Failure 404 {object} SwaggerEnvelope
+// @Failure 503 {object} SwaggerEnvelope
+// @Router /api/v1/settings/autodl/instances/{instanceId}/password [delete]
 func (handler AutoDLSettings) HandleDeletePassword(context *gin.Context) {
 	instanceID, ok := requiredPathParam(context, "instanceId", "instanceId")
 	if !ok {
@@ -188,6 +240,16 @@ func (handler AutoDLSettings) HandleDeletePassword(context *gin.Context) {
 	httpresponse.OK(context, result)
 }
 
+// HandleDeleteInstance godoc
+// @Summary 删除 AutoDL 实例
+// @Description 删除指定实例配置及其凭据引用。
+// @Tags Settings
+// @Produce json
+// @Param instanceId path string true "Instance ID"
+// @Success 200 {object} SwaggerEnvelope
+// @Failure 404 {object} SwaggerEnvelope
+// @Failure 503 {object} SwaggerEnvelope
+// @Router /api/v1/settings/autodl/instances/{instanceId} [delete]
 func (handler AutoDLSettings) HandleDeleteInstance(context *gin.Context) {
 	instanceID, ok := requiredPathParam(context, "instanceId", "instanceId")
 	if !ok {
@@ -202,6 +264,16 @@ func (handler AutoDLSettings) HandleDeleteInstance(context *gin.Context) {
 	httpresponse.OK(context, result)
 }
 
+// HandleScanFingerprint godoc
+// @Summary 扫描 AutoDL 主机指纹
+// @Description 通过 SSH 获取实例当前主机指纹，供用户核对后保存。
+// @Tags Settings
+// @Produce json
+// @Param instanceId path string true "Instance ID"
+// @Success 200 {object} SwaggerEnvelope
+// @Failure 404 {object} SwaggerEnvelope
+// @Failure 503 {object} SwaggerEnvelope
+// @Router /api/v1/settings/autodl/instances/{instanceId}/scan-fingerprint [post]
 func (handler AutoDLSettings) HandleScanFingerprint(context *gin.Context) {
 	instanceID, ok := requiredPathParam(context, "instanceId", "instanceId")
 	if !ok {
@@ -215,6 +287,16 @@ func (handler AutoDLSettings) HandleScanFingerprint(context *gin.Context) {
 	httpresponse.OK(context, result)
 }
 
+// HandleCheckInstance godoc
+// @Summary 检查 AutoDL 实例
+// @Description 建立临时 SSH 隧道并检查 ComfyUI 可用性。
+// @Tags Settings
+// @Produce json
+// @Param instanceId path string true "Instance ID"
+// @Success 200 {object} SwaggerEnvelope
+// @Failure 404 {object} SwaggerEnvelope
+// @Failure 503 {object} SwaggerEnvelope
+// @Router /api/v1/settings/autodl/instances/{instanceId}/check [post]
 func (handler AutoDLSettings) HandleCheckInstance(context *gin.Context) {
 	instanceID, ok := requiredPathParam(context, "instanceId", "instanceId")
 	if !ok {
@@ -228,6 +310,16 @@ func (handler AutoDLSettings) HandleCheckInstance(context *gin.Context) {
 	httpresponse.OK(context, result)
 }
 
+// HandlePreviewWorkflow godoc
+// @Summary 预览 AutoDL 工作流语义
+// @Description 解析 ComfyUI UI 工作流并返回可绑定节点，不提交生成任务。
+// @Tags Settings
+// @Accept json
+// @Produce json
+// @Success 200 {object} SwaggerEnvelope
+// @Failure 400 {object} SwaggerEnvelope
+// @Failure 503 {object} SwaggerEnvelope
+// @Router /api/v1/settings/autodl/workflows/preview [post]
 func (handler AutoDLSettings) HandlePreviewWorkflow(context *gin.Context) {
 	payload, ok := decodeAutoDLJSON[autoDLWorkflowPreviewRequest](context)
 	if !ok {
@@ -243,6 +335,17 @@ func (handler AutoDLSettings) HandlePreviewWorkflow(context *gin.Context) {
 	httpresponse.OK(context, result)
 }
 
+// HandleCreateWorkflow godoc
+// @Summary 导入 AutoDL 工作流
+// @Description 创建工作流配置及首个不可变版本。
+// @Tags Settings
+// @Accept json
+// @Produce json
+// @Success 200 {object} SwaggerEnvelope
+// @Failure 400 {object} SwaggerEnvelope
+// @Failure 409 {object} SwaggerEnvelope
+// @Failure 422 {object} SwaggerEnvelope
+// @Router /api/v1/settings/autodl/workflows [post]
 func (handler AutoDLSettings) HandleCreateWorkflow(context *gin.Context) {
 	payload, ok := decodeAutoDLJSON[autoDLWorkflowCreateRequest](context)
 	if !ok {
@@ -260,6 +363,18 @@ func (handler AutoDLSettings) HandleCreateWorkflow(context *gin.Context) {
 	httpresponse.OK(context, result)
 }
 
+// HandleReplaceWorkflow godoc
+// @Summary 新增 AutoDL 工作流版本
+// @Description 以乐观锁方式为现有工作流新增不可变版本。
+// @Tags Settings
+// @Accept json
+// @Produce json
+// @Param profileId path string true "Workflow profile ID"
+// @Success 200 {object} SwaggerEnvelope
+// @Failure 404 {object} SwaggerEnvelope
+// @Failure 409 {object} SwaggerEnvelope
+// @Failure 422 {object} SwaggerEnvelope
+// @Router /api/v1/settings/autodl/workflows/{profileId}/versions [post]
 func (handler AutoDLSettings) HandleReplaceWorkflow(context *gin.Context) {
 	profileID, ok := requiredPathParam(context, "profileId", "profileId")
 	if !ok {
@@ -281,6 +396,17 @@ func (handler AutoDLSettings) HandleReplaceWorkflow(context *gin.Context) {
 	httpresponse.OK(context, result)
 }
 
+// HandleDuplicateWorkflow godoc
+// @Summary 复制 AutoDL 工作流
+// @Description 将现有工作流复制为新的独立配置。
+// @Tags Settings
+// @Accept json
+// @Produce json
+// @Param profileId path string true "Workflow profile ID"
+// @Success 200 {object} SwaggerEnvelope
+// @Failure 404 {object} SwaggerEnvelope
+// @Failure 409 {object} SwaggerEnvelope
+// @Router /api/v1/settings/autodl/workflows/{profileId}/duplicate [post]
 func (handler AutoDLSettings) HandleDuplicateWorkflow(context *gin.Context) {
 	profileID, ok := requiredPathParam(context, "profileId", "profileId")
 	if !ok {
@@ -301,6 +427,16 @@ func (handler AutoDLSettings) HandleDuplicateWorkflow(context *gin.Context) {
 	httpresponse.OK(context, result)
 }
 
+// HandlePatchWorkflow godoc
+// @Summary 更新 AutoDL 工作流状态
+// @Description 更新工作流名称、说明或启用状态，不修改已有版本。
+// @Tags Settings
+// @Accept json
+// @Produce json
+// @Param profileId path string true "Workflow profile ID"
+// @Success 200 {object} SwaggerEnvelope
+// @Failure 404 {object} SwaggerEnvelope
+// @Router /api/v1/settings/autodl/workflows/{profileId} [patch]
 func (handler AutoDLSettings) HandlePatchWorkflow(context *gin.Context) {
 	profileID, ok := requiredPathParam(context, "profileId", "profileId")
 	if !ok {
@@ -319,6 +455,16 @@ func (handler AutoDLSettings) HandlePatchWorkflow(context *gin.Context) {
 	httpresponse.OK(context, result)
 }
 
+// HandlePutDefaults godoc
+// @Summary 设置 AutoDL 默认工作流
+// @Description 按媒体类型和参考图数量保存默认工作流映射。
+// @Tags Settings
+// @Accept json
+// @Produce json
+// @Success 200 {object} SwaggerEnvelope
+// @Failure 400 {object} SwaggerEnvelope
+// @Failure 409 {object} SwaggerEnvelope
+// @Router /api/v1/settings/autodl/defaults [put]
 func (handler AutoDLSettings) HandlePutDefaults(context *gin.Context) {
 	payload, ok := decodeAutoDLJSON[autoDLWorkflowDefaultsRequest](context)
 	if !ok {
@@ -333,6 +479,19 @@ func (handler AutoDLSettings) HandlePutDefaults(context *gin.Context) {
 	httpresponse.OK(context, result)
 }
 
+// HandleValidateWorkflow godoc
+// @Summary 验证 AutoDL 工作流版本
+// @Description 在指定实例上验证节点、模型和绑定，不提交生成任务。
+// @Tags Settings
+// @Produce json
+// @Param profileId path string true "Workflow profile ID"
+// @Param versionId path string true "Workflow version ID"
+// @Param instanceId path string true "Instance ID"
+// @Success 200 {object} SwaggerEnvelope
+// @Failure 404 {object} SwaggerEnvelope
+// @Failure 422 {object} SwaggerEnvelope
+// @Failure 503 {object} SwaggerEnvelope
+// @Router /api/v1/settings/autodl/workflows/{profileId}/versions/{versionId}/validate/{instanceId} [post]
 func (handler AutoDLSettings) HandleValidateWorkflow(context *gin.Context) {
 	profileID, profileOK := requiredPathParam(context, "profileId", "profileId")
 	versionID, versionOK := requiredPathParam(context, "versionId", "versionId")

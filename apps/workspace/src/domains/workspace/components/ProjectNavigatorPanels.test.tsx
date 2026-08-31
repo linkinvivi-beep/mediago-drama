@@ -137,7 +137,7 @@ describe("SettingsSidebarPanel", () => {
 				.getAllByRole("button")
 				.map((button) => button.textContent)
 				.slice(0, 3),
-		).toEqual(["Codex 接入", "Codex 技能", "智能体指令"]);
+		).toEqual(["MediaLink 配置", "Codex 接入", "Codex 技能"]);
 
 		rerender(
 			<SettingsSidebarPanel
@@ -153,8 +153,8 @@ describe("SettingsSidebarPanel", () => {
 			within(otherGroup as HTMLElement)
 				.getAllByRole("button")
 				.map((button) => button.textContent)
-				.slice(0, 2),
-		).toEqual(["Codex 技能", "智能体指令"]);
+				.slice(0, 3),
+		).toEqual(["MediaLink 配置", "Codex 技能", "智能体指令"]);
 	});
 
 	it("shows the app updates settings entry", () => {

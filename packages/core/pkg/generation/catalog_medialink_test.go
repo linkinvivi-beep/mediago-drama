@@ -16,11 +16,11 @@ func TestMediaLinkCatalogRoutes(t *testing.T) {
 	}
 }
 
-func TestMediaLinkCatalogIncludesZImageWithOneReference(t *testing.T) {
+func TestMediaLinkCatalogIncludesGenericAutoDLImageWithOrderedReferences(t *testing.T) {
 	route, ok := FindRoute(RouteAutoDLImage)
 	if !ok || route.Kind != KindImage || route.Provider != ProviderAutoDL ||
 		route.Adapter != AdapterAutoDLComfyImage || !route.SupportsReferenceURLs ||
-		route.MaxReferenceURLs != 1 || route.Async {
+		route.MaxReferenceURLs != 8 || route.Async {
 		t.Fatalf("route = %+v, found = %v", route, ok)
 	}
 }
@@ -57,8 +57,8 @@ func TestMediaLinkCatalogRouteContracts(t *testing.T) {
 			name:              "AutoDL image",
 			routeID:           RouteAutoDLImage,
 			wantID:            "autodl.image",
-			wantFamilyID:      FamilyZImage,
-			wantVersionID:     VersionZImageV1,
+			wantFamilyID:      FamilyAutoDLWorkflow,
+			wantVersionID:     VersionAutoDLWorkflowV1,
 			wantLabel:         "AutoDL · 云端生图",
 			wantKind:          KindImage,
 			wantProvider:      ProviderAutoDL,
@@ -158,9 +158,9 @@ func TestMediaLinkFamiliesAreAddedWithoutRemovingLegacyCatalog(t *testing.T) {
 		versionID string
 		kind      Kind
 	}{
-		FamilyCodexImage: {versionID: VersionCodexImageV1, kind: KindImage},
-		FamilyZImage:     {versionID: VersionZImageV1, kind: KindImage},
-		FamilyMiniMaxH3:  {versionID: VersionMiniMaxH3V1, kind: KindVideo},
+		FamilyCodexImage:     {versionID: VersionCodexImageV1, kind: KindImage},
+		FamilyAutoDLWorkflow: {versionID: VersionAutoDLWorkflowV1, kind: KindImage},
+		FamilyMiniMaxH3:      {versionID: VersionMiniMaxH3V1, kind: KindVideo},
 	}
 	for _, group := range ModelFamilyGroups() {
 		expected, ok := want[group.Family.ID]
