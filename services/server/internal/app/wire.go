@@ -287,21 +287,43 @@ func newAPIHandler(config Config) *apiHandler {
 			if err != nil {
 				return false, "AutoDL settings are unavailable"
 			}
-			hasInstance := false
-			for _, instance := range configured.Instances {
-				if instance.Enabled {
-					hasInstance = true
-					break
-				}
-			}
-			hasWorkflow := false
+			hasReadyWorkflow := false
 			for _, profile := range configured.WorkflowProfiles {
-				if profile.Enabled && !profile.Archived && profile.Ready {
-					hasWorkflow = true
+				if !profile.Enabled || profile.Archived {
+					continue
+				}
+				for _, version := range profile.Versions {
+					if version.VersionID != profile.CurrentVersionID || version.BindingStatus != servicesettings.AutoDLBindingStatusConfirmed {
+						continue
+					}
+					for _, instance := range configured.Instances {
+						if !instance.Enabled || !instance.HasPassword || instance.HostFingerprint == "" {
+							continue
+						}
+						for _, validation := range instance.WorkflowValidations {
+							if validation.WorkflowProfileID == profile.ID &&
+								validation.VersionID == version.VersionID &&
+								validation.Status == servicesettings.AutoDLWorkflowValidationReady &&
+								validation.WorkflowDigest == version.WorkflowDigest &&
+								validation.APITemplateDigest == version.APITemplateDigest &&
+								validation.InstanceFingerprint == instance.HostFingerprint {
+								hasReadyWorkflow = true
+								break
+							}
+						}
+						if hasReadyWorkflow {
+							break
+						}
+					}
+					if hasReadyWorkflow {
+						break
+					}
+				}
+				if hasReadyWorkflow {
 					break
 				}
 			}
-			if !hasInstance || !hasWorkflow {
+			if !hasReadyWorkflow {
 				return false, "AutoDL instance or image workflow is not configured"
 			}
 			return true, ""
