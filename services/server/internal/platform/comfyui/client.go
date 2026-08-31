@@ -1,6 +1,7 @@
 package comfyui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -71,9 +72,58 @@ type ObjectDefinition struct {
 }
 
 type ObjectInputs struct {
-	Required map[string]json.RawMessage `json:"required"`
-	Optional map[string]json.RawMessage `json:"optional"`
-	Hidden   map[string]json.RawMessage `json:"hidden"`
+	Required      map[string]json.RawMessage `json:"required"`
+	Optional      map[string]json.RawMessage `json:"optional"`
+	Hidden        map[string]json.RawMessage `json:"hidden"`
+	RequiredOrder []string                   `json:"-"`
+	OptionalOrder []string                   `json:"-"`
+}
+
+func (inputs *ObjectInputs) UnmarshalJSON(raw []byte) error {
+	*inputs = ObjectInputs{}
+	var sections map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &sections); err != nil {
+		return err
+	}
+	if value := sections["required"]; len(value) > 0 {
+		if err := json.Unmarshal(value, &inputs.Required); err != nil {
+			return err
+		}
+		inputs.RequiredOrder = orderedJSONObjectKeys(value)
+	}
+	if value := sections["optional"]; len(value) > 0 {
+		if err := json.Unmarshal(value, &inputs.Optional); err != nil {
+			return err
+		}
+		inputs.OptionalOrder = orderedJSONObjectKeys(value)
+	}
+	if value := sections["hidden"]; len(value) > 0 {
+		if err := json.Unmarshal(value, &inputs.Hidden); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func orderedJSONObjectKeys(raw json.RawMessage) []string {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return nil
+	}
+	keys := make([]string, 0)
+	for decoder.More() {
+		key, err := decoder.Token()
+		if err != nil {
+			return nil
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil
+		}
+		keys = append(keys, key.(string))
+	}
+	return keys
 }
 
 type QueueState struct {

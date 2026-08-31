@@ -216,6 +216,25 @@ func TestHTTPClientTypedEndpointContracts(t *testing.T) {
 	}
 }
 
+func TestObjectInputsPreserveRequiredAndOptionalOrder(t *testing.T) {
+	var inputs ObjectInputs
+	if err := json.Unmarshal([]byte(`{"required":{"width":["INT"],"height":["INT"]},"optional":{"seed":["INT"],"denoise":["FLOAT"]},"hidden":{}}`), &inputs); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(inputs.RequiredOrder, ","); got != "width,height" {
+		t.Fatalf("required order = %q, want width,height", got)
+	}
+	if got := strings.Join(inputs.OptionalOrder, ","); got != "seed,denoise" {
+		t.Fatalf("optional order = %q, want seed,denoise", got)
+	}
+	if err := json.Unmarshal([]byte(`{"required":{"text":["STRING"]}}`), &inputs); err != nil {
+		t.Fatal(err)
+	}
+	if len(inputs.Required) != 1 || len(inputs.RequiredOrder) != 1 || inputs.RequiredOrder[0] != "text" || inputs.Optional != nil || inputs.OptionalOrder != nil {
+		t.Fatalf("reused ObjectInputs retained stale state: %#v", inputs)
+	}
+}
+
 func TestDeleteQueuedPromptSendsOnlyExactPromptID(t *testing.T) {
 	t.Parallel()
 
