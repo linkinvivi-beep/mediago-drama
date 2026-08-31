@@ -21,6 +21,7 @@ var (
 type InstanceRequest struct {
 	TaskID                    string
 	WorkflowProfileID         string
+	WorkflowVersionID         string
 	SelectedInstanceProfileID string
 }
 
@@ -28,6 +29,7 @@ type PersistedInstanceReservation struct {
 	TaskID            string
 	InstanceProfileID string
 	WorkflowProfileID string
+	WorkflowVersionID string
 	PromptID          string
 	Quarantined       bool
 	QuarantineReason  string
@@ -35,7 +37,7 @@ type PersistedInstanceReservation struct {
 
 type AutoDLInstanceProfiles func(context.Context) ([]settingsservice.AutoDLInstanceProfile, error)
 
-type AutoDLInstanceReadiness func(context.Context, settingsservice.AutoDLInstanceProfile, string) (platformautodl.Tunnel, bool)
+type AutoDLInstanceReadiness func(context.Context, settingsservice.AutoDLInstanceProfile, string, string) (platformautodl.Tunnel, bool)
 
 type InstanceLease interface {
 	InstanceProfileID() string
@@ -70,6 +72,7 @@ type autoDLInstanceScheduler struct {
 type autoDLInstanceReservation struct {
 	taskID            string
 	workflowProfileID string
+	workflowVersionID string
 	promptID          string
 	tunnel            platformautodl.Tunnel
 	token             uint64
@@ -117,7 +120,7 @@ func (scheduler *autoDLInstanceScheduler) AcquireNew(ctx context.Context, reques
 		revision := scheduler.revision
 		scheduler.mu.Unlock()
 
-		candidates, err := scheduler.loadCandidates(ctx, request.WorkflowProfileID, request.SelectedInstanceProfileID, true)
+		candidates, err := scheduler.loadCandidates(ctx, request.WorkflowProfileID, request.WorkflowVersionID, request.SelectedInstanceProfileID, true)
 		if err != nil {
 			return nil, err
 		}
@@ -160,6 +163,7 @@ func (scheduler *autoDLInstanceScheduler) AcquireNew(ctx context.Context, reques
 			scheduler.nextToken++
 			reservation := &autoDLInstanceReservation{
 				taskID: request.TaskID, workflowProfileID: request.WorkflowProfileID,
+				workflowVersionID: request.WorkflowVersionID,
 				tunnel: selected.tunnel, token: scheduler.nextToken,
 			}
 			scheduler.slots[selected.instanceID] = reservation
@@ -204,10 +208,11 @@ func (scheduler *autoDLInstanceScheduler) Resume(ctx context.Context, taskID str
 		}
 		revision := scheduler.revision
 		workflowProfileID := reservation.workflowProfileID
+		workflowVersionID := reservation.workflowVersionID
 		token := reservation.token
 		scheduler.mu.Unlock()
 
-		candidates, err := scheduler.loadCandidates(ctx, workflowProfileID, instanceProfileID, false)
+		candidates, err := scheduler.loadCandidates(ctx, workflowProfileID, workflowVersionID, instanceProfileID, false)
 		if err != nil {
 			return nil, err
 		}
@@ -275,6 +280,7 @@ func (scheduler *autoDLInstanceScheduler) RestoreReservations(reservations []Per
 		scheduler.nextToken++
 		reservation := &autoDLInstanceReservation{
 			taskID: persisted.TaskID, workflowProfileID: persisted.WorkflowProfileID,
+			workflowVersionID: persisted.WorkflowVersionID,
 			promptID: persisted.PromptID, token: scheduler.nextToken,
 			quarantined: persisted.Quarantined, quarantineReason: strings.TrimSpace(persisted.QuarantineReason),
 		}
@@ -316,7 +322,7 @@ func (scheduler *autoDLInstanceScheduler) NotifyInstancesChanged() {
 	scheduler.mu.Unlock()
 }
 
-func (scheduler *autoDLInstanceScheduler) loadCandidates(ctx context.Context, workflowProfileID string, selectedInstanceProfileID string, requireEnabled bool) ([]autoDLInstanceCandidate, error) {
+func (scheduler *autoDLInstanceScheduler) loadCandidates(ctx context.Context, workflowProfileID string, workflowVersionID string, selectedInstanceProfileID string, requireEnabled bool) ([]autoDLInstanceCandidate, error) {
 	profiles, err := scheduler.profiles(ctx)
 	if err != nil {
 		return nil, err
@@ -338,7 +344,7 @@ func (scheduler *autoDLInstanceScheduler) loadCandidates(ctx context.Context, wo
 			continue
 		}
 		seen[profile.ID] = struct{}{}
-		tunnel, ready := scheduler.readiness(ctx, profile, workflowProfileID)
+		tunnel, ready := scheduler.readiness(ctx, profile, workflowProfileID, workflowVersionID)
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -460,7 +466,7 @@ func validateInstanceRequest(ctx context.Context, request InstanceRequest) error
 	if err := requireSchedulerContext(ctx); err != nil {
 		return err
 	}
-	if !validSchedulerID(request.TaskID) || !validSchedulerID(request.WorkflowProfileID) {
+	if !validSchedulerID(request.TaskID) || !validSchedulerID(request.WorkflowProfileID) || !validSchedulerID(request.WorkflowVersionID) {
 		return ErrAutoDLSchedulerInvalidRequest
 	}
 	if request.SelectedInstanceProfileID != "" && !validSchedulerID(request.SelectedInstanceProfileID) {
@@ -470,7 +476,7 @@ func validateInstanceRequest(ctx context.Context, request InstanceRequest) error
 }
 
 func validPersistedReservation(reservation PersistedInstanceReservation) bool {
-	if !validSchedulerID(reservation.TaskID) || !validSchedulerID(reservation.InstanceProfileID) || !validSchedulerID(reservation.WorkflowProfileID) {
+	if !validSchedulerID(reservation.TaskID) || !validSchedulerID(reservation.InstanceProfileID) || !validSchedulerID(reservation.WorkflowProfileID) || !validSchedulerID(reservation.WorkflowVersionID) {
 		return false
 	}
 	if reservation.Quarantined {

@@ -952,6 +952,7 @@ func generationRuntimeStateUpdateForRoute(routeID string, state GenerationTaskRu
 	state.WorkflowProfileID = ""
 	state.WorkflowProfileVersion = ""
 	state.WorkflowDigest = ""
+	state.APITemplateDigest = ""
 	return state
 }
 
@@ -970,6 +971,7 @@ type autoDLAttemptIdentity struct {
 	workflowProfileID      string
 	workflowProfileVersion string
 	workflowDigest         string
+	apiTemplateDigest      string
 	comfyPromptID          string
 	submittedAt            string
 }
@@ -980,6 +982,7 @@ func autoDLAttemptIdentityFromRuntimeState(state GenerationTaskRuntimeState) aut
 		workflowProfileID:      strings.TrimSpace(state.WorkflowProfileID),
 		workflowProfileVersion: strings.TrimSpace(state.WorkflowProfileVersion),
 		workflowDigest:         strings.TrimSpace(state.WorkflowDigest),
+		apiTemplateDigest:      strings.TrimSpace(state.APITemplateDigest),
 		comfyPromptID:          strings.TrimSpace(state.ComfyPromptID),
 		submittedAt:            strings.TrimSpace(state.SubmittedAt),
 	}
@@ -991,6 +994,7 @@ func (identity autoDLAttemptIdentity) values() []string {
 		identity.workflowProfileID,
 		identity.workflowProfileVersion,
 		identity.workflowDigest,
+		identity.apiTemplateDigest,
 		identity.comfyPromptID,
 		identity.submittedAt,
 	}
@@ -1039,8 +1043,9 @@ func validateAutoDLAttemptIdentityMerge(current GenerationTaskRuntimeState, upda
 		workflowProfileID:      candidateValues[1],
 		workflowProfileVersion: candidateValues[2],
 		workflowDigest:         candidateValues[3],
-		comfyPromptID:          candidateValues[4],
-		submittedAt:            candidateValues[5],
+		apiTemplateDigest:      candidateValues[4],
+		comfyPromptID:          candidateValues[5],
+		submittedAt:            candidateValues[6],
 	}
 	if (candidate.comfyPromptID == "") != (candidate.submittedAt == "") {
 		return fmt.Errorf("AutoDL generation prompt identity must include both prompt ID and submission time")
@@ -1088,6 +1093,9 @@ func mergeGenerationTaskRuntimeState(
 	}
 	if update.WorkflowDigest != "" {
 		current.WorkflowDigest = strings.TrimSpace(update.WorkflowDigest)
+	}
+	if update.APITemplateDigest != "" {
+		current.APITemplateDigest = strings.TrimSpace(update.APITemplateDigest)
 	}
 	if update.ComfyPromptID != "" {
 		current.ComfyPromptID = strings.TrimSpace(update.ComfyPromptID)

@@ -319,6 +319,7 @@ type GenerationTaskRuntimeState struct {
 	WorkflowProfileID      string `json:"workflowProfileId,omitempty"`
 	WorkflowProfileVersion string `json:"workflowProfileVersion,omitempty"`
 	WorkflowDigest         string `json:"workflowDigest,omitempty"`
+	APITemplateDigest      string `json:"apiTemplateDigest,omitempty"`
 	ComfyPromptID          string `json:"comfyPromptId,omitempty"`
 	SubmittedAt            string `json:"submittedAt,omitempty"`
 }

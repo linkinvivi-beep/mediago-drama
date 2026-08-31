@@ -96,6 +96,52 @@ func NewAutoDLWorkflowAdmin(store AutoDLWorkflowStore, tunnels autodl.TunnelMana
 	}
 }
 
+// Readiness verifies one exact workflow version against the instance's live
+// ComfyUI node schema. A previously ready validation fails closed when the
+// host fingerprint, workflow digests, or /object_info digest has changed.
+func (admin *AutoDLWorkflowAdmin) Readiness(
+	ctx context.Context,
+	instance settings.AutoDLInstanceProfile,
+	workflowProfileID string,
+	workflowVersionID string,
+) (autodl.Tunnel, bool) {
+	workflowProfileID = strings.TrimSpace(workflowProfileID)
+	workflowVersionID = strings.TrimSpace(workflowVersionID)
+	if admin == nil || admin.settings == nil || !instance.Enabled || workflowProfileID == "" || workflowVersionID == "" {
+		return autodl.Tunnel{}, false
+	}
+	workflow, err := admin.settings.GetAutoDLWorkflowVersion(ctx, workflowProfileID, workflowVersionID)
+	if err != nil || workflow.ProfileID != workflowProfileID || workflow.VersionID != workflowVersionID {
+		return autodl.Tunnel{}, false
+	}
+	var ready *settings.AutoDLWorkflowValidation
+	for index := range instance.WorkflowValidations {
+		validation := &instance.WorkflowValidations[index]
+		if validation.WorkflowProfileID == workflowProfileID && validation.VersionID == workflowVersionID {
+			ready = validation
+			break
+		}
+	}
+	if ready == nil || ready.Status != settings.AutoDLWorkflowValidationReady ||
+		ready.WorkflowDigest != workflow.WorkflowDigest || ready.APITemplateDigest != workflow.APITemplateDigest ||
+		ready.ObjectInfoDigest == "" || (ready.InstanceFingerprint != "" && ready.InstanceFingerprint != instance.HostFingerprint) {
+		return autodl.Tunnel{}, false
+	}
+	client, tunnel, err := admin.connectInstance(ctx, instance)
+	if err != nil {
+		return autodl.Tunnel{}, false
+	}
+	objectInfo, err := client.ObjectInfo(ctx)
+	if err != nil {
+		return autodl.Tunnel{}, false
+	}
+	objectInfoDigest, err := comfyui.DigestObjectInfo(objectInfo)
+	if err != nil || objectInfoDigest != ready.ObjectInfoDigest {
+		return autodl.Tunnel{}, false
+	}
+	return tunnel, true
+}
+
 func (admin *AutoDLWorkflowAdmin) ScanFingerprint(ctx context.Context, instanceID string) (AutoDLFingerprintResult, error) {
 	instance, err := admin.instance(ctx, instanceID, false)
 	if err != nil {

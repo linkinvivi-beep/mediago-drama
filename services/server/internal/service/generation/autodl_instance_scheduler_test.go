@@ -28,7 +28,7 @@ func TestAutoDLInstanceSchedulerStableRoundRobin(t *testing.T) {
 	for index := 0; index < 5; index++ {
 		lease, err := scheduler.AcquireNew(context.Background(), InstanceRequest{
 			TaskID:            fmt.Sprintf("task-%d", index),
-			WorkflowProfileID: "image",
+			WorkflowProfileID: "image", WorkflowVersionID: "image-v1",
 		})
 		if err != nil {
 			t.Fatalf("AcquireNew(%d) error = %v", index, err)
@@ -55,9 +55,9 @@ func TestAutoDLInstanceSchedulerRoundRobinUsesFullCompatibleOrderWhileBusy(t *te
 	}
 	scheduler := fixture.scheduler()
 
-	first := acquireLease(t, scheduler, InstanceRequest{TaskID: "task-a", WorkflowProfileID: "image"})
-	second := acquireLease(t, scheduler, InstanceRequest{TaskID: "task-b", WorkflowProfileID: "image"})
-	third := acquireLease(t, scheduler, InstanceRequest{TaskID: "task-c", WorkflowProfileID: "image"})
+	first := acquireLease(t, scheduler, InstanceRequest{TaskID: "task-a", WorkflowProfileID: "image", WorkflowVersionID: "image-v1"})
+	second := acquireLease(t, scheduler, InstanceRequest{TaskID: "task-b", WorkflowProfileID: "image", WorkflowVersionID: "image-v1"})
+	third := acquireLease(t, scheduler, InstanceRequest{TaskID: "task-c", WorkflowProfileID: "image", WorkflowVersionID: "image-v1"})
 	got := []string{first.InstanceProfileID(), second.InstanceProfileID(), third.InstanceProfileID()}
 	want := []string{"instance-a", "instance-b", "instance-c"}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
@@ -69,7 +69,7 @@ func TestAutoDLInstanceSchedulerRoundRobinUsesFullCompatibleOrderWhileBusy(t *te
 
 	for index, wantInstanceID := range []string{"instance-a", "instance-b", "instance-c"} {
 		next := acquireLease(t, scheduler, InstanceRequest{
-			TaskID: fmt.Sprintf("task-next-%d", index), WorkflowProfileID: "image",
+			TaskID: fmt.Sprintf("task-next-%d", index), WorkflowProfileID: "image", WorkflowVersionID: "image-v1",
 		})
 		if got := next.InstanceProfileID(); got != wantInstanceID {
 			t.Fatalf("round robin after release at %d = %q, want %q", index, got, wantInstanceID)
@@ -93,7 +93,7 @@ func TestAutoDLInstanceSchedulerAllowsConcurrentDistinctInstances(t *testing.T) 
 		taskID := taskID
 		go func() {
 			<-start
-			lease, err := scheduler.AcquireNew(context.Background(), InstanceRequest{TaskID: taskID, WorkflowProfileID: "image"})
+			lease, err := scheduler.AcquireNew(context.Background(), InstanceRequest{TaskID: taskID, WorkflowProfileID: "image", WorkflowVersionID: "image-v1"})
 			if err != nil {
 				errorsCh <- err
 				return
@@ -119,8 +119,8 @@ func TestAutoDLInstanceSchedulerSerializesImageAndVideoOnOneInstance(t *testing.
 	fixture.setReady("instance-a", "video", true)
 	scheduler := fixture.scheduler()
 
-	imageLease := acquireLease(t, scheduler, InstanceRequest{TaskID: "image-task", WorkflowProfileID: "image"})
-	videoResult := acquireAsync(scheduler, InstanceRequest{TaskID: "video-task", WorkflowProfileID: "video"})
+	imageLease := acquireLease(t, scheduler, InstanceRequest{TaskID: "image-task", WorkflowProfileID: "image", WorkflowVersionID: "image-v1"})
+	videoResult := acquireAsync(scheduler, InstanceRequest{TaskID: "video-task", WorkflowProfileID: "video", WorkflowVersionID: "video-v1"})
 	assertAcquireBlocked(t, videoResult)
 
 	imageLease.ReleaseBeforeSubmit()
@@ -142,7 +142,7 @@ func TestAutoDLInstanceSchedulerExcludesDisabledAndIncompatibleInstances(t *test
 	fixture.setReady("instance-ready", "image", true)
 	scheduler := fixture.scheduler()
 
-	lease := acquireLease(t, scheduler, InstanceRequest{TaskID: "task-1", WorkflowProfileID: "image"})
+	lease := acquireLease(t, scheduler, InstanceRequest{TaskID: "task-1", WorkflowProfileID: "image", WorkflowVersionID: "image-v1"})
 	defer lease.ReleaseBeforeSubmit()
 	if lease.InstanceProfileID() != "instance-ready" {
 		t.Fatalf("selected instance = %q, want instance-ready", lease.InstanceProfileID())
@@ -158,7 +158,7 @@ func TestAutoDLInstanceSchedulerAutomaticWaitWakesOnProfileChange(t *testing.T) 
 	fixture.setReady("instance-a", "image", true)
 	scheduler := fixture.scheduler()
 
-	result := acquireAsync(scheduler, InstanceRequest{TaskID: "task-1", WorkflowProfileID: "image"})
+	result := acquireAsync(scheduler, InstanceRequest{TaskID: "task-1", WorkflowProfileID: "image", WorkflowVersionID: "image-v1"})
 	assertAcquireBlocked(t, result)
 	fixture.setProfiles(enabledInstance("instance-a"))
 	scheduler.NotifyInstancesChanged()
@@ -229,7 +229,7 @@ func TestAutoDLInstanceSchedulerWaitCancellationDoesNotMutatePool(t *testing.T) 
 	fixture.setReady("instance-a", "image", false)
 	scheduler := fixture.scheduler()
 	ctx, cancel := context.WithCancel(context.Background())
-	result := acquireAsyncContext(ctx, scheduler, InstanceRequest{TaskID: "canceled-task", WorkflowProfileID: "image"})
+	result := acquireAsyncContext(ctx, scheduler, InstanceRequest{TaskID: "canceled-task", WorkflowProfileID: "image", WorkflowVersionID: "image-v1"})
 	assertAcquireBlocked(t, result)
 	cancel()
 	if err := receiveAcquireError(t, result); !errors.Is(err, context.Canceled) {
@@ -238,7 +238,7 @@ func TestAutoDLInstanceSchedulerWaitCancellationDoesNotMutatePool(t *testing.T) 
 
 	fixture.setReady("instance-a", "image", true)
 	scheduler.NotifyInstancesChanged()
-	lease := acquireLease(t, scheduler, InstanceRequest{TaskID: "next-task", WorkflowProfileID: "image"})
+	lease := acquireLease(t, scheduler, InstanceRequest{TaskID: "next-task", WorkflowProfileID: "image", WorkflowVersionID: "image-v1"})
 	lease.ReleaseBeforeSubmit()
 }
 
@@ -251,20 +251,20 @@ func TestAutoDLInstanceSchedulerPreCanceledAcquireDoesNotReadOrReserve(t *testin
 			profileReads.Add(1)
 			return []settingsservice.AutoDLInstanceProfile{enabledInstance("instance-a")}, nil
 		},
-		func(context.Context, settingsservice.AutoDLInstanceProfile, string) (platformautodl.Tunnel, bool) {
+		func(context.Context, settingsservice.AutoDLInstanceProfile, string, string) (platformautodl.Tunnel, bool) {
 			return platformautodl.Tunnel{InstanceProfileID: "instance-a", BaseURL: "http://127.0.0.1:8188"}, true
 		},
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := scheduler.AcquireNew(ctx, InstanceRequest{TaskID: "canceled-task", WorkflowProfileID: "image"}); !errors.Is(err, context.Canceled) {
+	if _, err := scheduler.AcquireNew(ctx, InstanceRequest{TaskID: "canceled-task", WorkflowProfileID: "image", WorkflowVersionID: "image-v1"}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("AcquireNew() error = %v, want context.Canceled", err)
 	}
 	if profileReads.Load() != 0 {
 		t.Fatalf("profile reads = %d, want 0", profileReads.Load())
 	}
 
-	lease := acquireLease(t, scheduler, InstanceRequest{TaskID: "fresh-task", WorkflowProfileID: "image"})
+	lease := acquireLease(t, scheduler, InstanceRequest{TaskID: "fresh-task", WorkflowProfileID: "image", WorkflowVersionID: "image-v1"})
 	lease.ReleaseBeforeSubmit()
 }
 
@@ -278,7 +278,7 @@ func TestAutoDLInstanceSchedulerCancellationDuringReadinessDoesNotReserve(t *tes
 		func(context.Context) ([]settingsservice.AutoDLInstanceProfile, error) {
 			return []settingsservice.AutoDLInstanceProfile{enabledInstance("instance-a")}, nil
 		},
-		func(context.Context, settingsservice.AutoDLInstanceProfile, string) (platformautodl.Tunnel, bool) {
+		func(context.Context, settingsservice.AutoDLInstanceProfile, string, string) (platformautodl.Tunnel, bool) {
 			if readinessCalls.Add(1) == 1 {
 				close(readinessStarted)
 				<-releaseReadiness
@@ -287,7 +287,7 @@ func TestAutoDLInstanceSchedulerCancellationDuringReadinessDoesNotReserve(t *tes
 		},
 	)
 	ctx, cancel := context.WithCancel(context.Background())
-	result := acquireAsyncContext(ctx, scheduler, InstanceRequest{TaskID: "canceled-task", WorkflowProfileID: "image"})
+	result := acquireAsyncContext(ctx, scheduler, InstanceRequest{TaskID: "canceled-task", WorkflowProfileID: "image", WorkflowVersionID: "image-v1"})
 	waitForSchedulerSignal(t, readinessStarted, "readiness callback")
 	cancel()
 	close(releaseReadiness)
@@ -295,7 +295,7 @@ func TestAutoDLInstanceSchedulerCancellationDuringReadinessDoesNotReserve(t *tes
 		t.Fatalf("AcquireNew() error = %v, want context.Canceled", err)
 	}
 
-	lease := acquireLease(t, scheduler, InstanceRequest{TaskID: "fresh-task", WorkflowProfileID: "image"})
+	lease := acquireLease(t, scheduler, InstanceRequest{TaskID: "fresh-task", WorkflowProfileID: "image", WorkflowVersionID: "image-v1"})
 	lease.ReleaseBeforeSubmit()
 }
 
@@ -306,9 +306,9 @@ func TestAutoDLInstanceSchedulerRejectsNonCanonicalIDs(t *testing.T) {
 	fixture.setReady("instance-a", "image", true)
 	scheduler := fixture.scheduler()
 	for _, request := range []InstanceRequest{
-		{TaskID: " task", WorkflowProfileID: "image"},
+		{TaskID: " task", WorkflowProfileID: "image", WorkflowVersionID: "image-v1"},
 		{TaskID: "task", WorkflowProfileID: "image "},
-		{TaskID: "task", WorkflowProfileID: "image", SelectedInstanceProfileID: " instance-a"},
+		{TaskID: "task", WorkflowProfileID: "image", WorkflowVersionID: "image-v1", SelectedInstanceProfileID: " instance-a"},
 	} {
 		if _, err := scheduler.AcquireNew(context.Background(), request); !errors.Is(err, ErrAutoDLSchedulerInvalidRequest) {
 			t.Fatalf("AcquireNew(%#v) error = %v, want invalid request", request, err)
@@ -323,13 +323,13 @@ func TestAutoDLInstanceSchedulerAcquiredLeaseOutlivesCallerContext(t *testing.T)
 	fixture.setReady("instance-a", "image", true)
 	scheduler := fixture.scheduler()
 	ctx, cancel := context.WithCancel(context.Background())
-	lease, err := scheduler.AcquireNew(ctx, InstanceRequest{TaskID: "task-1", WorkflowProfileID: "image"})
+	lease, err := scheduler.AcquireNew(ctx, InstanceRequest{TaskID: "task-1", WorkflowProfileID: "image", WorkflowVersionID: "image-v1"})
 	if err != nil {
 		t.Fatalf("AcquireNew() error = %v", err)
 	}
 	cancel()
 
-	result := acquireAsync(scheduler, InstanceRequest{TaskID: "task-2", WorkflowProfileID: "image"})
+	result := acquireAsync(scheduler, InstanceRequest{TaskID: "task-2", WorkflowProfileID: "image", WorkflowVersionID: "image-v1"})
 	assertAcquireBlocked(t, result)
 	lease.ReleaseBeforeSubmit()
 	next := receiveAcquire(t, result)
@@ -343,13 +343,13 @@ func TestAutoDLInstanceSchedulerReleaseBeforeSubmitIsSafeOnlyBeforeBind(t *testi
 	fixture.setReady("instance-a", "image", true)
 	scheduler := fixture.scheduler()
 
-	lease := acquireLease(t, scheduler, InstanceRequest{TaskID: "task-1", WorkflowProfileID: "image"})
+	lease := acquireLease(t, scheduler, InstanceRequest{TaskID: "task-1", WorkflowProfileID: "image", WorkflowVersionID: "image-v1"})
 	if err := lease.BindPrompt("prompt-1"); err != nil {
 		t.Fatalf("BindPrompt() error = %v", err)
 	}
 	lease.ReleaseBeforeSubmit()
 
-	result := acquireAsync(scheduler, InstanceRequest{TaskID: "task-2", WorkflowProfileID: "image"})
+	result := acquireAsync(scheduler, InstanceRequest{TaskID: "task-2", WorkflowProfileID: "image", WorkflowVersionID: "image-v1"})
 	assertAcquireBlocked(t, result)
 	resumed, err := scheduler.Resume(context.Background(), "task-1", "instance-a", "prompt-1")
 	if err != nil {
@@ -368,10 +368,10 @@ func TestAutoDLInstanceSchedulerRejectsDuplicateTaskAcquire(t *testing.T) {
 	fixture.setReady("instance-a", "image", true)
 	fixture.setReady("instance-b", "image", true)
 	scheduler := fixture.scheduler()
-	lease := acquireLease(t, scheduler, InstanceRequest{TaskID: "same-task", WorkflowProfileID: "image"})
+	lease := acquireLease(t, scheduler, InstanceRequest{TaskID: "same-task", WorkflowProfileID: "image", WorkflowVersionID: "image-v1"})
 	defer lease.ReleaseBeforeSubmit()
 
-	if _, err := scheduler.AcquireNew(context.Background(), InstanceRequest{TaskID: "same-task", WorkflowProfileID: "image"}); !errors.Is(err, ErrAutoDLReservationConflict) {
+	if _, err := scheduler.AcquireNew(context.Background(), InstanceRequest{TaskID: "same-task", WorkflowProfileID: "image", WorkflowVersionID: "image-v1"}); !errors.Is(err, ErrAutoDLReservationConflict) {
 		t.Fatalf("duplicate AcquireNew() error = %v, want reservation conflict", err)
 	}
 }
@@ -382,11 +382,11 @@ func TestAutoDLInstanceSchedulerStaleLeaseCannotMutateNewReservation(t *testing.
 	fixture := newSchedulerFixture(enabledInstance("instance-a"))
 	fixture.setReady("instance-a", "image", true)
 	scheduler := fixture.scheduler()
-	stale := acquireLease(t, scheduler, InstanceRequest{TaskID: "old-task", WorkflowProfileID: "image"})
+	stale := acquireLease(t, scheduler, InstanceRequest{TaskID: "old-task", WorkflowProfileID: "image", WorkflowVersionID: "image-v1"})
 	stale.ReleaseBeforeSubmit()
 	stale.ReleaseBeforeSubmit()
 
-	current := acquireLease(t, scheduler, InstanceRequest{TaskID: "new-task", WorkflowProfileID: "image"})
+	current := acquireLease(t, scheduler, InstanceRequest{TaskID: "new-task", WorkflowProfileID: "image", WorkflowVersionID: "image-v1"})
 	if err := stale.BindPrompt("stale-prompt"); !errors.Is(err, ErrAutoDLReservationConflict) {
 		t.Fatalf("stale BindPrompt() error = %v, want reservation conflict", err)
 	}
@@ -396,7 +396,7 @@ func TestAutoDLInstanceSchedulerStaleLeaseCannotMutateNewReservation(t *testing.
 	stale.ReleaseTerminal()
 	stale.ReleaseTerminal()
 
-	blocked := acquireAsync(scheduler, InstanceRequest{TaskID: "third-task", WorkflowProfileID: "image"})
+	blocked := acquireAsync(scheduler, InstanceRequest{TaskID: "third-task", WorkflowProfileID: "image", WorkflowVersionID: "image-v1"})
 	assertAcquireBlocked(t, blocked)
 	if err := current.BindPrompt("current-prompt"); err != nil {
 		t.Fatalf("current BindPrompt() error = %v", err)
@@ -414,12 +414,12 @@ func TestAutoDLInstanceSchedulerRestoreAndExactTaskResume(t *testing.T) {
 	fixture.setReady("instance-a", "image", true)
 	scheduler := fixture.scheduler()
 	if err := scheduler.RestoreReservations([]PersistedInstanceReservation{{
-		TaskID: "task-restored", InstanceProfileID: "instance-a", WorkflowProfileID: "image", PromptID: "prompt-restored",
+		TaskID: "task-restored", InstanceProfileID: "instance-a", WorkflowProfileID: "image", WorkflowVersionID: "image-v1", PromptID: "prompt-restored",
 	}}); err != nil {
 		t.Fatalf("RestoreReservations() error = %v", err)
 	}
 
-	blocked := acquireAsync(scheduler, InstanceRequest{TaskID: "task-new", WorkflowProfileID: "image"})
+	blocked := acquireAsync(scheduler, InstanceRequest{TaskID: "task-new", WorkflowProfileID: "image", WorkflowVersionID: "image-v1"})
 	assertAcquireBlocked(t, blocked)
 	for _, resume := range []struct {
 		taskID     string
@@ -455,12 +455,12 @@ func TestAutoDLInstanceSchedulerRestoresEmptyPromptReservationForExactResume(t *
 	fixture.setReady("instance-a", "image", true)
 	scheduler := fixture.scheduler()
 	if err := scheduler.RestoreReservations([]PersistedInstanceReservation{{
-		TaskID: "task-pre-submit", InstanceProfileID: "instance-a", WorkflowProfileID: "image", PromptID: "",
+		TaskID: "task-pre-submit", InstanceProfileID: "instance-a", WorkflowProfileID: "image", WorkflowVersionID: "image-v1", PromptID: "",
 	}}); err != nil {
 		t.Fatalf("RestoreReservations(empty prompt) error = %v", err)
 	}
 
-	blocked := acquireAsync(scheduler, InstanceRequest{TaskID: "task-new", WorkflowProfileID: "image"})
+	blocked := acquireAsync(scheduler, InstanceRequest{TaskID: "task-new", WorkflowProfileID: "image", WorkflowVersionID: "image-v1"})
 	assertAcquireBlocked(t, blocked)
 	if _, err := scheduler.Resume(context.Background(), "task-pre-submit", "instance-a", "wrong-prompt"); !errors.Is(err, ErrAutoDLReservationConflict) {
 		t.Fatalf("Resume(nonempty mismatch) error = %v, want conflict", err)
@@ -481,7 +481,7 @@ func TestAutoDLInstanceSchedulerQuarantineHoldsSlotUntilExactReconciliation(t *t
 	fixture := newSchedulerFixture(enabledInstance("instance-a"))
 	fixture.setReady("instance-a", "image", true)
 	scheduler := fixture.scheduler()
-	lease := acquireLease(t, scheduler, InstanceRequest{TaskID: "unknown-task", WorkflowProfileID: "image"})
+	lease := acquireLease(t, scheduler, InstanceRequest{TaskID: "unknown-task", WorkflowProfileID: "image", WorkflowVersionID: "image-v1"})
 	if err := lease.Quarantine("submission_outcome_unknown"); err != nil {
 		t.Fatalf("Quarantine() error = %v", err)
 	}
@@ -491,7 +491,7 @@ func TestAutoDLInstanceSchedulerQuarantineHoldsSlotUntilExactReconciliation(t *t
 	lease.ReleaseBeforeSubmit()
 	lease.ReleaseTerminal()
 
-	blocked := acquireAsync(scheduler, InstanceRequest{TaskID: "next-task", WorkflowProfileID: "image"})
+	blocked := acquireAsync(scheduler, InstanceRequest{TaskID: "next-task", WorkflowProfileID: "image", WorkflowVersionID: "image-v1"})
 	assertAcquireBlocked(t, blocked)
 	if err := scheduler.ReconcileQuarantine("instance-a", "wrong-task"); !errors.Is(err, ErrAutoDLReservationConflict) {
 		t.Fatalf("ReconcileQuarantine(wrong task) error = %v, want conflict", err)
@@ -512,13 +512,13 @@ func TestAutoDLInstanceSchedulerRestoresQuarantinedReservation(t *testing.T) {
 	fixture.setReady("instance-a", "image", true)
 	scheduler := fixture.scheduler()
 	if err := scheduler.RestoreReservations([]PersistedInstanceReservation{{
-		TaskID: "unknown-task", InstanceProfileID: "instance-a", WorkflowProfileID: "image",
+		TaskID: "unknown-task", InstanceProfileID: "instance-a", WorkflowProfileID: "image", WorkflowVersionID: "image-v1",
 		Quarantined: true, QuarantineReason: "submission_outcome_unknown",
 	}}); err != nil {
 		t.Fatalf("RestoreReservations() error = %v", err)
 	}
 
-	blocked := acquireAsync(scheduler, InstanceRequest{TaskID: "next-task", WorkflowProfileID: "image"})
+	blocked := acquireAsync(scheduler, InstanceRequest{TaskID: "next-task", WorkflowProfileID: "image", WorkflowVersionID: "image-v1"})
 	assertAcquireBlocked(t, blocked)
 	if err := scheduler.ReconcileQuarantine("instance-a", "unknown-task"); err != nil {
 		t.Fatalf("ReconcileQuarantine() error = %v", err)
@@ -537,15 +537,15 @@ func TestAutoDLInstanceSchedulerRestoreRejectsDuplicateTasksAndInstancesAtomical
 		{
 			name: "duplicate task",
 			reservations: []PersistedInstanceReservation{
-				{TaskID: "same-task", InstanceProfileID: "instance-a", WorkflowProfileID: "image", PromptID: "prompt-a"},
-				{TaskID: "same-task", InstanceProfileID: "instance-b", WorkflowProfileID: "image", PromptID: "prompt-b"},
+				{TaskID: "same-task", InstanceProfileID: "instance-a", WorkflowProfileID: "image", WorkflowVersionID: "image-v1", PromptID: "prompt-a"},
+				{TaskID: "same-task", InstanceProfileID: "instance-b", WorkflowProfileID: "image", WorkflowVersionID: "image-v1", PromptID: "prompt-b"},
 			},
 		},
 		{
 			name: "duplicate instance",
 			reservations: []PersistedInstanceReservation{
-				{TaskID: "task-a", InstanceProfileID: "instance-a", WorkflowProfileID: "image", PromptID: "prompt-a"},
-				{TaskID: "task-b", InstanceProfileID: "instance-a", WorkflowProfileID: "image", PromptID: "prompt-b"},
+				{TaskID: "task-a", InstanceProfileID: "instance-a", WorkflowProfileID: "image", WorkflowVersionID: "image-v1", PromptID: "prompt-a"},
+				{TaskID: "task-b", InstanceProfileID: "instance-a", WorkflowProfileID: "image", WorkflowVersionID: "image-v1", PromptID: "prompt-b"},
 			},
 		},
 	}
@@ -560,7 +560,7 @@ func TestAutoDLInstanceSchedulerRestoreRejectsDuplicateTasksAndInstancesAtomical
 			if err := scheduler.RestoreReservations(test.reservations); !errors.Is(err, ErrAutoDLReservationConflict) {
 				t.Fatalf("RestoreReservations() error = %v, want reservation conflict", err)
 			}
-			lease := acquireLease(t, scheduler, InstanceRequest{TaskID: "fresh-task", WorkflowProfileID: "image"})
+			lease := acquireLease(t, scheduler, InstanceRequest{TaskID: "fresh-task", WorkflowProfileID: "image", WorkflowVersionID: "image-v1"})
 			lease.ReleaseBeforeSubmit()
 		})
 	}
@@ -589,7 +589,7 @@ func (fixture *schedulerFixture) loadProfiles(ctx context.Context) ([]settingsse
 	return append([]settingsservice.AutoDLInstanceProfile(nil), fixture.profiles...), nil
 }
 
-func (fixture *schedulerFixture) readiness(ctx context.Context, profile settingsservice.AutoDLInstanceProfile, workflowProfileID string) (platformautodl.Tunnel, bool) {
+func (fixture *schedulerFixture) readiness(ctx context.Context, profile settingsservice.AutoDLInstanceProfile, workflowProfileID string, _ string) (platformautodl.Tunnel, bool) {
 	if ctx.Err() != nil {
 		return platformautodl.Tunnel{}, false
 	}

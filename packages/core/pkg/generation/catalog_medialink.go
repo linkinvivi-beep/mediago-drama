@@ -1,13 +1,18 @@
 package generation
 
 const (
-	FamilyCodexImage = "codex-image"
-	FamilyZImage     = "z-image"
-	FamilyMiniMaxH3  = "minimax-h3"
+	FamilyCodexImage     = "codex-image"
+	FamilyAutoDLWorkflow = "autodl-workflow"
+	FamilyMiniMaxH3      = "minimax-h3"
 
-	VersionCodexImageV1 = "codex-image-v1"
-	VersionZImageV1     = "z-image-v1"
-	VersionMiniMaxH3V1  = "minimax-h3-v1"
+	VersionCodexImageV1     = "codex-image-v1"
+	VersionAutoDLWorkflowV1 = "autodl-workflow-v1"
+	VersionMiniMaxH3V1      = "minimax-h3-v1"
+
+	// Deprecated aliases keep stored callers source-compatible while the
+	// public AutoDL image route becomes workflow/model neutral.
+	FamilyZImage    = FamilyAutoDLWorkflow
+	VersionZImageV1 = VersionAutoDLWorkflowV1
 )
 
 var mediaLinkFamilySpecs = []familySpec{
@@ -39,28 +44,28 @@ var mediaLinkFamilySpecs = []familySpec{
 	},
 	{
 		Family: ModelFamily{
-			ID:          FamilyZImage,
-			Label:       "Z-Image",
+			ID:          FamilyAutoDLWorkflow,
+			Label:       "AutoDL 云端工作流",
 			Kind:        KindImage,
-			Description: "Z-Image generation through AutoDL ComfyUI",
+			Description: "Configurable image generation through AutoDL ComfyUI workflows",
 		},
 		Versions: []ModelVersion{
-			version(VersionZImageV1, FamilyZImage, "Z-Image", KindImage, "z-image", false, true),
+			version(VersionAutoDLWorkflowV1, FamilyAutoDLWorkflow, "AutoDL 云端工作流", KindImage, "comfyui-workflow", false, true),
 		},
 		Routes: []ModelRoute{
 			mediaLinkRoute(
 				RouteAutoDLImage,
-				FamilyZImage,
-				VersionZImageV1,
+				FamilyAutoDLWorkflow,
+				VersionAutoDLWorkflowV1,
 				"AutoDL · 云端生图",
 				KindImage,
 				ProviderAutoDL,
-				"z-image",
+				"comfyui-workflow",
 				AdapterAutoDLComfyImage,
 				"https://docs.comfy.org/development/core-concepts/api",
 				autoDLImageParams(),
 				false,
-				withReferenceURLLimit(1),
+				withReferenceURLLimit(8),
 			),
 		},
 	},

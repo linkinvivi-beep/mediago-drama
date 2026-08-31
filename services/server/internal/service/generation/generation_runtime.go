@@ -28,6 +28,7 @@ type GenerationService struct {
 	documents                     GenerationDocumentResolver
 	generationProviderFactory     func(coregeneration.ModelRoute) (coregeneration.Provider, error)
 	legacyProviderFactory         func(coregeneration.ModelRoute) (coregeneration.Provider, error)
+	autoDLWorkflowResolver        AutoDLWorkflowResolver
 	mediaLinkReadiness            func(context.Context, string) (bool, string)
 	multimodalTextProviderFactory runtime.MultimodalTextProviderFactory
 	voicePreviews                 *VoicePreviewStore
@@ -82,7 +83,7 @@ func NewGenerationService(settings *settings.Settings, generationTasks *Generati
 		preferences = generationPreferences[0]
 	}
 	rootCtx, rootCancel := context.WithCancel(context.Background())
-	return &GenerationService{
+	service := &GenerationService{
 		settings:                      settings,
 		generationPreferences:         preferences,
 		generationTasks:               generationTasks,
@@ -96,6 +97,10 @@ func NewGenerationService(settings *settings.Settings, generationTasks *Generati
 		generationPreflightCancels:    map[string]map[*generationTaskCancellation]struct{}{},
 		generationDeleting:            map[string]int{},
 	}
+	if settings != nil {
+		service.autoDLWorkflowResolver = NewAutoDLWorkflowResolver(settings)
+	}
+	return service
 }
 
 // SetGenerationRuntimeContext binds background generation jobs to app shutdown.
@@ -433,6 +438,17 @@ func (workflow *GenerationService) CreateGenerationMessage(ctx context.Context, 
 	payload.Model = generationModelForReferences(route, payload.Model, referenceURLs)
 
 	generationRequest := GenerationRequestFromMessage(payload, route, referenceURLs)
+	if route.ID == coregeneration.RouteAutoDLImage {
+		resolved, resolveErr := workflow.resolveAutoDLWorkflowForNewTask(ctx, generationRequest)
+		if resolveErr != nil {
+			return generationMessageResponse{}, http.StatusServiceUnavailable, resolveErr
+		}
+		generationRequest.WorkflowProfileID = resolved.ProfileID
+		if generationRequest.Options == nil {
+			generationRequest.Options = make(map[string]any)
+		}
+		generationRequest.Options[generationAutoDLWorkflowSnapshotOption] = resolved
+	}
 	generationRequest.Prompt = workflow.providerPromptForGeneration(route, payload)
 	if err := coregeneration.ValidateRequestForRoute(generationRequest, route); err != nil {
 		return generationMessageResponse{}, http.StatusBadRequest, err

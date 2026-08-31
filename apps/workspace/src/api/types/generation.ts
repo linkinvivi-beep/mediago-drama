@@ -334,6 +334,7 @@ export interface GenerationTaskRuntimeState {
 	workflowProfileId?: string;
 	workflowProfileVersion?: string;
 	workflowDigest?: string;
+	apiTemplateDigest?: string;
 	comfyPromptId?: string;
 	submittedAt?: string;
 }

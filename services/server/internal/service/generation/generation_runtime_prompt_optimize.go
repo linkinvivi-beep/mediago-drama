@@ -27,6 +27,7 @@ const imagePromptOptimizationSystemInstructionText = promptOptimizationSystemIns
 明确并保留构图、媒介、光线和宽高比；输入未指定时不要用无关细节覆盖原意。
 严格保持参考图的顺序和角色，使参考图1、参考图2等编号与各自用途一一对应。`
 const promptOptimizationConversationKindLabel = "提示词生成"
+const maxAutoDLPromptGuideBytes = 16 << 10
 
 const (
 	maxPromptOptimizationUserPromptBytes       = 64 << 10
@@ -462,11 +463,23 @@ func (workflow *GenerationService) CreatePromptOptimizedGenerationMessage(
 	if payload.ProjectID == "" {
 		payload.ProjectID = GenerationProjectIDFromScopeID(conversation.ScopeID)
 	}
-	if _, err := workflow.resolveGenerationReferences(route, payload); err != nil {
+	referenceURLs, err := workflow.resolveGenerationReferences(route, payload)
+	if err != nil {
 		return GenerationOptimizeAndGenerateResponse{}, http.StatusBadRequest, err
 	}
+	promptGuide := ""
+	if route.ID == coregeneration.RouteAutoDLImage {
+		resolved, resolveErr := workflow.resolveAutoDLWorkflowForNewTask(ctx, coregeneration.Request{
+			RouteID: route.ID, WorkflowProfileID: payload.WorkflowProfileID, ReferenceURLs: referenceURLs,
+		})
+		if resolveErr != nil {
+			return GenerationOptimizeAndGenerateResponse{}, http.StatusServiceUnavailable, resolveErr
+		}
+		payload.WorkflowProfileID = resolved.ProfileID
+		promptGuide = boundedAutoDLPromptGuide(resolved.PromptGuide)
+	}
 
-	optimization, optimizedPrompt, status, err := workflow.createPromptOptimizationHistoryTask(ctx, payload, conversation)
+	optimization, optimizedPrompt, status, err := workflow.createPromptOptimizationHistoryTask(ctx, payload, conversation, promptGuide)
 	if err != nil {
 		return GenerationOptimizeAndGenerateResponse{}, status, err
 	}
@@ -500,6 +513,7 @@ func (workflow *GenerationService) createPromptOptimizationHistoryTask(
 	ctx context.Context,
 	generationPayload generationMessageRequest,
 	generationConversation GenerationConversationRecord,
+	promptGuide string,
 ) (GenerationMessageResponse, string, int, error) {
 	optimization := generationPayload.PromptOptimization
 	if optimization == nil {
@@ -549,7 +563,7 @@ func (workflow *GenerationService) createPromptOptimizationHistoryTask(
 		RouteID:            optimization.RouteID,
 		Model:              optimization.Model,
 		Prompt:             generationPayload.Prompt,
-		Params:             promptOptimizationParamsWithOrderedReferences(optimization.Params, generationPayload.Params, coregeneration.Kind(generationPayload.Kind)),
+		Params:             promptOptimizationParamsWithOrderedReferences(optimization.Params, generationPayload.Params, coregeneration.Kind(generationPayload.Kind), promptGuide),
 		PromptOptimization: optimization,
 		ReferenceURLs:      []string{},
 		ReferenceAssetIDs:  []string{},
@@ -699,19 +713,23 @@ func stripPromptOptimizationLabel(value string) string {
 	}
 }
 
-func promptOptimizationParams(params map[string]any, kind coregeneration.Kind) map[string]any {
+func promptOptimizationParams(params map[string]any, kind coregeneration.Kind, promptGuide ...string) map[string]any {
 	next := make(map[string]any, len(params)+1)
 	for key, value := range params {
 		next[key] = value
 	}
-	if instruction := promptOptimizationSystemInstruction(kind); instruction != "" {
+	guide := ""
+	if len(promptGuide) > 0 {
+		guide = boundedAutoDLPromptGuide(promptGuide[0])
+	}
+	if instruction := promptOptimizationSystemInstruction(kind, guide); instruction != "" {
 		next["system_instruction"] = instruction
 	}
 	return next
 }
 
-func promptOptimizationParamsWithOrderedReferences(optimizationParams map[string]any, generationParams map[string]any, kind coregeneration.Kind) map[string]any {
-	next := promptOptimizationParams(optimizationParams, kind)
+func promptOptimizationParamsWithOrderedReferences(optimizationParams map[string]any, generationParams map[string]any, kind coregeneration.Kind, promptGuide ...string) map[string]any {
+	next := promptOptimizationParams(optimizationParams, kind, promptGuide...)
 	delete(next, generationOrderedReferencesParam)
 	if ordered := orderedGenerationReferencesFromParams(generationParams); len(ordered) > 0 {
 		next[generationOrderedReferencesParam] = ordered
@@ -719,9 +737,23 @@ func promptOptimizationParamsWithOrderedReferences(optimizationParams map[string
 	return next
 }
 
-func promptOptimizationSystemInstruction(kind coregeneration.Kind) string {
+func promptOptimizationSystemInstruction(kind coregeneration.Kind, promptGuide ...string) string {
 	if kind == coregeneration.KindImage {
-		return imagePromptOptimizationSystemInstructionText
+		instruction := imagePromptOptimizationSystemInstructionText
+		if len(promptGuide) > 0 {
+			if guide := boundedAutoDLPromptGuide(promptGuide[0]); guide != "" {
+				instruction += "\n当前所选 AutoDL 工作流的提示词指南如下；在不改变用户主体、场景、道具与参考图角色的前提下遵循它：\n" + guide
+			}
+		}
+		return instruction
 	}
 	return promptOptimizationSystemInstructionText
+}
+
+func boundedAutoDLPromptGuide(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if len(trimmed) > maxAutoDLPromptGuideBytes {
+		return ""
+	}
+	return trimmed
 }
