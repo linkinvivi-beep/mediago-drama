@@ -25,6 +25,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/shared/components/ui/
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/shared/components/ui/select";
 import { cn } from "@/shared/lib/utils";
 import { GenerationBrandMark, generationFamilyBrand } from "./GenerationBrandMark";
+import { AutoDLWorkflowControls } from "./AutoDLWorkflowControls";
 import { displayGenerationLabelWithoutAlias } from "./generationDisplayLabels";
 import { GenerationModelRoutePicker } from "./GenerationModelRoutePicker";
 import { ImageGenerationSpecControl } from "./ImageGenerationSpecControl";
@@ -159,6 +160,8 @@ export const GenerationSettingsForm: React.FC<GenerationSettingsFormProps> = ({
 						</div>
 					)}
 				</section>
+
+				<AutoDLWorkflowControls controller={controller} disabled={effectiveDisabled} />
 
 				<section aria-label="参数设置" className={generationSettingsSectionClassName}>
 					<div className="flex min-w-0 items-center gap-2">

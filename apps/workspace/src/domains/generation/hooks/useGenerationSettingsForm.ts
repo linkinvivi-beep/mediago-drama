@@ -29,6 +29,10 @@ import {
 import { useGenerationWorkspace } from "@/domains/generation/hooks/useGenerationWorkspace";
 import { useCodexTextAvailability } from "@/domains/generation/hooks/useCodexTextAvailability";
 import {
+	type AutoDLWorkflowOptionState,
+	useAutoDLWorkflowOptions,
+} from "@/domains/generation/hooks/useAutoDLWorkflowOptions";
+import {
 	batchGenerationPromptSupplementEnabled,
 	useBatchGenerationSettingsPreferenceStore,
 } from "@/domains/generation/stores/batch-generation-settings";
@@ -45,6 +49,7 @@ export interface UseGenerationSettingsFormOptions {
 }
 
 export interface GenerationSettingsFormController {
+	autoDLWorkflowOptions: AutoDLWorkflowOptionState;
 	catalog: GenerationModelsResponse;
 	codexAvailable: boolean;
 	error: string | null;
@@ -85,8 +90,11 @@ export interface GenerationSettingsFormController {
 	togglePromptSupplementItem: (id: string) => void;
 	toggleReferenceAsset: (asset: MediaAsset) => void;
 	updateFamily: (familyId: string) => void;
+	updateInstanceProfile: (instanceProfileId: string) => void;
 	updateModelRoute: (versionId: string, routeId: string) => void;
 	updateParam: (name: string, value: unknown) => void;
+	updateWorkflowParameter: (name: string, value: string | number | boolean | undefined) => void;
+	updateWorkflowProfile: (workflowProfileId: string) => void;
 	uploadReferenceAsset: (event: React.ChangeEvent<HTMLInputElement>) => Promise<void>;
 }
 
@@ -142,6 +150,11 @@ export const useGenerationSettingsForm = ({
 	const [error, setError] = useState<string | null>(null);
 	const defaultValueKey = stableValueKey(defaultValue);
 	const initializationKey = `${kind}:${defaultValueKey}`;
+	const autoDLWorkflowOptions = useAutoDLWorkflowOptions(
+		value.routeId,
+		value.referenceAssetIds.length,
+		value.workflowProfileId,
+	);
 
 	useEffect(() => {
 		onValueChangeRef.current = onValueChange;
@@ -426,6 +439,50 @@ export const useGenerationSettingsForm = ({
 		},
 		[commitValue, kind, promptItemsForNormalization, workspace.catalog],
 	);
+	const updateWorkflowProfile = useCallback(
+		(workflowProfileId: string) => {
+			const next = normalizeGenerationSettingsValue(
+				workspace.catalog,
+				kind,
+				{
+					...valueRef.current,
+					instanceProfileId: "",
+					workflowParameters: {},
+					workflowProfileId,
+				},
+				promptItemsForNormalization,
+			);
+			commitValue(next);
+		},
+		[commitValue, kind, promptItemsForNormalization, workspace.catalog],
+	);
+	const updateInstanceProfile = useCallback(
+		(instanceProfileId: string) => {
+			const next = normalizeGenerationSettingsValue(
+				workspace.catalog,
+				kind,
+				{ ...valueRef.current, instanceProfileId },
+				promptItemsForNormalization,
+			);
+			commitValue(next);
+		},
+		[commitValue, kind, promptItemsForNormalization, workspace.catalog],
+	);
+	const updateWorkflowParameter = useCallback(
+		(name: string, paramValue: string | number | boolean | undefined) => {
+			const workflowParameters = { ...valueRef.current.workflowParameters };
+			if (paramValue === undefined || paramValue === "") delete workflowParameters[name];
+			else workflowParameters[name] = paramValue;
+			const next = normalizeGenerationSettingsValue(
+				workspace.catalog,
+				kind,
+				{ ...valueRef.current, workflowParameters },
+				promptItemsForNormalization,
+			);
+			commitValue(next);
+		},
+		[commitValue, kind, promptItemsForNormalization, workspace.catalog],
+	);
 	const { generationCountControl } = useGenerationCountControl({
 		hasConfiguredRoutesForKind,
 		onParamChange: updateParam,
@@ -687,15 +744,40 @@ export const useGenerationSettingsForm = ({
 	const submitValue = isReady
 		? generationSettingsValueForSubmit(workspace.catalog, value, promptItemsForNormalization)
 		: null;
-	const isBusy = !isReady || isUploadingReference;
+	const isBusy =
+		!isReady ||
+		isUploadingReference ||
+		(value.routeId === "autodl.image" && autoDLWorkflowOptions.isLoading);
+	const workflowParameterNames = new Set(autoDLWorkflowOptions.parameterNames);
+	const workflowParametersValid =
+		!value.workflowParameters ||
+		Object.keys(value.workflowParameters).length === 0 ||
+		(Boolean(value.workflowProfileId) &&
+			Object.keys(value.workflowParameters).every((name) => workflowParameterNames.has(name)));
+	const autoDLSelectionValid =
+		value.routeId !== "autodl.image" ||
+		(!autoDLWorkflowOptions.error &&
+			(value.workflowProfileId
+				? autoDLWorkflowOptions.compatibleProfiles.some(
+						(profile) => profile.id === value.workflowProfileId,
+					)
+				: !autoDLWorkflowOptions.automaticError) &&
+			workflowParametersValid &&
+			(!value.instanceProfileId ||
+				(Boolean(value.workflowProfileId) &&
+					autoDLWorkflowOptions.readyInstances.some(
+						(instance) => instance.id === value.instanceProfileId,
+					))));
 	const isValid =
 		isReady &&
 		hasAvailableRoute &&
 		Boolean(submitValue) &&
 		Boolean(submitValue && sameGenerationSettingsValue(value, submitValue)) &&
+		autoDLSelectionValid &&
 		(!promptSupplementEnabled || Boolean(submitValue?.promptSupplements.length));
 
 	return {
+		autoDLWorkflowOptions,
 		catalog: workspace.catalog,
 		codexAvailable,
 		error,
@@ -736,8 +818,11 @@ export const useGenerationSettingsForm = ({
 		togglePromptSupplementItem,
 		toggleReferenceAsset,
 		updateFamily,
+		updateInstanceProfile,
 		updateModelRoute,
 		updateParam,
+		updateWorkflowParameter,
+		updateWorkflowProfile,
 		uploadReferenceAsset,
 	};
 };

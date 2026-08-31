@@ -19,12 +19,15 @@ import { GenerationSettingsForm } from "./GenerationSettingsForm";
 
 export interface BatchGenerationSettings {
 	family: GenerationFamily;
+	instanceProfileId?: string;
 	params: Record<string, unknown>;
 	promptOptimization?: GenerationPromptOptimizationRequest;
 	promptSupplements?: GenerationPromptSupplementValue[];
 	referenceAssetIds?: string[];
 	route: GenerationRoute;
 	version: GenerationVersion;
+	workflowParameters?: Record<string, string | number | boolean>;
+	workflowProfileId?: string;
 }
 
 export type BatchGenerationPromptSupplement = GenerationPromptSupplementValue;
@@ -119,12 +122,15 @@ const BatchGenerationSettingsDialogContent: React.FC<{
 
 		onConfirm({
 			family,
+			instanceProfileId: value.instanceProfileId,
 			params: value.params,
 			promptOptimization,
 			promptSupplements: value.promptSupplements.length > 0 ? value.promptSupplements : undefined,
 			referenceAssetIds: value.referenceAssetIds.length > 0 ? value.referenceAssetIds : undefined,
 			route,
 			version,
+			workflowParameters: value.workflowParameters,
+			workflowProfileId: value.workflowProfileId,
 		});
 	};
 

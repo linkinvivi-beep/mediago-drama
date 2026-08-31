@@ -1898,6 +1898,7 @@ const generationBatchRequestForSection = ({
 	},
 	documentId,
 	familyId: settings.family.id,
+	instanceProfileId: settings.instanceProfileId,
 	kind,
 	model: settings.route.model,
 	modelId: settings.route.legacyModelId ?? "",
@@ -1907,7 +1908,7 @@ const generationBatchRequestForSection = ({
 		documentTitle,
 		section,
 	),
-	params: settings.params,
+	params: { ...settings.params, ...settings.workflowParameters },
 	projectId,
 	prompt,
 	promptSupplements: settings.promptSupplements,
@@ -1918,6 +1919,7 @@ const generationBatchRequestForSection = ({
 	routeId: settings.route.id,
 	sectionId: section.blockId,
 	versionId: settings.version.id,
+	workflowProfileId: settings.workflowProfileId,
 });
 
 const batchGenerationReferences = (

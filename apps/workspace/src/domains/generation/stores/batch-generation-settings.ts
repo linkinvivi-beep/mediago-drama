@@ -7,6 +7,7 @@ export type BatchGenerationDialogKind = Extract<GenerationKind, "image" | "video
 
 export interface BatchGenerationStoredSettings {
 	familyId?: string;
+	instanceProfileId?: string;
 	params?: Record<string, unknown>;
 	promptOptimizeItemId?: string;
 	promptOptimizeRouteId?: string;
@@ -15,6 +16,8 @@ export interface BatchGenerationStoredSettings {
 	usePromptOptimization?: boolean;
 	usePromptSupplement?: boolean;
 	versionId?: string;
+	workflowParameters?: Record<string, string | number | boolean>;
+	workflowProfileId?: string;
 }
 
 export type BatchGenerationStoredSettingsMap = Partial<
@@ -111,6 +114,7 @@ export function normalizeBatchGenerationStoredSettings(
 
 	return compactBatchGenerationStoredSettings({
 		familyId: stringValue(value.familyId),
+		instanceProfileId: stringValue(value.instanceProfileId),
 		params: isRecord(value.params) ? { ...value.params } : undefined,
 		promptOptimizeItemId: stringValue(value.promptOptimizeItemId),
 		promptOptimizeRouteId: stringValue(value.promptOptimizeRouteId),
@@ -121,6 +125,8 @@ export function normalizeBatchGenerationStoredSettings(
 		usePromptSupplement:
 			typeof value.usePromptSupplement === "boolean" ? value.usePromptSupplement : undefined,
 		versionId: stringValue(value.versionId),
+		workflowParameters: workflowParametersValue(value.workflowParameters),
+		workflowProfileId: stringValue(value.workflowProfileId),
 	});
 }
 
@@ -136,6 +142,7 @@ function compactBatchGenerationStoredSettings(
 ): BatchGenerationStoredSettings {
 	const next: BatchGenerationStoredSettings = {};
 	const familyId = stringValue(settings.familyId);
+	const instanceProfileId = stringValue(settings.instanceProfileId);
 	const promptOptimizeItemId = stringValue(settings.promptOptimizeItemId);
 	const promptOptimizeRouteId = stringValue(settings.promptOptimizeRouteId);
 	const promptSupplementItemIds = promptSupplementItemIdsValue({
@@ -143,7 +150,9 @@ function compactBatchGenerationStoredSettings(
 	});
 	const routeId = stringValue(settings.routeId);
 	const versionId = stringValue(settings.versionId);
+	const workflowProfileId = stringValue(settings.workflowProfileId);
 	if (familyId) next.familyId = familyId;
+	if (instanceProfileId) next.instanceProfileId = instanceProfileId;
 	if (settings.params && Object.keys(settings.params).length > 0)
 		next.params = { ...settings.params };
 	if (promptOptimizeItemId) next.promptOptimizeItemId = promptOptimizeItemId;
@@ -157,7 +166,24 @@ function compactBatchGenerationStoredSettings(
 		next.usePromptSupplement = settings.usePromptSupplement;
 	}
 	if (versionId) next.versionId = versionId;
+	if (settings.workflowParameters && Object.keys(settings.workflowParameters).length > 0) {
+		next.workflowParameters = { ...settings.workflowParameters };
+	}
+	if (workflowProfileId) next.workflowProfileId = workflowProfileId;
 	return next;
+}
+
+function workflowParametersValue(value: unknown) {
+	if (!isRecord(value)) return undefined;
+	const entries = Object.entries(value).filter(
+		([, candidate]) =>
+			typeof candidate === "string" ||
+			typeof candidate === "boolean" ||
+			(typeof candidate === "number" && Number.isFinite(candidate)),
+	);
+	return entries.length > 0
+		? (Object.fromEntries(entries) as Record<string, string | number | boolean>)
+		: undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

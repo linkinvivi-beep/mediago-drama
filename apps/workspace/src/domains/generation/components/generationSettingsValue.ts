@@ -29,6 +29,7 @@ export interface GenerationPromptOptimizationValue {
 }
 
 export interface GenerationSettingsValue {
+	instanceProfileId?: string;
 	kind: GenerationSettingsKind;
 	label: string;
 	params: Record<string, unknown>;
@@ -36,6 +37,8 @@ export interface GenerationSettingsValue {
 	promptSupplements: GenerationPromptSupplementValue[];
 	referenceAssetIds: string[];
 	routeId: string;
+	workflowParameters?: Record<string, string | number | boolean>;
+	workflowProfileId?: string;
 }
 
 export interface ResolveGenerationSettingsValueOptions {
@@ -63,7 +66,9 @@ export const normalizeGenerationSettingsValue = (
 	if (!route) return emptyGenerationSettingsValue(kind);
 	const referenceAssetIds = normalizeReferenceAssetIDs(raw?.referenceAssetIds, route);
 
+	const autoDLSelection = normalizeAutoDLSelection(route.id, raw);
 	return {
+		...autoDLSelection,
 		kind,
 		label: route.label.trim() || route.id,
 		params: normalizeRouteParams(route, raw?.params, referenceAssetIds.length),
@@ -147,10 +152,15 @@ export const batchGenerationStoredSettingsFromValue = (
 	return {
 		...(route ? { familyId: route.familyId, versionId: route.versionId } : {}),
 		params: { ...value.params },
+		...(value.instanceProfileId ? { instanceProfileId: value.instanceProfileId } : {}),
 		...(optimization?.referenceId ? { promptOptimizeItemId: optimization.referenceId } : {}),
 		...(optimization?.routeId ? { promptOptimizeRouteId: optimization.routeId } : {}),
 		...(promptSupplementItemIds.length > 0 ? { promptSupplementItemIds } : {}),
 		routeId: value.routeId,
+		...(value.workflowParameters && Object.keys(value.workflowParameters).length > 0
+			? { workflowParameters: { ...value.workflowParameters } }
+			: {}),
+		...(value.workflowProfileId ? { workflowProfileId: value.workflowProfileId } : {}),
 		usePromptOptimization: Boolean(optimization),
 		usePromptSupplement: value.promptSupplements.length > 0,
 	};
@@ -181,6 +191,32 @@ const emptyGenerationSettingsValue = (kind: GenerationSettingsKind): GenerationS
 	referenceAssetIds: [],
 	routeId: "",
 });
+
+const normalizeAutoDLSelection = (
+	routeId: string,
+	raw: Record<string, unknown> | undefined,
+): Pick<
+	GenerationSettingsValue,
+	"instanceProfileId" | "workflowParameters" | "workflowProfileId"
+> => {
+	if (routeId !== "autodl.image") return {};
+	const instanceProfileId = stringValue(raw?.instanceProfileId);
+	const workflowProfileId = stringValue(raw?.workflowProfileId);
+	const rawParameters = recordValue(raw?.workflowParameters);
+	const workflowParameters = Object.fromEntries(
+		Object.entries(rawParameters ?? {}).filter(([, value]) => isWorkflowScalar(value)),
+	) as Record<string, string | number | boolean>;
+	return {
+		...(instanceProfileId ? { instanceProfileId } : {}),
+		...(workflowProfileId ? { workflowProfileId } : {}),
+		...(Object.keys(workflowParameters).length > 0 ? { workflowParameters } : {}),
+	};
+};
+
+const isWorkflowScalar = (value: unknown): value is string | number | boolean =>
+	typeof value === "string" ||
+	typeof value === "boolean" ||
+	(typeof value === "number" && Number.isFinite(value));
 
 const normalizeRouteParams = (
 	route: GenerationRoute,
@@ -292,6 +328,7 @@ const normalizePromptOptimization = (
 const storedSettingsValue = (settings: BatchGenerationStoredSettings | null | undefined) => {
 	if (!settings) return undefined;
 	return {
+		instanceProfileId: settings.instanceProfileId,
 		params: settings.params,
 		promptOptimization: {
 			enabled: settings.usePromptOptimization === true,
@@ -303,6 +340,8 @@ const storedSettingsValue = (settings: BatchGenerationStoredSettings | null | un
 				? (settings.promptSupplementItemIds ?? []).map((referenceId) => ({ referenceId }))
 				: [],
 		routeId: settings.routeId,
+		workflowParameters: settings.workflowParameters,
+		workflowProfileId: settings.workflowProfileId,
 	};
 };
 
