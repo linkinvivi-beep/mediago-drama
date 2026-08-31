@@ -410,7 +410,11 @@ func (workflow *GenerationService) prepareTextPromptOptimization(
 	if err := validatePromptOptimizationInput(optimization, payload.Prompt, ordered, protectedBodies); err != nil {
 		return promptOptimizationExecution{}, http.StatusBadRequest, err
 	}
-	executionPrompt, err := promptOptimizationUserPrompt(optimization, payload.Prompt, ordered)
+	contextDocuments, err := workflow.promptOptimizationContextDocuments(payload)
+	if err != nil {
+		return promptOptimizationExecution{}, http.StatusBadRequest, err
+	}
+	executionPrompt, err := promptOptimizationUserPrompt(optimization, payload.Prompt, ordered, contextDocuments)
 	if err != nil {
 		return promptOptimizationExecution{}, http.StatusBadRequest, err
 	}
