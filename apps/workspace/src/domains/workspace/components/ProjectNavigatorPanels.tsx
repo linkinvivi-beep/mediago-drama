@@ -1,6 +1,7 @@
 import {
 	AudioLines,
 	Blocks,
+	CloudCog,
 	ChevronLeft,
 	Ellipsis,
 	FileText,
@@ -591,6 +592,7 @@ const debugNavItem = (value: DebugTabValue): SettingsNavItem => {
 
 const settingsNavGroups = (activeAgentBackendId = "codex"): SettingsNavGroup[] => {
 	const generationItems: SettingsNavItem[] = [];
+	generationItems.push({ value: "medialink-config", label: "MediaLink 配置", icon: CloudCog });
 	if (activeAgentBackendId === "codex") {
 		generationItems.push({ value: "codex-access", label: "Codex 接入", icon: Network });
 	}

@@ -7,6 +7,7 @@ export type SettingsTabValue =
 	| "api-keys"
 	| "billing"
 	| "codex-skills"
+	| "medialink-config"
 	| "updates"
 	| "shortcuts"
 	| typeof projectSettingsGeneralTab

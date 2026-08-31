@@ -73,6 +73,7 @@ import { getProjects, projectsKey } from "@/domains/projects/api/projects";
 import { isDesktopRuntime, openProjectDirectory } from "@/domains/projects/lib/project-directory";
 import { openExternalUrl, pickDesktopDirectory } from "@/shared/desktop/actions";
 import { UpdatesPanel } from "@/domains/settings/components/UpdatesPanel";
+import { AutoDLSettingsPanel } from "@/domains/settings/components/AutoDLSettingsPanel";
 
 const jianyingDraftSettingsEnabled: boolean = false;
 const customProvidersEnabled = import.meta.env.VITE_ENABLE_CUSTOM_PROVIDERS !== "false";
@@ -94,6 +95,7 @@ type SettingsTabValue =
 	| "codex-access"
 	| "codex-skills"
 	| "jianying-draft"
+	| "medialink-config"
 	| "updates"
 	| "shortcuts"
 	| DebugTabValue;
@@ -104,6 +106,7 @@ const isSettingsTabValue = (value: string): value is SettingsTabValue =>
 	value === "billing" ||
 	value === "codex-access" ||
 	value === "codex-skills" ||
+	value === "medialink-config" ||
 	value === "updates" ||
 	(jianyingDraftSettingsEnabled && value === "jianying-draft") ||
 	value === "shortcuts" ||
@@ -147,6 +150,7 @@ export const Settings: React.FC = () => {
 			{visibleTab === "billing" ? <BillingPanel /> : null}
 			{visibleTab === "codex-access" ? <CodexAccessPanel /> : null}
 			{visibleTab === "codex-skills" ? <CodexSkillsPanel /> : null}
+			{visibleTab === "medialink-config" ? <AutoDLSettingsPanel /> : null}
 			{visibleTab === "updates" ? <UpdatesPanel /> : null}
 			{visibleTab === "shortcuts" ? <ShortcutKeysPanel /> : null}
 
