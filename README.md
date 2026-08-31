@@ -131,6 +131,25 @@ Agent 会结合当前项目文档和对应 Skill，执行角色提取、场景�
 
 图片、视频和文本生成使用统一的模型目录与参数系统。模型能力与具体执行渠道分开管理，可以根据生成效果、成本和可用性选择不同路线，同时让创作文档和分镜任务保持一致。
 
+MediaLink 的可见视觉生成路线为：
+
+| 路线 | 用途 | 连接方式 |
+| --- | --- | --- |
+| `Codex 生图` | 文生图、参考图生图 | 使用当前 Codex 登录与内置生图能力，不调用 OpenAI Images API，也不需要 Images API Key |
+| `AutoDL · 云端生图` | 人物、场景、道具和分镜图片 | 通过 SSH 隧道连接用户自己的 AutoDL ComfyUI 实例 |
+| `AutoDL · MiniMax H3` | 分镜视频 | 通过同一 AutoDL 实例池运行已导入并验证的 H3 工作流 |
+
+AutoDL 图片与 H3 路线使用同一个通用工作流注册表。工作流不是按 Z-Image、FLUX、Qwen 或固定 profile 名称写入源码；用户可以在“MediaLink 配置”中添加或替换 ComfyUI 工作流版本，确认提示词、参考图、尺寸、时长、种子和输出等语义映射，再逐实例验证并启用。后续更换模型或新增 Qwen-Image-Edit 等工作流时，不需要改动人物、场景、道具、分镜、素材或历史记录的数据结构。
+
+### AutoDL 连接与凭据
+
+- 实例地址可以变化。每个实例保存完整 SSH 登录指令，例如 `ssh -p 16109 root@connect.example.com`。
+- 密码只写入 macOS Keychain；MediaLink 配置和任务历史不保存明文密码。
+- ComfyUI 只需监听云端实例的 loopback 地址。远端端口可配置，并不固定为 `6006`；本地转发端口默认自动分配。
+- 可以配置多个实例并自动选择已验证的空闲实例，也可以在高级设置中手动指定实例。手动指定时不会静默切换到其他实例。
+- MediaLink 不负责云 GPU 开机、关机、续费或计费。无卡开机后需要先在 AutoDL 控制台启动实例。
+- 添加、分析和保存工作流不会执行生成；只有用户提交正式生成任务时才会调用 ComfyUI `/prompt`。
+
 ## 快速开始
 
 当前版本主要面向本地开发和工作流体验。
@@ -189,6 +208,14 @@ pnpm dev:desktop
 pnpm build
 task check
 ```
+
+MediaLink 桌面发行包只支持 macOS Apple Silicon：
+
+```bash
+pnpm -C apps/workspace electron:build:darwin-arm64
+```
+
+构建脚本会拒绝 Windows、Linux、Intel Mac 和其他目标。发布前请按[《MediaLink macOS arm64 发布检查清单》](./docs/release/medialink-macos-arm64-checklist.md)记录实际构建、签名和运行结果。
 
 ### 测试
 

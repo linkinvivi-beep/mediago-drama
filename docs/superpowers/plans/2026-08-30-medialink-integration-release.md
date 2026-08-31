@@ -8,6 +8,8 @@
 
 **Tech Stack:** Go, React 19, TypeScript, Codex text completion, MiniMax H3 prompt contract, Vitest/Testing Library, Playwright-equivalent existing UI tests if present, Task, electron-builder, macOS `codesign`/`file`.
 
+> **Superseded workflow assumptions (2026-09-01):** The approved configurable-workflow plan replaces fixed Z-Image/FLUX/Qwen and REF2VA/FL2VA source-code profiles with a generic workflow registry. MediaLink now exposes `Codex 生图`, `AutoDL · 云端生图`, and `AutoDL · MiniMax H3`. Every AutoDL workflow is selected by registry profile/version and semantic bindings. The remote ComfyUI loopback port is configurable per dynamic SSH instance; `6006` is only a possible value, never a required fixed port.
+
 ## Global Constraints
 
 - Preserve the existing prompt-optimization toggle and history behavior.
@@ -137,20 +139,25 @@ type H3PromptContext struct {
 
 **Files:** `medialink-routes.ts`, `_test.ts`, existing generation selectors/forms located by the File Map search
 
-- [ ] Write selector tests for every generation entry point used by characters, scenes, props, storyboards, and general asset generation. Image choices must contain only `Codex 生图`; video choices only `AutoDL · MiniMax H3`.
+- [ ] Write selector tests for every generation entry point used by characters, scenes, props, storyboards, and general asset generation. Image choices must contain `Codex 生图` and `AutoDL · 云端生图`; video choices only `AutoDL · MiniMax H3`.
 - [ ] Add centralized constants:
 
 ```ts
-export const MEDIALINK_IMAGE_ROUTE_ID = "codex.imagegen";
+export const MEDIALINK_CODEX_IMAGE_ROUTE_ID = "codex.imagegen";
+export const MEDIALINK_AUTODL_IMAGE_ROUTE_ID = "autodl.image";
 export const MEDIALINK_VIDEO_ROUTE_ID = "autodl.minimax-h3";
 
-export const medialinkRouteLabel = (kind: "image" | "video") =>
-	kind === "image" ? "Codex 生图" : "AutoDL · MiniMax H3";
+export const medialinkRouteLabel = (routeId: string) =>
+	routeId === MEDIALINK_CODEX_IMAGE_ROUTE_ID
+		? "Codex 生图"
+		: routeId === MEDIALINK_AUTODL_IMAGE_ROUTE_ID
+			? "AutoDL · 云端生图"
+			: "AutoDL · MiniMax H3";
 ```
 
-- [ ] Update selectors to consume the server's filtered catalog and fall back only to the two constants while catalog data is loading. Do not expose raw provider IDs or old routes.
+- [ ] Update selectors to consume the server's filtered catalog and fall back only to the three constants while catalog data is loading. Do not expose raw provider IDs or old routes.
 - [ ] Preserve reference pickers, character/scene/prop association, prompt optimization toggle, task history, regeneration, selection, and storyboard insertion behavior.
-- [ ] Hide unsupported video controls; show only duration, aspect ratio, resolution, seed, and REF2VA/FL2VA profile selection supplied by the H3 route schema.
+- [ ] Hide unsupported video controls; show duration, aspect ratio, resolution, seed, and compatible generic workflow/instance selection supplied by the H3 route and workflow registry.
 - [ ] Run the focused tests returned by `rg -l 'generation/models|routeId' apps/workspace/src --glob '*test*'`; expect PASS.
 - [ ] Commit: `feat(ui): route MediaLink image and video generation`.
 
@@ -176,7 +183,7 @@ const stateLabels = {
 } as const;
 ```
 
-- [ ] For Codex jobs, show revised prompt when present and a shared-quota disclosure. For H3 jobs, show profile kind and prompt ID suffix for diagnostics, but not tunnel endpoint or secrets.
+- [ ] For Codex jobs, show revised prompt when present and a shared-quota disclosure. For AutoDL jobs, show workflow profile/version and prompt ID suffix for diagnostics, but not tunnel endpoint or secrets.
 - [ ] Disable manual retry while a durable provider task ID exists and task status is active. Label `submission_outcome_unknown` as requiring the user to inspect ComfyUI before choosing a new submission.
 - [ ] Keep the existing generated-asset card, selection, deletion, and storyboard attachment components.
 - [ ] Run the focused tests returned by `rg -l 'task.status|retryable' apps/workspace/src --glob '*test*'`; expect PASS.
@@ -213,7 +220,7 @@ const stateLabels = {
 
 **Files:** `README.md`, `docs/release/medialink-macos-arm64-checklist.md`
 
-- [ ] Document prerequisites: macOS Apple Silicon, shared Codex login with image-generation capability, running AutoDL instance, ComfyUI on remote loopback port 6006, and validated REF2VA/FL2VA API workflows.
+- [ ] Document prerequisites: macOS Apple Silicon, shared Codex login with image-generation capability, running AutoDL instance, ComfyUI on a configured remote loopback port, and at least one compatible imported workflow validated for the intended route and instance.
 - [ ] Document that MediaLink uses a new data root and does not migrate or mutate MediaGo data.
 - [ ] Build with `pnpm electron:build:darwin-arm64` from `apps/workspace`; expect MediaLink arm64 DMG and ZIP only.
 - [ ] Mount/install the DMG to a temporary location without overwriting any installed app. Launch the temporary app, verify title/icon/settings/catalog, then quit it cleanly.
@@ -238,7 +245,7 @@ const stateLabels = {
 
 - [ ] Full storyboard and entity context reaches H3 optimization in deterministic order.
 - [ ] Valid H3 optimized prompts meet the duration, length, timeline, camera, continuity, reference, negative, and end-state contract.
-- [ ] All core drama-production workflows pass non-regression tests with the two new routes.
+- [ ] All core drama-production workflows pass non-regression tests with the three visible MediaLink routes.
 - [ ] Mocked Codex and H3 restart tests prove no duplicate paid submissions.
 - [ ] The packaged app is MediaLink, bundle ID `app.medialink.desktop`, macOS arm64 only, with updater/publisher disabled.
 - [ ] No real paid acceptance has run unless the checklist records separate user authorization.
