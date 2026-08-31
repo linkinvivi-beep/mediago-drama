@@ -390,18 +390,6 @@ func TestAutoDLCommittedMutationsDoNotFailDuringPasswordResponseEnrichment(t *te
 		}
 	})
 
-	t.Run("delete workflow", func(t *testing.T) {
-		service, baseStore, passwords := newAutoDLSettingsForTest()
-		_, profile := seedReadyAutoDLInstanceAndProfile(t, service)
-		controlled := &controlledAppSettingStore{memoryAppSettingStore: baseStore, afterSet: func() { passwords.getErr = probeErr }}
-		service.appSettings = controlled
-
-		got, err := service.DeleteAutoDLWorkflowProfile(context.Background(), profile.ID)
-		if err != nil || len(got.WorkflowProfiles) != 0 {
-			t.Fatalf("DeleteAutoDLWorkflowProfile() got=%#v error=%v, want committed success", got, err)
-		}
-	})
-
 	t.Run("delete instance", func(t *testing.T) {
 		service, baseStore, passwords := newAutoDLSettingsForTest()
 		first, err := service.SaveAutoDLInstance(context.Background(), AutoDLInstanceMutation{Name: "GPU A", SSHCommand: "ssh root@gpu-a.example.com", ComfyPort: 6006})
@@ -444,34 +432,6 @@ func TestAutoDLStoredInvalidCredentialReferenceFailsClosed(t *testing.T) {
 
 	if _, err := service.GetAutoDLSettings(context.Background()); !errors.Is(err, ErrAutoDLSettingsCorrupt) {
 		t.Fatalf("GetAutoDLSettings() error = %v, want ErrAutoDLSettingsCorrupt", err)
-	}
-}
-
-func TestAutoDLWorkflowProfileRejectedFluxDigestNeedsRevalidation(t *testing.T) {
-	service, _, _ := newAutoDLSettingsForTest()
-	profile, err := service.SaveAutoDLWorkflowProfile(context.Background(), AutoDLWorkflowProfileMutation{
-		ID:          "flux-fp8-t2i",
-		Name:        "FLUX FP8 普通文生图",
-		Kind:        "flux-fp8-t2i",
-		Version:     "precision-v2",
-		Status:      AutoDLWorkflowStatusReady,
-		Workflow:    json.RawMessage(`{"nodes":[],"links":[]}`),
-		APITemplate: json.RawMessage(`{"1":{"class_type":"Test","inputs":{}}}`),
-		Manifest:    json.RawMessage(`{"prompt":{"nodeId":"6","input":"t5xxl"}}`),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if profile.Status != AutoDLWorkflowStatusNeedsRevalidation || profile.Ready {
-		t.Fatalf("profile = %#v, defective observed FLUX v2 must not be ready", profile)
-	}
-
-	response, err := service.GetAutoDLSettings(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(response.WorkflowProfiles) != 1 || response.WorkflowProfiles[0].Status != AutoDLWorkflowStatusNeedsRevalidation || response.WorkflowProfiles[0].Ready {
-		t.Fatalf("stored profiles = %#v, want needs_revalidation and not ready", response.WorkflowProfiles)
 	}
 }
 
@@ -547,8 +507,12 @@ func TestAutoDLStoredWorkflowPayloadDigestMismatchFailsClosed(t *testing.T) {
 		Version:   autoDLSettingsVersion,
 		Instances: []AutoDLInstanceProfile{},
 		WorkflowProfiles: []AutoDLWorkflowProfile{{
-			ID: "zimage-t2i", Name: "Z T2I", Kind: "zimage-t2i", Version: "v1", Status: AutoDLWorkflowStatusNeedsRevalidation,
-			Workflow: json.RawMessage(`{"nodes":[],"links":[]}`), WorkflowDigest: "forged",
+			ID: "generic-image", Name: "Generic image", MediaKind: "image", RouteID: "autodl.image", CurrentVersionID: "generic-image-v1",
+			Versions: []AutoDLWorkflowVersion{{
+				VersionID: "generic-image-v1", Sequence: 1, CreatedAt: "2026-08-31T00:00:00Z",
+				UIWorkflow: json.RawMessage(`{"nodes":[],"links":[]}`), WorkflowDigest: "forged",
+				BindingStatus: AutoDLBindingStatusUnconfirmed, References: AutoDLReferenceContract{Min: 0, Max: 8},
+			}},
 		}},
 	}
 	raw, err := json.Marshal(document)
@@ -573,127 +537,6 @@ func TestAutoDLTrustedWorkflowSaveCanPromoteValidatedProfile(t *testing.T) {
 	}
 	if profile.Status != AutoDLWorkflowStatusReady || !profile.Ready {
 		t.Fatalf("trusted profile = %#v, want ready", profile)
-	}
-}
-
-func TestAutoDLTrustedWorkflowSaveBlocksProblematicKindsUntilExplicitRelease(t *testing.T) {
-	kinds := []string{
-		"flux-fp8-t2i",
-		"flux-fp8-i2i",
-		"flux-lustly-adult-t2i",
-		"flux-lustly-adult-i2i",
-		"flux-lustly-adult-portrait",
-		"flux-lustly-adult-fullbody",
-		"zimage-flux-refine",
-	}
-	for _, kind := range kinds {
-		t.Run(kind, func(t *testing.T) {
-			service, _, _ := newAutoDLSettingsForTest()
-			profile, err := service.SaveValidatedAutoDLWorkflowProfile(context.Background(), AutoDLWorkflowProfileMutation{
-				ID: kind, Name: "Blocked candidate", Kind: kind, Version: "precision-v2",
-				Workflow: json.RawMessage(`{"nodes":[],"links":[]}`), APITemplate: json.RawMessage(`{"1":{"class_type":"Test","inputs":{}}}`),
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if profile.Status != AutoDLWorkflowStatusNeedsRevalidation || profile.Ready {
-				t.Fatalf("trusted profile = %#v, problematic kind must remain blocked", profile)
-			}
-		})
-	}
-}
-
-func TestAutoDLStoredRejectedFluxValidationCannotRemainReady(t *testing.T) {
-	testCases := []struct {
-		kind   string
-		digest string
-	}{
-		{kind: "flux-fp8-t2i", digest: "9970e8c3d92c4661a744b046d9f1b96208d875ad557af407f0ba89d656bc8419"},
-		{kind: "flux-fp8-i2i", digest: "1d84021c7f0530d13d914bc982ccf2e8e75200ea433331331f27264a01884462"},
-		{kind: "flux-lustly-adult-t2i", digest: "1ee1ab222cab32acfd6473708b15092356c7438b7fcbc6b58a2f9a903ba0bee8"},
-		{kind: "flux-lustly-adult-i2i", digest: "1f0cbb187d4bb66e4edaab33b42d90aebd342457621bff1c093a21a42db092aa"},
-		{kind: "flux-lustly-adult-portrait", digest: "80a5524712fe07dbc84d2c89558a66381a9bf03b8dba8380bf3dd84e9dcccc8c"},
-		{kind: "flux-lustly-adult-fullbody", digest: "6c3a39a77b7a6a5a13e46c2e2788502be578982fb5727540dceb5e94faf9b4b0"},
-		{kind: "zimage-flux-refine", digest: "cc2ba571bc0bc6c1e7d68b9d4a3b8f1302f999d01c15745867f40e62f6f6f8b2"},
-	}
-
-	for _, testCase := range testCases {
-		t.Run(testCase.kind, func(t *testing.T) {
-			if !isRejectedAutoDLWorkflowDigest(testCase.digest) {
-				t.Fatalf("digest %q is missing from the rejected workflow set", testCase.digest)
-			}
-			service, appStore, _ := newAutoDLSettingsForTest()
-			document := autoDLSettingsDocument{
-				Version: autoDLSettingsVersion,
-				Instances: []AutoDLInstanceProfile{{
-					ID: "autodl-safe", Name: "GPU A", Host: "gpu-a.example.com", SSHPort: 22, SSHUser: "root", ComfyPort: 6006, CredentialRef: "autodl-safe", Enabled: true,
-					WorkflowValidations: []AutoDLWorkflowValidation{
-						{WorkflowProfileID: testCase.kind, Status: AutoDLWorkflowStatusReady, WorkflowDigest: testCase.digest, Reason: "previous_success"},
-						{WorkflowProfileID: "zimage-t2i", Status: AutoDLWorkflowStatusReady, WorkflowDigest: "d0c3706befa57baff8ca22222d9fdddf89599a195b70ac0d8c255eb6cbedb8b7", APITemplateDigest: "5d8757ca75e3554b5a58dae5fa0551f74de6d13b5a84f4e720c5f33cafc87e39", Reason: "verified"},
-					},
-				}},
-				WorkflowProfiles: []AutoDLWorkflowProfile{
-					{ID: testCase.kind, Name: "Rejected candidate", Kind: testCase.kind, Version: "precision-v2", Status: AutoDLWorkflowStatusReady, WorkflowDigest: testCase.digest},
-					{ID: "zimage-t2i", Name: "Z T2I", Kind: "zimage-t2i", Version: "v1", Status: AutoDLWorkflowStatusReady, Workflow: json.RawMessage(`{"nodes":[],"links":[]}`), APITemplate: json.RawMessage(`{"1":{"class_type":"Test","inputs":{}}}`), WorkflowDigest: "d0c3706befa57baff8ca22222d9fdddf89599a195b70ac0d8c255eb6cbedb8b7", APITemplateDigest: "5d8757ca75e3554b5a58dae5fa0551f74de6d13b5a84f4e720c5f33cafc87e39"},
-				},
-			}
-			raw, err := json.Marshal(document)
-			if err != nil {
-				t.Fatal(err)
-			}
-			appStore.values[autoDLSettingsKey] = string(raw)
-
-			response, err := service.GetAutoDLSettings(context.Background())
-			if err != nil {
-				t.Fatal(err)
-			}
-			validations := response.Instances[0].WorkflowValidations
-			if len(validations) != 2 {
-				t.Fatalf("validations = %#v, want rejected and Z-Image records", validations)
-			}
-			if validations[0].WorkflowProfileID != testCase.kind || validations[0].Status != AutoDLWorkflowStatusNeedsRevalidation || validations[0].Reason != "profile_needs_revalidation" {
-				t.Fatalf("rejected validation = %#v, want forced needs_revalidation", validations[0])
-			}
-			if validations[1].WorkflowProfileID != "zimage-t2i" || validations[1].Status != AutoDLWorkflowStatusReady || validations[1].Reason != "verified" {
-				t.Fatalf("unrelated validation = %#v, want unchanged ready Z-Image", validations[1])
-			}
-		})
-	}
-}
-
-func TestAutoDLSaveWorkflowValidationCannotReadyRejectedProfile(t *testing.T) {
-	service, _, _ := newAutoDLSettingsForTest()
-	instance, err := service.SaveAutoDLInstance(context.Background(), AutoDLInstanceMutation{
-		Name: "GPU A", SSHCommand: "ssh root@gpu-a.example.com", ComfyPort: 6006,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	profile, err := service.SaveAutoDLWorkflowProfile(context.Background(), AutoDLWorkflowProfileMutation{
-		ID:          "flux-fp8-t2i",
-		Name:        "FLUX FP8 普通文生图",
-		Kind:        "flux-fp8-t2i",
-		Version:     "precision-v2",
-		Status:      AutoDLWorkflowStatusReady,
-		Workflow:    json.RawMessage(`{"nodes":[],"links":[]}`),
-		APITemplate: json.RawMessage(`{"1":{"class_type":"Test","inputs":{}}}`),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	updated, err := service.SaveAutoDLWorkflowValidation(context.Background(), instance.ID, AutoDLWorkflowValidation{
-		WorkflowProfileID: profile.ID,
-		Status:            AutoDLWorkflowStatusReady,
-		WorkflowDigest:    profile.WorkflowDigest,
-		APITemplateDigest: profile.APITemplateDigest,
-		ValidatedAt:       "2026-08-30T02:03:04Z",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(updated.WorkflowValidations) != 1 || updated.WorkflowValidations[0].Status != AutoDLWorkflowStatusNeedsRevalidation {
-		t.Fatalf("validations = %#v, rejected profile must remain needs_revalidation", updated.WorkflowValidations)
 	}
 }
 
@@ -857,88 +700,6 @@ func TestAutoDLWorkflowAPITemplateDigestChangeRequiresInstanceRevalidation(t *te
 	validation := response.Instances[0].WorkflowValidations[0]
 	if validation.Status != AutoDLWorkflowStatusNeedsRevalidation || validation.Reason != "workflow_changed" {
 		t.Fatalf("validation = %#v, want API template digest change to require revalidation", validation)
-	}
-}
-
-func TestAutoDLDeleteWorkflowProfileLeavesInstancesAndOtherProfiles(t *testing.T) {
-	service, _, _ := newAutoDLSettingsForTest()
-	instance, err := service.SaveAutoDLInstance(context.Background(), AutoDLInstanceMutation{
-		Name: "GPU A", SSHCommand: "ssh root@gpu-a.example.com", ComfyPort: 6006,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, profile := range []AutoDLWorkflowProfileMutation{
-		{ID: "zimage-t2i", Name: "Z T2I", Kind: "zimage-t2i", Version: "v1", WorkflowDigest: "sha256:t2i", Status: AutoDLWorkflowStatusReady},
-		{ID: "zimage-i2i", Name: "Z I2I", Kind: "zimage-i2i", Version: "v1", WorkflowDigest: "sha256:i2i", Status: AutoDLWorkflowStatusReady},
-	} {
-		if _, err := service.SaveAutoDLWorkflowProfile(context.Background(), profile); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	response, err := service.DeleteAutoDLWorkflowProfile(context.Background(), "zimage-t2i")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(response.Instances) != 1 || response.Instances[0].ID != instance.ID {
-		t.Fatalf("instances = %#v, want unchanged instance", response.Instances)
-	}
-	if len(response.WorkflowProfiles) != 1 || response.WorkflowProfiles[0].ID != "zimage-i2i" {
-		t.Fatalf("workflow profiles = %#v, want only zimage-i2i", response.WorkflowProfiles)
-	}
-}
-
-func TestAutoDLDeleteAndRecreateWorkflowInvalidatesHistoricalValidation(t *testing.T) {
-	service, _, _ := newAutoDLSettingsForTest()
-	instance, err := service.SaveAutoDLInstance(context.Background(), AutoDLInstanceMutation{
-		Name: "GPU A", SSHCommand: "ssh root@gpu-a.example.com", ComfyPort: 6006,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	first, err := service.SaveValidatedAutoDLWorkflowProfile(context.Background(), AutoDLWorkflowProfileMutation{
-		ID: "zimage-t2i", Name: "Z T2I", Kind: "zimage-t2i", Version: "v1",
-		Workflow: json.RawMessage(`{"nodes":[{"id":1}],"links":[]}`), APITemplate: json.RawMessage(`{"1":{"class_type":"First","inputs":{}}}`),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := service.SaveAutoDLWorkflowValidation(context.Background(), instance.ID, AutoDLWorkflowValidation{
-		WorkflowProfileID: first.ID, Status: AutoDLWorkflowStatusReady, WorkflowDigest: first.WorkflowDigest, APITemplateDigest: first.APITemplateDigest,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := service.DeleteAutoDLWorkflowProfile(context.Background(), first.ID); err != nil {
-		t.Fatal(err)
-	}
-	second, err := service.SaveValidatedAutoDLWorkflowProfile(context.Background(), AutoDLWorkflowProfileMutation{
-		ID: "zimage-t2i", Name: "Z T2I", Kind: "zimage-t2i", Version: "v2",
-		Workflow: json.RawMessage(`{"nodes":[{"id":2}],"links":[]}`), APITemplate: json.RawMessage(`{"2":{"class_type":"Second","inputs":{}}}`),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if second.WorkflowDigest == first.WorkflowDigest || second.APITemplateDigest == first.APITemplateDigest {
-		t.Fatal("recreated workflow test fixture did not change both digests")
-	}
-	updatedInstance, err := service.SaveAutoDLInstance(context.Background(), AutoDLInstanceMutation{
-		ID: instance.ID, Name: "GPU A renamed", SSHCommand: "ssh root@gpu-a.example.com", ComfyPort: 6006,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if updatedInstance.WorkflowValidations[0].Status != AutoDLWorkflowStatusNeedsRevalidation {
-		t.Fatalf("mutation response validation = %#v, want normalized stale validation", updatedInstance.WorkflowValidations[0])
-	}
-
-	response, err := service.GetAutoDLSettings(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	validation := response.Instances[0].WorkflowValidations[0]
-	if validation.Status != AutoDLWorkflowStatusNeedsRevalidation || validation.Reason != "profile_needs_revalidation" {
-		t.Fatalf("historical validation = %#v, want fail-closed revalidation after delete/recreate", validation)
 	}
 }
 

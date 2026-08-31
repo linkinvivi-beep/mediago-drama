@@ -1,15 +1,12 @@
 package settings
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
@@ -21,13 +18,9 @@ import (
 const (
 	autoDLSettingsKey         = "medialink.autodl.instance-pool.v1"
 	autoDLKeychainService     = "app.medialink.autodl"
-	autoDLSettingsVersion     = 1
+	autoDLSettingsVersion     = 2
 	defaultAutoDLComfyPort    = 6006
 	autoDLCompensationTimeout = 5 * time.Second
-
-	AutoDLWorkflowStatusReady             = "ready"
-	AutoDLWorkflowStatusNeedsRevalidation = "needs_revalidation"
-	AutoDLWorkflowStatusInvalid           = "invalid"
 )
 
 var (
@@ -38,42 +31,6 @@ var (
 	ErrAutoDLPasswordStoreUnavailable = errors.New("AutoDL password store is unavailable")
 
 	autoDLProfileIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
-
-	allowedAutoDLWorkflowKinds = map[string]struct{}{
-		"zimage-t2i":                 {},
-		"zimage-i2i":                 {},
-		"flux-fp8-t2i":               {},
-		"flux-fp8-i2i":               {},
-		"flux-lustly-adult-t2i":      {},
-		"flux-lustly-adult-i2i":      {},
-		"flux-lustly-adult-portrait": {},
-		"flux-lustly-adult-fullbody": {},
-		"zimage-flux-refine":         {},
-		"h3-ref2va":                  {},
-		"h3-fl2va":                   {},
-	}
-	blockedAutoDLReadyKinds = map[string]struct{}{
-		"flux-fp8-t2i":               {},
-		"flux-fp8-i2i":               {},
-		"flux-lustly-adult-t2i":      {},
-		"flux-lustly-adult-i2i":      {},
-		"flux-lustly-adult-portrait": {},
-		"flux-lustly-adult-fullbody": {},
-		"zimage-flux-refine":         {},
-	}
-
-	// These seven digests came from the 2026-08-30 read-only inspection. The
-	// user subsequently rejected those workflow files, so they can be stored
-	// for diagnosis but can never satisfy readiness.
-	rejectedAutoDLWorkflowDigests = map[string]struct{}{
-		"9970e8c3d92c4661a744b046d9f1b96208d875ad557af407f0ba89d656bc8419": {},
-		"1d84021c7f0530d13d914bc982ccf2e8e75200ea433331331f27264a01884462": {},
-		"1ee1ab222cab32acfd6473708b15092356c7438b7fcbc6b58a2f9a903ba0bee8": {},
-		"1f0cbb187d4bb66e4edaab33b42d90aebd342457621bff1c093a21a42db092aa": {},
-		"80a5524712fe07dbc84d2c89558a66381a9bf03b8dba8380bf3dd84e9dcccc8c": {},
-		"6c3a39a77b7a6a5a13e46c2e2788502be578982fb5727540dceb5e94faf9b4b0": {},
-		"cc2ba571bc0bc6c1e7d68b9d4a3b8f1302f999d01c15745867f40e62f6f6f8b2": {},
-	}
 )
 
 type autoDLPasswordStore interface {
@@ -97,18 +54,6 @@ func (err *AutoDLCredentialWriteError) Error() string {
 
 func (err *AutoDLCredentialWriteError) Unwrap() error {
 	return err.Cause
-}
-
-// AutoDLWorkflowValidation records one instance/profile compatibility check.
-// Live health remains in memory; only the workflow identity and validation
-// outcome are durable.
-type AutoDLWorkflowValidation struct {
-	WorkflowProfileID string `json:"workflowProfileId"`
-	Status            string `json:"status"`
-	WorkflowDigest    string `json:"workflowDigest,omitempty"`
-	APITemplateDigest string `json:"apiTemplateDigest,omitempty"`
-	ValidatedAt       string `json:"validatedAt,omitempty"`
-	Reason            string `json:"reason,omitempty"`
 }
 
 // AutoDLInstanceProfile is the durable, non-secret connection profile.
@@ -143,44 +88,6 @@ type AutoDLInstanceMutation struct {
 	Enabled         bool   `json:"enabled"`
 }
 
-// AutoDLWorkflowProfile stores an imported workflow and its semantic metadata.
-type AutoDLWorkflowProfile struct {
-	ID                string          `json:"id"`
-	Name              string          `json:"name"`
-	Kind              string          `json:"kind"`
-	Version           string          `json:"version"`
-	Status            string          `json:"status"`
-	Workflow          json.RawMessage `json:"workflow,omitempty"`
-	APITemplate       json.RawMessage `json:"apiTemplate,omitempty"`
-	Manifest          json.RawMessage `json:"manifest,omitempty"`
-	RequiredNodes     []string        `json:"requiredNodes,omitempty"`
-	RequiredModels    []string        `json:"requiredModels,omitempty"`
-	WorkflowDigest    string          `json:"workflowDigest"`
-	APITemplateDigest string          `json:"apiTemplateDigest,omitempty"`
-}
-
-// AutoDLWorkflowProfileResponse derives readiness from the durable status.
-type AutoDLWorkflowProfileResponse struct {
-	AutoDLWorkflowProfile
-	Ready bool `json:"ready"`
-}
-
-// AutoDLWorkflowProfileMutation replaces one stable workflow profile.
-type AutoDLWorkflowProfileMutation struct {
-	ID                string          `json:"id"`
-	Name              string          `json:"name"`
-	Kind              string          `json:"kind"`
-	Version           string          `json:"version"`
-	Status            string          `json:"status,omitempty"`
-	Workflow          json.RawMessage `json:"workflow,omitempty"`
-	APITemplate       json.RawMessage `json:"apiTemplate,omitempty"`
-	Manifest          json.RawMessage `json:"manifest,omitempty"`
-	RequiredNodes     []string        `json:"requiredNodes,omitempty"`
-	RequiredModels    []string        `json:"requiredModels,omitempty"`
-	WorkflowDigest    string          `json:"workflowDigest"`
-	APITemplateDigest string          `json:"apiTemplateDigest,omitempty"`
-}
-
 // AutoDLSettingsResponse is the redacted settings view.
 type AutoDLSettingsResponse struct {
 	Instances        []AutoDLInstanceResponse        `json:"instances"`
@@ -191,6 +98,7 @@ type autoDLSettingsDocument struct {
 	Version          int                     `json:"version"`
 	Instances        []AutoDLInstanceProfile `json:"instances"`
 	WorkflowProfiles []AutoDLWorkflowProfile `json:"workflowProfiles"`
+	WorkflowDefaults []AutoDLWorkflowDefault `json:"workflowDefaults,omitempty"`
 }
 
 // SetAutoDLPasswordStore installs the password store used for AutoDL
@@ -420,155 +328,6 @@ func (service *Settings) DeleteAutoDLInstance(ctx context.Context, instanceID st
 	return buildAutoDLSettingsResponseFromStates(document, passwordStates), nil
 }
 
-// SaveAutoDLWorkflowProfile creates or replaces one stable workflow profile.
-func (service *Settings) SaveAutoDLWorkflowProfile(ctx context.Context, mutation AutoDLWorkflowProfileMutation) (AutoDLWorkflowProfileResponse, error) {
-	return service.saveAutoDLWorkflowProfile(ctx, mutation, false)
-}
-
-// SaveValidatedAutoDLWorkflowProfile is the backend-only persistence path for
-// a workflow validator. HTTP handlers must use SaveAutoDLWorkflowProfile;
-// calling this method is not a substitute for Task 6 semantic validation.
-func (service *Settings) SaveValidatedAutoDLWorkflowProfile(ctx context.Context, mutation AutoDLWorkflowProfileMutation) (AutoDLWorkflowProfileResponse, error) {
-	return service.saveAutoDLWorkflowProfile(ctx, mutation, true)
-}
-
-func (service *Settings) saveAutoDLWorkflowProfile(ctx context.Context, mutation AutoDLWorkflowProfileMutation, trustedValidation bool) (AutoDLWorkflowProfileResponse, error) {
-	if err := requireAutoDLContext(ctx); err != nil {
-		return AutoDLWorkflowProfileResponse{}, err
-	}
-	profile, err := normalizeAutoDLWorkflowProfile(mutation, trustedValidation)
-	if err != nil {
-		return AutoDLWorkflowProfileResponse{}, err
-	}
-	service.autoDLSettingsMu.Lock()
-	defer service.autoDLSettingsMu.Unlock()
-	document, err := service.loadAutoDLDocumentLocked()
-	if err != nil {
-		return AutoDLWorkflowProfileResponse{}, err
-	}
-	index := findAutoDLWorkflowProfile(document.WorkflowProfiles, profile.ID)
-	if index < 0 {
-		document.WorkflowProfiles = append(document.WorkflowProfiles, profile)
-	} else {
-		if document.WorkflowProfiles[index].WorkflowDigest != profile.WorkflowDigest ||
-			document.WorkflowProfiles[index].APITemplateDigest != profile.APITemplateDigest {
-			for instanceIndex := range document.Instances {
-				for validationIndex := range document.Instances[instanceIndex].WorkflowValidations {
-					validation := &document.Instances[instanceIndex].WorkflowValidations[validationIndex]
-					if validation.WorkflowProfileID == profile.ID {
-						validation.Status = AutoDLWorkflowStatusNeedsRevalidation
-						validation.Reason = "workflow_changed"
-					}
-				}
-			}
-		}
-		document.WorkflowProfiles[index] = profile
-	}
-	if err := service.persistAutoDLDocumentLocked(document); err != nil {
-		return AutoDLWorkflowProfileResponse{}, err
-	}
-	return autoDLWorkflowResponse(profile), nil
-}
-
-// SaveAutoDLWorkflowValidation records one instance/profile result. A profile
-// that is itself awaiting revalidation can never gain a ready instance record.
-func (service *Settings) SaveAutoDLWorkflowValidation(ctx context.Context, instanceID string, validation AutoDLWorkflowValidation) (AutoDLInstanceResponse, error) {
-	if err := requireAutoDLContext(ctx); err != nil {
-		return AutoDLInstanceResponse{}, err
-	}
-	service.autoDLSettingsMu.Lock()
-	defer service.autoDLSettingsMu.Unlock()
-	document, err := service.loadAutoDLDocumentLocked()
-	if err != nil {
-		return AutoDLInstanceResponse{}, err
-	}
-	instanceIndex := findAutoDLInstance(document.Instances, strings.TrimSpace(instanceID))
-	if instanceIndex < 0 {
-		return AutoDLInstanceResponse{}, ErrAutoDLInstanceNotFound
-	}
-	profileID := strings.TrimSpace(validation.WorkflowProfileID)
-	profileIndex := findAutoDLWorkflowProfile(document.WorkflowProfiles, profileID)
-	if profileIndex < 0 {
-		return AutoDLInstanceResponse{}, ErrAutoDLWorkflowNotFound
-	}
-	profile := document.WorkflowProfiles[profileIndex]
-	status := strings.TrimSpace(validation.Status)
-	if !validAutoDLWorkflowStatus(status) {
-		return AutoDLInstanceResponse{}, fmt.Errorf("%w: workflow validation", ErrAutoDLSettingsInvalid)
-	}
-	workflowDigest := strings.TrimSpace(validation.WorkflowDigest)
-	apiTemplateDigest := strings.TrimSpace(validation.APITemplateDigest)
-	if status == AutoDLWorkflowStatusReady &&
-		(workflowDigest == "" || workflowDigest != profile.WorkflowDigest ||
-			apiTemplateDigest == "" || apiTemplateDigest != profile.APITemplateDigest) {
-		return AutoDLInstanceResponse{}, fmt.Errorf("%w: ready workflow validation digests", ErrAutoDLSettingsInvalid)
-	}
-	if status != AutoDLWorkflowStatusReady && workflowDigest != "" && workflowDigest != profile.WorkflowDigest {
-		return AutoDLInstanceResponse{}, fmt.Errorf("%w: workflow validation", ErrAutoDLSettingsInvalid)
-	}
-	if status != AutoDLWorkflowStatusReady && apiTemplateDigest != "" && apiTemplateDigest != profile.APITemplateDigest {
-		return AutoDLInstanceResponse{}, fmt.Errorf("%w: API template validation", ErrAutoDLSettingsInvalid)
-	}
-	validation.WorkflowProfileID = profileID
-	validation.WorkflowDigest = profile.WorkflowDigest
-	validation.APITemplateDigest = profile.APITemplateDigest
-	validation.Status = status
-	validation.ValidatedAt = strings.TrimSpace(validation.ValidatedAt)
-	validation.Reason = strings.TrimSpace(validation.Reason)
-	if len(validation.ValidatedAt) > 64 || len(validation.Reason) > 512 {
-		return AutoDLInstanceResponse{}, fmt.Errorf("%w: workflow validation metadata", ErrAutoDLSettingsInvalid)
-	}
-	if status == AutoDLWorkflowStatusReady && normalizeStoredAutoDLWorkflowStatus(profile) != AutoDLWorkflowStatusReady {
-		validation.Status = AutoDLWorkflowStatusNeedsRevalidation
-		validation.Reason = "profile_needs_revalidation"
-	}
-	instance := &document.Instances[instanceIndex]
-	validationIndex := findAutoDLWorkflowValidation(instance.WorkflowValidations, profileID)
-	if validationIndex < 0 {
-		instance.WorkflowValidations = append(instance.WorkflowValidations, validation)
-	} else {
-		instance.WorkflowValidations[validationIndex] = validation
-	}
-	sort.Slice(instance.WorkflowValidations, func(left, right int) bool {
-		return instance.WorkflowValidations[left].WorkflowProfileID < instance.WorkflowValidations[right].WorkflowProfileID
-	})
-	hasPassword, err := probeAutoDLPassword(ctx, service.autoDLPasswords, instance.CredentialRef)
-	if err != nil {
-		return AutoDLInstanceResponse{}, err
-	}
-	if err := service.persistAutoDLDocumentLocked(document); err != nil {
-		return AutoDLInstanceResponse{}, err
-	}
-	return AutoDLInstanceResponse{AutoDLInstanceProfile: *instance, HasPassword: hasPassword}, nil
-}
-
-// DeleteAutoDLWorkflowProfile removes one workflow definition without
-// deleting instances or their historical validation records.
-func (service *Settings) DeleteAutoDLWorkflowProfile(ctx context.Context, profileID string) (AutoDLSettingsResponse, error) {
-	if err := requireAutoDLContext(ctx); err != nil {
-		return AutoDLSettingsResponse{}, err
-	}
-	service.autoDLSettingsMu.Lock()
-	defer service.autoDLSettingsMu.Unlock()
-	document, err := service.loadAutoDLDocumentLocked()
-	if err != nil {
-		return AutoDLSettingsResponse{}, err
-	}
-	index := findAutoDLWorkflowProfile(document.WorkflowProfiles, strings.TrimSpace(profileID))
-	if index < 0 {
-		return AutoDLSettingsResponse{}, ErrAutoDLWorkflowNotFound
-	}
-	passwordStates, err := probeAutoDLPasswordStates(ctx, service.autoDLPasswords, document.Instances)
-	if err != nil {
-		return AutoDLSettingsResponse{}, err
-	}
-	document.WorkflowProfiles = append(document.WorkflowProfiles[:index], document.WorkflowProfiles[index+1:]...)
-	if err := service.persistAutoDLDocumentLocked(document); err != nil {
-		return AutoDLSettingsResponse{}, err
-	}
-	return buildAutoDLSettingsResponseFromStates(document, passwordStates), nil
-}
-
 func (service *Settings) loadAutoDLDocumentLocked() (autoDLSettingsDocument, error) {
 	if service == nil || service.appSettings == nil {
 		return autoDLSettingsDocument{}, ErrAppSettingStoreMissing
@@ -578,7 +337,26 @@ func (service *Settings) loadAutoDLDocumentLocked() (autoDLSettingsDocument, err
 		return autoDLSettingsDocument{}, err
 	}
 	if !found || strings.TrimSpace(raw) == "" {
-		return autoDLSettingsDocument{Version: autoDLSettingsVersion, Instances: []AutoDLInstanceProfile{}, WorkflowProfiles: []AutoDLWorkflowProfile{}}, nil
+		return autoDLSettingsDocument{Version: autoDLSettingsVersion, Instances: []AutoDLInstanceProfile{}, WorkflowProfiles: []AutoDLWorkflowProfile{}, WorkflowDefaults: []AutoDLWorkflowDefault{}}, nil
+	}
+	var envelope struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal([]byte(raw), &envelope); err != nil {
+		return autoDLSettingsDocument{}, fmt.Errorf("%w: invalid JSON", ErrAutoDLSettingsCorrupt)
+	}
+	if envelope.Version == 1 {
+		document, err := migrateAutoDLDocumentV1(raw)
+		if err != nil {
+			return autoDLSettingsDocument{}, fmt.Errorf("%w: invalid v1 document", ErrAutoDLSettingsCorrupt)
+		}
+		if err := validateAutoDLDocument(document); err != nil {
+			return autoDLSettingsDocument{}, fmt.Errorf("%w: invalid migrated document", ErrAutoDLSettingsCorrupt)
+		}
+		if err := service.persistAutoDLDocumentLocked(document); err != nil {
+			return autoDLSettingsDocument{}, err
+		}
+		return document, nil
 	}
 	decoder := json.NewDecoder(strings.NewReader(raw))
 	decoder.DisallowUnknownFields()
@@ -603,6 +381,9 @@ func (service *Settings) persistAutoDLDocumentLocked(document autoDLSettingsDocu
 	}
 	if document.WorkflowProfiles == nil {
 		document.WorkflowProfiles = []AutoDLWorkflowProfile{}
+	}
+	if document.WorkflowDefaults == nil {
+		document.WorkflowDefaults = []AutoDLWorkflowDefault{}
 	}
 	encoded, err := json.Marshal(document)
 	if err != nil {
@@ -632,27 +413,27 @@ func buildAutoDLSettingsResponseFromStates(document autoDLSettingsDocument, pass
 		response.Instances = append(response.Instances, AutoDLInstanceResponse{AutoDLInstanceProfile: profile, HasPassword: passwordStates[profile.CredentialRef]})
 	}
 	for _, profile := range document.WorkflowProfiles {
-		profile.Status = normalizeStoredAutoDLWorkflowStatus(profile)
 		response.WorkflowProfiles = append(response.WorkflowProfiles, autoDLWorkflowResponse(profile))
 	}
 	return response
 }
 
 func normalizeAutoDLDocumentValidations(document *autoDLSettingsDocument) {
-	profilesByID := make(map[string]AutoDLWorkflowProfile, len(document.WorkflowProfiles))
+	versionsByProfileID := make(map[string]AutoDLWorkflowVersion, len(document.WorkflowProfiles))
 	for _, profile := range document.WorkflowProfiles {
-		profile.Status = normalizeStoredAutoDLWorkflowStatus(profile)
-		profilesByID[profile.ID] = profile
+		if version, ok := currentAutoDLWorkflowVersion(profile); ok {
+			versionsByProfileID[profile.ID] = version
+		}
 	}
 	for instanceIndex := range document.Instances {
 		for validationIndex := range document.Instances[instanceIndex].WorkflowValidations {
 			validation := &document.Instances[instanceIndex].WorkflowValidations[validationIndex]
-			current, found := profilesByID[validation.WorkflowProfileID]
-			if !found || current.Status != AutoDLWorkflowStatusReady ||
-				validation.WorkflowDigest != current.WorkflowDigest ||
+			current, found := versionsByProfileID[validation.WorkflowProfileID]
+			if !found || current.BindingStatus != AutoDLBindingStatusConfirmed ||
+				validation.VersionID != current.VersionID || validation.WorkflowDigest != current.WorkflowDigest ||
 				validation.APITemplateDigest != current.APITemplateDigest {
-				validation.Status = AutoDLWorkflowStatusNeedsRevalidation
-				if validation.Reason != "workflow_changed" {
+				validation.Status = AutoDLWorkflowValidationStale
+				if validation.Reason != "workflow_changed" && validation.Reason != "migrated_v1_without_confirmed_bindings" {
 					validation.Reason = "profile_needs_revalidation"
 				}
 			}
@@ -690,104 +471,6 @@ func autoDLCompensationContext(ctx context.Context) (context.Context, context.Ca
 	return context.WithTimeout(context.WithoutCancel(ctx), autoDLCompensationTimeout)
 }
 
-func normalizeAutoDLWorkflowProfile(mutation AutoDLWorkflowProfileMutation, trustedValidation bool) (AutoDLWorkflowProfile, error) {
-	id := strings.TrimSpace(mutation.ID)
-	kind := strings.TrimSpace(mutation.Kind)
-	if !autoDLProfileIDPattern.MatchString(id) {
-		return AutoDLWorkflowProfile{}, fmt.Errorf("%w: workflow profile id", ErrAutoDLSettingsInvalid)
-	}
-	if _, ok := allowedAutoDLWorkflowKinds[kind]; !ok {
-		return AutoDLWorkflowProfile{}, fmt.Errorf("%w: workflow kind", ErrAutoDLSettingsInvalid)
-	}
-	name := strings.TrimSpace(mutation.Name)
-	version := strings.TrimSpace(mutation.Version)
-	digest := strings.TrimSpace(mutation.WorkflowDigest)
-	if name == "" || len(name) > 128 || version == "" || len(version) > 128 {
-		return AutoDLWorkflowProfile{}, fmt.Errorf("%w: workflow identity", ErrAutoDLSettingsInvalid)
-	}
-	if len(mutation.Workflow) == 0 && (digest == "" || len(digest) > 128) {
-		return AutoDLWorkflowProfile{}, fmt.Errorf("%w: workflow digest", ErrAutoDLSettingsInvalid)
-	}
-	for _, raw := range []json.RawMessage{mutation.Workflow, mutation.APITemplate, mutation.Manifest} {
-		if len(raw) > 0 && !json.Valid(raw) {
-			return AutoDLWorkflowProfile{}, fmt.Errorf("%w: workflow JSON", ErrAutoDLSettingsInvalid)
-		}
-	}
-	if len(mutation.Workflow) > 0 {
-		digest = autoDLPayloadDigest(mutation.Workflow)
-	}
-	apiTemplateDigest := strings.TrimSpace(mutation.APITemplateDigest)
-	if len(mutation.APITemplate) > 0 {
-		apiTemplateDigest = autoDLPayloadDigest(mutation.APITemplate)
-	}
-	status := AutoDLWorkflowStatusNeedsRevalidation
-	if strings.TrimSpace(mutation.Status) == AutoDLWorkflowStatusInvalid {
-		status = AutoDLWorkflowStatusInvalid
-	}
-	if trustedValidation && len(mutation.Workflow) > 0 && len(mutation.APITemplate) > 0 &&
-		!isBlockedAutoDLReadyKind(kind) &&
-		!isRejectedAutoDLWorkflowDigest(autoDLExactPayloadDigest(mutation.Workflow)) {
-		status = AutoDLWorkflowStatusReady
-	}
-	profile := AutoDLWorkflowProfile{
-		ID:                id,
-		Name:              name,
-		Kind:              kind,
-		Version:           version,
-		Status:            status,
-		Workflow:          cloneRawMessage(mutation.Workflow),
-		APITemplate:       cloneRawMessage(mutation.APITemplate),
-		Manifest:          cloneRawMessage(mutation.Manifest),
-		RequiredNodes:     normalizedStringSet(mutation.RequiredNodes),
-		RequiredModels:    normalizedStringSet(mutation.RequiredModels),
-		WorkflowDigest:    digest,
-		APITemplateDigest: apiTemplateDigest,
-	}
-	profile.Status = normalizeStoredAutoDLWorkflowStatus(profile)
-	return profile, nil
-}
-
-func autoDLPayloadDigest(raw json.RawMessage) string {
-	canonical, err := json.Marshal(json.RawMessage(raw))
-	if err != nil {
-		canonical = raw
-	}
-	digest := sha256.Sum256(canonical)
-	return fmt.Sprintf("%x", digest[:])
-}
-
-func autoDLExactPayloadDigest(raw json.RawMessage) string {
-	digest := sha256.Sum256(raw)
-	return fmt.Sprintf("%x", digest[:])
-}
-
-func normalizeStoredAutoDLWorkflowStatus(profile AutoDLWorkflowProfile) string {
-	if len(profile.Workflow) == 0 || len(profile.APITemplate) == 0 ||
-		isBlockedAutoDLReadyKind(profile.Kind) || isRejectedAutoDLWorkflowDigest(profile.WorkflowDigest) {
-		return AutoDLWorkflowStatusNeedsRevalidation
-	}
-	return profile.Status
-}
-
-func isRejectedAutoDLWorkflowDigest(workflowDigest string) bool {
-	digest := strings.ToLower(strings.TrimSpace(workflowDigest))
-	digest = strings.TrimPrefix(digest, "sha256:")
-	if _, rejected := rejectedAutoDLWorkflowDigests[digest]; rejected {
-		return true
-	}
-	return false
-}
-
-func isBlockedAutoDLReadyKind(kind string) bool {
-	_, blocked := blockedAutoDLReadyKinds[kind]
-	return blocked
-}
-
-func autoDLWorkflowResponse(profile AutoDLWorkflowProfile) AutoDLWorkflowProfileResponse {
-	profile.Status = normalizeStoredAutoDLWorkflowStatus(profile)
-	return AutoDLWorkflowProfileResponse{AutoDLWorkflowProfile: profile, Ready: profile.Status == AutoDLWorkflowStatusReady}
-}
-
 func validateAutoDLDocument(document autoDLSettingsDocument) error {
 	if document.Version != autoDLSettingsVersion {
 		return fmt.Errorf("unsupported version")
@@ -823,26 +506,42 @@ func validateAutoDLDocument(document autoDLSettingsDocument) error {
 	}
 	profileIDs := make(map[string]struct{}, len(document.WorkflowProfiles))
 	for _, profile := range document.WorkflowProfiles {
-		if !autoDLProfileIDPattern.MatchString(profile.ID) || profile.Name == "" || profile.Version == "" || profile.WorkflowDigest == "" || !validAutoDLWorkflowStatus(profile.Status) {
+		if !autoDLProfileIDPattern.MatchString(profile.ID) || strings.TrimSpace(profile.Name) == "" || len(profile.Name) > 128 ||
+			strings.TrimSpace(profile.MediaKind) == "" || strings.TrimSpace(profile.RouteID) == "" ||
+			profile.CurrentVersionID == "" || len(profile.Versions) == 0 {
 			return fmt.Errorf("invalid workflow profile")
-		}
-		if _, ok := allowedAutoDLWorkflowKinds[profile.Kind]; !ok {
-			return fmt.Errorf("invalid workflow kind")
 		}
 		if _, duplicate := profileIDs[profile.ID]; duplicate {
 			return fmt.Errorf("duplicate workflow profile")
 		}
 		profileIDs[profile.ID] = struct{}{}
-		for _, raw := range []json.RawMessage{profile.Workflow, profile.APITemplate, profile.Manifest} {
-			if len(raw) > 0 && !json.Valid(raw) {
-				return fmt.Errorf("invalid workflow JSON")
+		versionIDs := make(map[string]struct{}, len(profile.Versions))
+		currentFound := false
+		for index, version := range profile.Versions {
+			if version.VersionID == "" || version.Sequence != index+1 || version.WorkflowDigest == "" ||
+				(version.BindingStatus != AutoDLBindingStatusConfirmed && version.BindingStatus != AutoDLBindingStatusUnconfirmed) ||
+				version.References.Min < 0 || version.References.Max < version.References.Min || version.References.Max > 8 {
+				return fmt.Errorf("invalid workflow version")
+			}
+			if _, duplicate := versionIDs[version.VersionID]; duplicate {
+				return fmt.Errorf("duplicate workflow version")
+			}
+			versionIDs[version.VersionID] = struct{}{}
+			currentFound = currentFound || version.VersionID == profile.CurrentVersionID
+			for _, raw := range []json.RawMessage{version.UIWorkflow, version.APITemplate} {
+				if autoDLRawPresent(raw) && !json.Valid(raw) {
+					return fmt.Errorf("invalid workflow JSON")
+				}
+			}
+			if autoDLRawPresent(version.UIWorkflow) && version.WorkflowDigest != autoDLPayloadDigest(version.UIWorkflow) {
+				return fmt.Errorf("workflow digest mismatch")
+			}
+			if autoDLRawPresent(version.APITemplate) && version.APITemplateDigest != autoDLPayloadDigest(version.APITemplate) {
+				return fmt.Errorf("API template digest mismatch")
 			}
 		}
-		if len(profile.Workflow) > 0 && profile.WorkflowDigest != autoDLPayloadDigest(profile.Workflow) {
-			return fmt.Errorf("workflow digest mismatch")
-		}
-		if len(profile.APITemplate) > 0 && profile.APITemplateDigest != autoDLPayloadDigest(profile.APITemplate) {
-			return fmt.Errorf("API template digest mismatch")
+		if !currentFound {
+			return fmt.Errorf("current workflow version not found")
 		}
 	}
 	return nil
@@ -903,29 +602,8 @@ func markAutoDLValidationsForRevalidation(validations []AutoDLWorkflowValidation
 }
 
 func validAutoDLWorkflowStatus(status string) bool {
-	return status == AutoDLWorkflowStatusReady || status == AutoDLWorkflowStatusNeedsRevalidation || status == AutoDLWorkflowStatusInvalid
-}
-
-func normalizedStringSet(values []string) []string {
-	seen := make(map[string]struct{}, len(values))
-	result := make([]string, 0, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		result = append(result, value)
-	}
-	sort.Strings(result)
-	return result
-}
-
-func cloneRawMessage(raw json.RawMessage) json.RawMessage {
-	return bytes.Clone(raw)
+	return status == AutoDLWorkflowValidationReady || status == AutoDLWorkflowValidationInvalid ||
+		status == AutoDLWorkflowValidationUnknown || status == AutoDLWorkflowValidationStale
 }
 
 func requireAutoDLContext(ctx context.Context) error {
