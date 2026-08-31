@@ -769,10 +769,19 @@ func (workflow *GenerationService) DeleteGenerationTask(id string) (generationTa
 	if workflow.generationDeleteStartingHook != nil {
 		workflow.generationDeleteStartingHook()
 	}
-	workflow.generationCancelMu.Lock()
-	workflow.cancelGenerationTaskLocked(id)
+	task, found, err := workflow.generationTasks.Get(id)
+	if err != nil || !found {
+		return generationTasksResponse{}, false, err
+	}
+	workflow.cancelGenerationTask(id)
+	if task.RouteID == coregeneration.RouteAutoDLImage && workflow.autoDLTaskCanceller != nil {
+		cancelCtx, cancel := context.WithTimeout(workflow.generationRootCtx, 30*time.Second)
+		defer cancel()
+		if err := workflow.autoDLTaskCanceller.CancelTask(cancelCtx, task); err != nil {
+			return generationTasksResponse{}, false, err
+		}
+	}
 	deleted, err := workflow.generationTasks.Delete(id)
-	workflow.generationCancelMu.Unlock()
 	if err != nil || !deleted {
 		return generationTasksResponse{}, deleted, err
 	}

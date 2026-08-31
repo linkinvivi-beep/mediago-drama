@@ -40,6 +40,10 @@ type AutoDLImageProvider struct {
 	resumeState GenerationTaskRuntimeState
 }
 
+type autoDLTaskCanceller interface {
+	CancelTask(context.Context, GenerationTaskRecord) error
+}
+
 func NewAutoDLImageProvider(
 	resolver AutoDLWorkflowResolver,
 	scheduler InstanceScheduler,
@@ -187,6 +191,67 @@ func (provider *AutoDLImageProvider) Get(ctx context.Context, id string) (corege
 		ID: id, Status: "completed", Assets: assets,
 		Metadata: map[string]any{"runtime_state": state},
 	}, nil
+}
+
+// CancelTask removes only a prompt that ComfyUI still reports as pending. A
+// running or indeterminate prompt keeps its reservation quarantined so the
+// persisted task remains the recovery authority.
+func (provider *AutoDLImageProvider) CancelTask(ctx context.Context, task GenerationTaskRecord) error {
+	if err := provider.validate(); err != nil {
+		return err
+	}
+	state := task.RuntimeState
+	submissionState := strings.ToLower(strings.TrimSpace(state.AutoDLSubmissionState))
+	if submissionState == "pre_submit" || submissionState == "" {
+		return nil
+	}
+	if submissionState != "accepted" {
+		return fmt.Errorf("AutoDL submission outcome is unknown; reconcile the instance before deleting the task")
+	}
+	if strings.TrimSpace(task.ID) == "" || strings.TrimSpace(state.InstanceProfileID) == "" || strings.TrimSpace(state.ComfyPromptID) == "" {
+		return fmt.Errorf("AutoDL task cancellation checkpoint is incomplete")
+	}
+	lease, err := provider.scheduler.Resume(ctx, task.ID, state.InstanceProfileID, state.ComfyPromptID)
+	if err != nil {
+		return err
+	}
+	client, err := provider.client(lease.Tunnel().BaseURL)
+	if err != nil {
+		_ = lease.Quarantine("cancel_client_unavailable")
+		return err
+	}
+	queue, err := client.Queue(ctx)
+	if err != nil {
+		_ = lease.Quarantine("cancel_queue_unknown")
+		return err
+	}
+	if queueContainsPrompt(queue.Running, state.ComfyPromptID) {
+		_ = lease.Quarantine("cancel_prompt_running")
+		return fmt.Errorf("AutoDL prompt is already running; the task was kept for recovery")
+	}
+	if !queueContainsPrompt(queue.Pending, state.ComfyPromptID) {
+		_ = lease.Quarantine("cancel_prompt_not_pending")
+		return fmt.Errorf("AutoDL prompt is not in the pending queue; the task was kept for recovery")
+	}
+	deleted, err := client.DeleteQueuedPrompt(ctx, state.ComfyPromptID)
+	if err != nil || !deleted {
+		_ = lease.Quarantine("cancel_queue_delete_failed")
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("ComfyUI did not confirm queued prompt deletion")
+	}
+	lease.ReleaseTerminal()
+	return nil
+}
+
+func queueContainsPrompt(items []comfyui.QueueItem, promptID string) bool {
+	for _, item := range items {
+		if item.PromptID == promptID {
+			return true
+		}
+	}
+	return false
 }
 
 func (provider *AutoDLImageProvider) validate() error {

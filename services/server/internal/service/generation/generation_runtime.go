@@ -28,6 +28,7 @@ type GenerationService struct {
 	documents                     GenerationDocumentResolver
 	generationProviderFactory     func(coregeneration.ModelRoute) (coregeneration.Provider, error)
 	legacyProviderFactory         func(coregeneration.ModelRoute) (coregeneration.Provider, error)
+	autoDLTaskCanceller           autoDLTaskCanceller
 	autoDLWorkflowResolver        AutoDLWorkflowResolver
 	mediaLinkReadiness            func(context.Context, string) (bool, string)
 	multimodalTextProviderFactory runtime.MultimodalTextProviderFactory

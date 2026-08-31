@@ -138,6 +138,10 @@ func (workflow *GenerationService) SetMediaLinkProvidersWithAutoDLImage(
 		autodlH3:    autodlH3,
 	}
 	workflow.generationProviderFactory = providers.providerForRoute
+	workflow.autoDLTaskCanceller = nil
+	if canceller, ok := autodlImage.(autoDLTaskCanceller); ok {
+		workflow.autoDLTaskCanceller = canceller
+	}
 	workflow.mediaLinkReadiness = readiness
 }
 
