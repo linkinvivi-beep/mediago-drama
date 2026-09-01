@@ -534,6 +534,10 @@ func decodeAutoDLJSON[T any](context *gin.Context) (T, bool) {
 }
 
 func writeAutoDLSettingsError(context *gin.Context, err error) {
+	if errors.Is(err, autodl.ErrPasswordMissing) {
+		httpresponse.Fail(context, http.StatusUnprocessableEntity, "未保存有效 SSH 密码，请编辑实例后重新输入", err)
+		return
+	}
 	status := http.StatusInternalServerError
 	switch {
 	case errors.Is(err, servicesettings.ErrAutoDLInstanceNotFound),

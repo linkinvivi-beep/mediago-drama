@@ -507,14 +507,14 @@ func probeAutoDLPassword(ctx context.Context, passwordStore autoDLPasswordStore,
 	if passwordStore == nil {
 		return false, nil
 	}
-	_, err := passwordStore.Get(ctx, autoDLKeychainService, credentialRef)
+	secret, err := passwordStore.Get(ctx, autoDLKeychainService, credentialRef)
 	if errors.Is(err, platformkeychain.ErrNotFound) {
 		return false, nil
 	}
 	if err != nil {
 		return false, fmt.Errorf("checking AutoDL password: %w", err)
 	}
-	return true, nil
+	return len(secret) > 0, nil
 }
 
 func autoDLCompensationContext(ctx context.Context) (context.Context, context.CancelFunc) {

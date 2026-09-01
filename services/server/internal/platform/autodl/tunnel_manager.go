@@ -24,6 +24,8 @@ var (
 	ErrTunnelSuperseded = errors.New("AutoDL tunnel target was superseded")
 	// ErrTunnelStale means Close invalidated work that began before its epoch.
 	ErrTunnelStale = errors.New("AutoDL tunnel request is stale")
+	// ErrPasswordMissing means the selected instance has no usable SSH password.
+	ErrPasswordMissing = errors.New("AutoDL SSH password is missing")
 )
 
 // TunnelTarget contains the non-secret connection fields needed to establish
@@ -450,7 +452,7 @@ func openManagedTunnel(
 		return nil, fmt.Errorf("load AutoDL SSH password: %w", err)
 	}
 	if len(password) == 0 {
-		return nil, fmt.Errorf("AutoDL SSH password is empty")
+		return nil, ErrPasswordMissing
 	}
 
 	serverAddress := net.JoinHostPort(target.Host, strconv.Itoa(target.SSHPort))

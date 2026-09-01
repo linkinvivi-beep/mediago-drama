@@ -48,6 +48,25 @@ func TestAutoDLSaveInstancePersistsNoPasswordOrRawCommand(t *testing.T) {
 	}
 }
 
+func TestAutoDLSettingsTreatsEmptyKeychainItemAsMissing(t *testing.T) {
+	service, _, passwords := newAutoDLSettingsForTest()
+	instance, err := service.SaveAutoDLInstance(context.Background(), AutoDLInstanceMutation{
+		Name: "GPU A", SSHCommand: "ssh root@gpu-a.example.com", ComfyPort: 6006,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	passwords.values[autoDLKeychainService+"\x00"+instance.CredentialRef] = ""
+
+	response, err := service.GetAutoDLSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Instances) != 1 || response.Instances[0].HasPassword {
+		t.Fatalf("GetAutoDLSettings() = %#v, want empty Keychain item reported as missing", response)
+	}
+}
+
 func TestAutoDLSaveInstanceRequiresExplicitSSHUser(t *testing.T) {
 	service, appStore, _ := newAutoDLSettingsForTest()
 

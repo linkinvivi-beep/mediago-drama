@@ -629,6 +629,18 @@ func TestTunnelManagerClearsPasswordBytesReturnedWithCredentialError(t *testing.
 	}
 }
 
+func TestTunnelManagerClassifiesEmptyPassword(t *testing.T) {
+	manager := NewTunnelManager(&fakeTunnelPasswordSource{values: map[string][]byte{"credential": {}}})
+	t.Cleanup(func() { _ = manager.CloseAll() })
+	target := TunnelTarget{
+		InstanceProfileID: "instance", Host: "gpu.example.com", SSHPort: 22, SSHUser: "root",
+		ComfyPort: 6006, HostFingerprint: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", CredentialRef: "credential",
+	}
+	if _, err := manager.Ensure(context.Background(), target); !errors.Is(err, ErrPasswordMissing) {
+		t.Fatalf("Ensure() error = %v, want ErrPasswordMissing", err)
+	}
+}
+
 func TestTunnelForwardingDrainsRemoteResponseAfterClientCloseWrite(t *testing.T) {
 	requestReceived := make(chan string, 1)
 	releaseResponse := make(chan struct{})
