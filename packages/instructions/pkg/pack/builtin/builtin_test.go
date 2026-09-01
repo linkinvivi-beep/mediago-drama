@@ -249,6 +249,72 @@ func TestVideoGenerationSkillOwnsAgentVideoWorkflow(t *testing.T) {
 	t.Fatal("builtin skills missing video-generation")
 }
 
+func TestBuiltinVideoWritingAssetsUseRouteNeutralSingleShotContract(t *testing.T) {
+	bundle, err := Builtin(context.Background())
+	if err != nil {
+		t.Fatalf("Builtin() error = %v", err)
+	}
+
+	entries := map[string]string{}
+	for _, entry := range bundle.Entries {
+		entries[entry.Slug] = entry.Description + "\n" + entry.Body
+	}
+
+	storyboard := entries["storyboard-writer"]
+	if storyboard == "" {
+		t.Fatal("builtin skills missing storyboard-writer")
+	}
+	for _, fragment := range []string{
+		"一镜一条",
+		"一个主要叙事动作",
+		"一个主要镜头运动",
+		"明确的结束状态",
+		"生成设置表单",
+	} {
+		if !strings.Contains(storyboard, fragment) {
+			t.Fatalf("storyboard-writer missing route-neutral shot rule %q:\n%s", fragment, storyboard)
+		}
+	}
+	for _, fragment := range []string{"Seedance 2.0", "15.00", "8K", "HDR10+", "120fps", "伦勃朗光"} {
+		if strings.Contains(storyboard, fragment) {
+			t.Fatalf("storyboard-writer should not hard-code model/render default %q:\n%s", fragment, storyboard)
+		}
+	}
+
+	videoGeneration := entries["video-generation"]
+	for _, fragment := range []string{
+		"MediaLink MCP",
+		"主体与一致性",
+		"起始状态",
+		"主要动作",
+		"主要镜头运动",
+		"结束状态",
+		"环境与声音",
+	} {
+		if !strings.Contains(videoGeneration, fragment) {
+			t.Fatalf("video-generation missing executable prompt rule %q:\n%s", fragment, videoGeneration)
+		}
+	}
+	if strings.Contains(videoGeneration, "MediaGo Drama MCP") {
+		t.Fatalf("video-generation still uses the former product name:\n%s", videoGeneration)
+	}
+
+	cinematic := entries["video-cinematic-shot"]
+	for _, fragment := range []string{"一个主要动作", "一种主要镜头运动", "结束状态"} {
+		if !strings.Contains(cinematic, fragment) {
+			t.Fatalf("video-cinematic-shot missing single-shot rule %q:\n%s", fragment, cinematic)
+		}
+	}
+
+	orbit := entries["video-product-orbit"]
+	if !strings.Contains(orbit, "缓慢环绕") || !strings.Contains(orbit, "结束状态") {
+		t.Fatalf("video-product-orbit should define a coherent orbit and end state:\n%s", orbit)
+	}
+	if strings.Contains(orbit, "或推近") {
+		t.Fatalf("video-product-orbit should not offer conflicting camera moves:\n%s", orbit)
+	}
+}
+
 func TestCharacterWriterSplitsVisualVariants(t *testing.T) {
 	bundle, err := Builtin(context.Background())
 	if err != nil {
