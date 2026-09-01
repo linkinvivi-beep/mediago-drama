@@ -14,6 +14,22 @@ import (
 	"time"
 )
 
+func TestMessageScannerAcceptsLargeBoundedJSONLine(t *testing.T) {
+	payload := strings.Repeat("x", 128<<10)
+	scanner := newMessageScanner(strings.NewReader(`{"method":"item/completed","params":"`+payload+`"}`+"\n"), 256<<10)
+	if !scanner.Scan() {
+		t.Fatalf("Scan() = false, error = %v", scanner.Err())
+	}
+}
+
+func TestMessageScannerRejectsLineOverExplicitLimit(t *testing.T) {
+	scanner := newMessageScanner(strings.NewReader(strings.Repeat("x", 4097)), 4096)
+	scanned := scanner.Scan()
+	if scanned || scanner.Err() == nil || !strings.Contains(scanner.Err().Error(), "token too long") {
+		t.Fatalf("Scan() = %v, error = %v", scanned, scanner.Err())
+	}
+}
+
 func TestStartWithInitContextDeadlineReapsSilentChild(t *testing.T) {
 	binPath := writeFakeAppServer(t, `#!/bin/sh
 while IFS= read -r line; do sleep 10; done

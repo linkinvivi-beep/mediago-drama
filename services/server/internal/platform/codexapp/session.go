@@ -54,6 +54,21 @@ type Session struct {
 
 var appServerCommandContext = exec.CommandContext
 
+const maxAppServerMessageBytes = 96 << 20
+
+func newMessageScanner(reader io.Reader, maxBytes int) *bufio.Scanner {
+	scanner := bufio.NewScanner(reader)
+	initialBytes := 64 << 10
+	if maxBytes < initialBytes {
+		initialBytes = maxBytes
+	}
+	if initialBytes < 1 {
+		initialBytes = 1
+	}
+	scanner.Buffer(make([]byte, initialBytes), maxBytes)
+	return scanner
+}
+
 // Start launches and initializes a Codex app-server session.
 func Start(parent context.Context, binPath string) (*Session, error) {
 	return StartWithInitContext(parent, parent, binPath)
@@ -97,7 +112,7 @@ func StartWithInitContext(parent context.Context, initCtx context.Context, binPa
 		notify:   make(chan struct{}, 1),
 		readDone: make(chan struct{}),
 	}
-	go session.readLoop(bufio.NewScanner(stdout))
+	go session.readLoop(newMessageScanner(stdout, maxAppServerMessageBytes))
 	if err := session.initialize(initCtx); err != nil {
 		session.Close()
 		return nil, err
