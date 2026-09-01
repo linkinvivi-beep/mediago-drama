@@ -22,6 +22,7 @@ import {
 	clearAutoDLPassword,
 	deleteAutoDLInstance,
 	duplicateAutoDLWorkflow,
+	getAutoDLInstanceReadiness,
 	getAutoDLSettings,
 	saveAutoDLInstance,
 	scanAutoDLFingerprint,
@@ -55,6 +56,7 @@ import {
 import { Input } from "@/shared/components/ui/input";
 import { Label } from "@/shared/components/ui/label";
 import { Switch } from "@/shared/components/ui/switch";
+import { Textarea } from "@/shared/components/ui/textarea";
 import { useToast } from "@/hooks/useToast";
 
 type WorkflowDialogState =
@@ -90,11 +92,30 @@ export const AutoDLSettingsPanel: React.FC = () => {
 		run(
 			`check:${instance.id}`,
 			async () => {
-				const result = await checkAutoDLInstance(instance.id);
-				setChecks((current) => ({ ...current, [instance.id]: result }));
-				toast.success("实例连接正常", {
-					description: `${instance.name} · 本地端口 ${result.localPort ?? "自动"}`,
-				});
+				setChecks((current) => ({
+					...current,
+					[instance.id]: { connected: false, stage: "connecting" },
+				}));
+				const poll = async () => {
+					try {
+						const status = await getAutoDLInstanceReadiness(instance.id);
+						if (status.stage) {
+							setChecks((current) => ({ ...current, [instance.id]: status }));
+						}
+					} catch {
+						// The POST result remains authoritative; polling is display-only.
+					}
+				};
+				const timer = window.setInterval(() => void poll(), 1000);
+				try {
+					const result = await checkAutoDLInstance(instance.id);
+					setChecks((current) => ({ ...current, [instance.id]: result }));
+					toast.success("实例可以生成", {
+						description: `${instance.name} · 本地端口 ${result.localPort ?? "自动"}`,
+					});
+				} finally {
+					window.clearInterval(timer);
+				}
 			},
 			"检查实例失败",
 		);
@@ -115,6 +136,8 @@ export const AutoDLSettingsPanel: React.FC = () => {
 								name: instance.name,
 								sshCommand: sshCommand(instance),
 								comfyPort: instance.comfyPort,
+								startupCommand: instance.startupCommand,
+								localPort: instance.localPort ?? 0,
 								hostFingerprint: observed.fingerprint,
 								enabled: instance.enabled,
 							},
@@ -362,12 +385,24 @@ const InstanceCard: React.FC<{
 				</p>
 			</div>
 			{check ? (
-				<div className="rounded-sm border border-emerald-500/30 bg-emerald-500/5 px-2.5 py-2 text-xs">
-					<p className="font-medium text-emerald-600 dark:text-emerald-400">
-						ComfyUI {check.comfyuiVersion || "已连接"} · 本地端口 {check.localPort}
+				<div
+					className={`rounded-sm border px-2.5 py-2 text-xs ${check.stage === "ready" ? "border-emerald-500/30 bg-emerald-500/5" : "border-border bg-ide-panel/50"}`}
+				>
+					<p
+						className={
+							check.stage === "ready"
+								? "font-medium text-emerald-600 dark:text-emerald-400"
+								: "font-medium text-foreground"
+						}
+					>
+						{check.stage === "ready"
+							? `可以生成 · ComfyUI ${check.comfyuiVersion || "已连接"} · 本地端口 ${check.localPort}`
+							: readinessStageLabel(check.stage)}
 					</p>
 					<p className="mt-0.5 text-muted-foreground">
-						{check.devices?.join(" · ") || "设备信息不可用"}
+						{check.stage === "ready"
+							? check.devices?.join(" · ") || "设备信息不可用"
+							: check.reason || "正在准备实例"}
 					</p>
 				</div>
 			) : null}
@@ -540,6 +575,8 @@ const InstanceDialog: React.FC<{
 	const [ssh, setSSH] = useState("");
 	const [password, setPassword] = useState("");
 	const [comfyPort, setComfyPort] = useState(6006);
+	const [startupCommand, setStartupCommand] = useState("");
+	const [localPort, setLocalPort] = useState(0);
 	const [fingerprint, setFingerprint] = useState("");
 	const [enabled, setEnabled] = useState(false);
 	const [saving, setSaving] = useState(false);
@@ -550,6 +587,8 @@ const InstanceDialog: React.FC<{
 		setSSH(instance ? sshCommand(instance) : "");
 		setPassword("");
 		setComfyPort(instance?.comfyPort ?? 6006);
+		setStartupCommand(instance?.startupCommand ?? "");
+		setLocalPort(instance?.localPort ?? 0);
 		setFingerprint(instance?.hostFingerprint ?? "");
 		setEnabled(instance?.enabled ?? false);
 	}, [identity, instance, open]);
@@ -562,6 +601,8 @@ const InstanceDialog: React.FC<{
 					sshCommand: ssh.trim(),
 					password: password || undefined,
 					comfyPort,
+					startupCommand: startupCommand.trim() || undefined,
+					localPort,
 					hostFingerprint: fingerprint.trim() || undefined,
 					enabled,
 				},
@@ -631,6 +672,34 @@ const InstanceDialog: React.FC<{
 						<Switch checked={enabled} onCheckedChange={setEnabled} />
 						启用此实例
 					</label>
+					<details className="sm:col-span-2 rounded-sm border border-border/70 bg-ide-panel/40 px-3 py-2">
+						<summary className="cursor-pointer text-xs font-medium">高级设置</summary>
+						<div className="mt-3 grid gap-3 sm:grid-cols-2">
+							<div className="sm:col-span-2">
+								<DialogField label="远程启动命令">
+									<Textarea
+										aria-label="远程启动命令"
+										value={startupCommand}
+										onChange={(event) => setStartupCommand(event.target.value)}
+										placeholder="例如 /root/start_comfyui.sh"
+									/>
+								</DialogField>
+							</div>
+							<DialogField label="本地端口（0 为自动分配）">
+								<Input
+									aria-label="本地端口"
+									type="number"
+									min={0}
+									max={65535}
+									value={localPort}
+									onChange={(event) => setLocalPort(Number(event.target.value))}
+								/>
+							</DialogField>
+							<p className="self-end pb-2 text-xs text-muted-foreground">
+								保留 0 可同时运行多个实例；只有固定端口需求时才手动指定。
+							</p>
+						</div>
+					</details>
 				</div>
 				<AlertDialogFooter>
 					<AlertDialogCancel disabled={saving}>取消</AlertDialogCancel>
@@ -696,6 +765,22 @@ const validationLabel = (status?: string) =>
 			: status === "stale"
 				? "需重验"
 				: "验证";
+const readinessStageLabel = (stage?: AutoDLInstanceCheck["stage"]) =>
+	stage === "connecting"
+		? "连接 SSH"
+		: stage === "probing"
+			? "检查远程服务"
+			: stage === "starting"
+				? "启动服务"
+				: stage === "waiting_health"
+					? "等待健康"
+					: stage === "tunneling"
+						? "建立隧道"
+						: stage === "validating_api"
+							? "验证 API"
+							: stage === "failed"
+								? "准备失败"
+								: "检查连接";
 const workflowRouteLabel = (routeId: string) =>
 	routeId === "autodl.minimax-h3" ? "H3 视频" : routeId === "autodl.image" ? "云端生图" : routeId;
 const sshCommand = (instance: AutoDLInstance) =>

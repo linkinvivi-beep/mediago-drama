@@ -211,6 +211,8 @@ export const checkAutoDLInstance = async (instanceId: string) =>
 	(
 		await httpClient.post<AutoDLInstanceCheck>(
 			`${autoDLSettingsKey}/instances/${encodeURIComponent(instanceId)}/check`,
+			undefined,
+			{ timeout: 100_000 },
 		)
 	).data;
 
