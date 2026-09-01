@@ -1,5 +1,12 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { assertDarwinArm64Target, createElectronAppPackage } from "./stage-electron-app";
+import {
+	assertDarwinArm64Target,
+	assertStagedServiceBinariesMatchTarget,
+	createElectronAppPackage,
+} from "./stage-electron-app";
 
 describe("MediaLink Electron staging", () => {
 	it("builds an unpublished macOS arm64-only package configuration", () => {
@@ -33,5 +40,23 @@ describe("MediaLink Electron staging", () => {
 			"MEDIAGO_ELECTRON_TARGET_PLATFORM must be darwin-arm64",
 		);
 		expect(() => assertDarwinArm64Target("darwin-arm64")).not.toThrow();
+	});
+
+	it("rejects a stale staged service binary before packaging", () => {
+		const root = mkdtempSync(join(tmpdir(), "medialink-staging-"));
+		const targetBinDir = join(root, "target");
+		const stagedBinDir = join(root, "staged");
+		mkdirSync(targetBinDir);
+		mkdirSync(stagedBinDir);
+		writeFileSync(join(targetBinDir, "mediago-server"), "current-server");
+		writeFileSync(join(stagedBinDir, "mediago-server"), "stale-server");
+
+		try {
+			expect(() =>
+				assertStagedServiceBinariesMatchTarget(stagedBinDir, targetBinDir, ["mediago-server"]),
+			).toThrow("stale staged service binary: mediago-server");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 });

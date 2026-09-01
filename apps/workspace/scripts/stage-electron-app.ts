@@ -17,16 +17,22 @@ type WorkspacePackage = {
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const workspaceDir = resolve(scriptDir, "..");
+const repositoryDir = resolve(workspaceDir, "../..");
 const workspacePackagePath = join(workspaceDir, "package.json");
 const rendererDistDir = join(workspaceDir, "dist");
 const electronDistDir = join(workspaceDir, "electron", "dist");
 const electronAppDir = join(workspaceDir, "electron", "app");
+const serviceBinaryNames = ["mediago-server", "mediago-document-mcp", "mediago-generation-mcp"];
 function main(): void {
 	const electronTargetPlatform = process.env.MEDIAGO_ELECTRON_TARGET_PLATFORM?.trim();
 	assertDarwinArm64Target(electronTargetPlatform);
 	ensureDirectory(rendererDistDir, "missing renderer build output");
 	ensureDirectory(electronDistDir, "missing Electron main process build output");
-	ensureStagedServerBinary();
+	assertStagedServiceBinariesMatchTarget(
+		join(workspaceDir, "electron", "resources", "bin"),
+		join(repositoryDir, "bin", electronTargetPlatform),
+		serviceBinaryNames,
+	);
 
 	const workspacePackage = readWorkspacePackage();
 	const electronVersion = normalizeVersion(workspacePackage.devDependencies?.electron);
@@ -127,10 +133,23 @@ function ensureDirectory(path: string, message: string): void {
 	}
 }
 
-function ensureStagedServerBinary(): void {
-	const path = join(workspaceDir, "electron", "resources", "bin", "mediago-server");
-	if (!existsSync(path)) {
-		throw new Error(`missing staged server binary: ${path}`);
+export function assertStagedServiceBinariesMatchTarget(
+	stagedBinDir: string,
+	targetBinDir: string,
+	binaryNames: string[],
+): void {
+	for (const binaryName of binaryNames) {
+		const stagedPath = join(stagedBinDir, binaryName);
+		const targetPath = join(targetBinDir, binaryName);
+		if (!existsSync(stagedPath)) {
+			throw new Error(`missing staged service binary: ${binaryName}`);
+		}
+		if (!existsSync(targetPath)) {
+			throw new Error(`missing target service binary: ${binaryName}`);
+		}
+		if (!readFileSync(stagedPath).equals(readFileSync(targetPath))) {
+			throw new Error(`stale staged service binary: ${binaryName}`);
+		}
 	}
 }
 

@@ -37,9 +37,9 @@
 - [x] `go test ./... -count=1 -timeout=5m`（目录：`services/server`）。
 - [x] `node scripts/build-server-target.mjs darwin-arm64`，成功构建服务器和两个 MCP sidecar。
 - [x] `pnpm check`（目录：`apps/workspace`），0 条 lint/format 错误。
-- [x] `pnpm test`（目录：`apps/workspace`），214 个测试文件、1406 个测试通过。
+- [x] `pnpm test`（目录：`apps/workspace`），214 个测试文件、1407 个测试通过。
 - [x] `pnpm build`（目录：`apps/workspace`）。
-- [x] Electron staged package 契约测试通过，且 `electron-updater` 已内联到主进程 ASAR。
+- [x] Electron staged package 契约测试通过，且在打包前逐字节核对三个 staged service binary 与当前 arm64 构建产物一致；`electron-updater` 已内联到主进程 ASAR。
 - [x] 提交前执行 `git diff --check`，没有空白错误。
 - [x] 未跟踪的 `work/` 目录保持未修改、未暂存。
 
@@ -48,17 +48,18 @@
 - [x] 从仓库根目录准备 arm64 sidecar 与资源。
 - [x] 完成 `pnpm electron:build:darwin-arm64` 的编译、staging 与 arm64 DMG/ZIP 打包步骤。
 - [x] 输出目录只生成 MediaLink arm64 `.app`、DMG 和 ZIP，没有 Windows、Linux 或 Intel Mac 产物。
-- [x] DMG 以只读方式挂载到 `/private/tmp`，校验和验证通过，检查后正常卸载；没有覆盖现有应用。
+- [x] DMG 完整性验证通过；新包已安装到 `/Applications/MediaLink.app`，旧应用先移动到 `/private/tmp/MediaLink-old-0.1.0-beta.0-20260901.app` 作为可恢复备份。
 - [x] release 目录中的临时应用启动 8 秒，服务器在随机 loopback 端口正常启动后退出；没有遗留 MediaLink/sidecar 进程。
 - [x] 应用主可执行文件及三个 Go sidecar 经 `file` 确认为 `Mach-O 64-bit executable arm64`。
 - [x] `Info.plist` 的 `CFBundleIdentifier` 为 `app.medialink.desktop`，显示名与可执行文件名均为 `MediaLink`。
 - [x] 当前本地包明确配置为不签名、不公证；`codesign --verify --deep --strict` 和 `spctl --assess` 均未通过，不宣称可直接通过 Gatekeeper 分发。
 - [x] 启动日志确认应用数据写入 `~/Library/Application Support/MediaLink`。本轮没有执行旧数据迁移或清理。
+- [x] 在新安装应用中执行“刷新并测试”，界面确认 `Codex 生图已就绪`；未触发真实生图。
 
 产物：
 
-- `apps/workspace/release/MediaLink-0.1.0-beta.0-macos-arm64.dmg`，SHA-256 `2097cfeea37339ae46f08f0ad1e39cf2b18119b49bb4c38e643a1449a4d84719`。
-- `apps/workspace/release/MediaLink-0.1.0-beta.0-macos-arm64.zip`，SHA-256 `46dbc3bc7287025e6d999b641c0a2858f9b84fd202e264ff4ce51f8c8d55bfba`。
+- `apps/workspace/release/MediaLink-0.1.0-beta.0-macos-arm64.dmg`，SHA-256 `a09b7e05a79108b5df53f99015d781555540c333559c7e4c5f5ae2296727f355`。
+- `apps/workspace/release/MediaLink-0.1.0-beta.0-macos-arm64.zip`，SHA-256 `752811caed995bcef240ba9e3b6ec3210c7516f258950d353237bee9f47bd16a`。
 
 ## 5. 真实生成验收
 
@@ -74,4 +75,4 @@
 
 ## 6. 当前结论
 
-MediaLink 已通过本地离线质量门、macOS Apple Silicon 构建、DMG 只读挂载和临时启动冒烟。当前产物仍是未签名、未公证的开发验收包，不标记为公开发布版；真实 Codex/AutoDL 生成继续保持“未授权、未执行”。
+MediaLink 已通过本地离线质量门、macOS Apple Silicon 构建、DMG 完整性验证、新包安装启动和 Codex 生图预检。当前产物仍是未签名、未公证的开发验收包，不标记为公开发布版；真实 Codex/AutoDL 生成继续保持“未授权、未执行”。
