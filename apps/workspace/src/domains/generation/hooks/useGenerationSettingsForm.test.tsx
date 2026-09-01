@@ -17,9 +17,16 @@ const workspaceMock = vi.hoisted(() => ({
 	current: {} as Record<string, unknown>,
 	useGenerationWorkspace: vi.fn(),
 }));
+const mediaApiMock = vi.hoisted(() => ({
+	uploadMediaAsset: vi.fn(),
+}));
 
 vi.mock("@/domains/generation/hooks/useGenerationWorkspace", () => ({
 	useGenerationWorkspace: workspaceMock.useGenerationWorkspace,
+}));
+vi.mock("@/domains/workspace/api/media", async (importOriginal) => ({
+	...(await importOriginal<typeof import("@/domains/workspace/api/media")>()),
+	uploadMediaAsset: mediaApiMock.uploadMediaAsset,
 }));
 
 const promptItems: PromptInsertItem[] = [
@@ -54,6 +61,13 @@ const imageAsset: MediaAsset = {
 	url: "/api/v1/media-assets/asset-image/content",
 };
 
+const importedImage = (id: string, filename: string): MediaAsset => ({
+	...imageAsset,
+	filename,
+	id,
+	url: `/api/v1/media-assets/${id}/content`,
+});
+
 describe("useGenerationSettingsForm", () => {
 	afterEach(cleanup);
 
@@ -63,6 +77,7 @@ describe("useGenerationSettingsForm", () => {
 		workspaceMock.current = workspaceValue();
 		workspaceMock.useGenerationWorkspace.mockImplementation(() => workspaceMock.current);
 		workspaceMock.useGenerationWorkspace.mockClear();
+		mediaApiMock.uploadMediaAsset.mockReset();
 	});
 
 	it("restores_last_settings_for_kind", async () => {
@@ -212,6 +227,101 @@ describe("useGenerationSettingsForm", () => {
 				(option) => option.value === "4k",
 			)?.disabled,
 		).toBe(true);
+	});
+
+	it("imports multiple references once and preserves their selected order", async () => {
+		const first = importedImage("asset-a", "a.png");
+		const second = importedImage("asset-b", "b.png");
+		mediaApiMock.uploadMediaAsset.mockImplementation(async (file: File) =>
+			file.name === "a.png" ? first : second,
+		);
+		workspaceMock.current = {
+			...workspaceValue(),
+			mediaAssets: [second, first],
+		};
+
+		const { result } = renderHook(() => useGenerationSettingsForm({ kind: "image" }));
+		await waitFor(() => expect(result.current.isReady).toBe(true));
+
+		await act(async () => {
+			await result.current.importReferenceFiles([
+				new File(["a"], "a.png", { type: "image/png" }),
+				new File(["b"], "b.png", { type: "image/png" }),
+			]);
+		});
+
+		expect(result.current.value.referenceAssetIds).toEqual(["asset-a", "asset-b"]);
+		expect(result.current.selectedReferenceAssets.map((asset) => asset.id)).toEqual([
+			"asset-a",
+			"asset-b",
+		]);
+		expect(workspaceMock.current.mutateMediaAssets).toHaveBeenCalledWith(expect.any(Function), {
+			revalidate: false,
+		});
+	});
+
+	it("preflights the remaining reference limit before upload", async () => {
+		const second = importedImage("asset-b", "b.png");
+		mediaApiMock.uploadMediaAsset.mockResolvedValue(second);
+		const { result } = renderHook(() =>
+			useGenerationSettingsForm({
+				defaultValue: {
+					referenceAssetIds: ["asset-image"],
+					routeId: "route-reference",
+				},
+				kind: "image",
+			}),
+		);
+		await waitFor(() => expect(result.current.isReady).toBe(true));
+
+		await act(async () => {
+			await result.current.importReferenceFiles([
+				new File(["b"], "b.png", { type: "image/png" }),
+				new File(["c"], "c.png", { type: "image/png" }),
+			]);
+		});
+
+		expect(mediaApiMock.uploadMediaAsset).toHaveBeenCalledTimes(1);
+		expect(result.current.value.referenceAssetIds).toEqual(["asset-image", "asset-b"]);
+		expect(result.current.error).toContain("c.png");
+	});
+
+	it("does not upload when the selected route has no reference support", async () => {
+		const { result } = renderHook(() =>
+			useGenerationSettingsForm({
+				defaultValue: { routeId: "route-no-reference" },
+				kind: "image",
+			}),
+		);
+		await waitFor(() => expect(result.current.isReady).toBe(true));
+
+		await act(async () => {
+			await result.current.importReferenceFiles([new File(["a"], "a.png", { type: "image/png" })]);
+		});
+
+		expect(mediaApiMock.uploadMediaAsset).not.toHaveBeenCalled();
+		expect(result.current.value.referenceAssetIds).toEqual([]);
+		expect(result.current.error).toContain("当前模型不支持图片参考素材");
+	});
+
+	it("keeps successful references when another upload fails", async () => {
+		const first = importedImage("asset-a", "a.png");
+		mediaApiMock.uploadMediaAsset.mockImplementation(async (file: File) => {
+			if (file.name === "b.png") throw new Error("上传中断");
+			return first;
+		});
+		const { result } = renderHook(() => useGenerationSettingsForm({ kind: "image" }));
+		await waitFor(() => expect(result.current.isReady).toBe(true));
+
+		await act(async () => {
+			await result.current.importReferenceFiles([
+				new File(["a"], "a.png", { type: "image/png" }),
+				new File(["b"], "b.png", { type: "image/png" }),
+			]);
+		});
+
+		expect(result.current.value.referenceAssetIds).toEqual(["asset-a"]);
+		expect(result.current.error).toContain("b.png：上传中断");
 	});
 
 	it("reports_invalid_until_enabled_prompt_features_are_complete", async () => {

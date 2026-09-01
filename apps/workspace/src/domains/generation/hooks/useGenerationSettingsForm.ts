@@ -18,6 +18,14 @@ import { resolveGenerationRouteParamControls } from "@/domains/generation/compon
 import type { PromptInsertItem } from "@/domains/generation/components/PromptSlashCommand";
 import { useGenerationCountControl } from "@/domains/generation/components/useGenerationCountControl";
 import {
+	importReferenceFiles as runReferenceFileImport,
+	mediaAssetsInIDOrder,
+	mergeMediaAssetsByID,
+	referenceImportIssueMessage,
+	type ReferenceImportBatchResult,
+	type ReferenceImportProgress,
+} from "@/domains/generation/lib/reference-file-import";
+import {
 	isConfiguredRoute,
 	maxReferenceUrlsForRoute,
 	preferredRoute,
@@ -36,8 +44,7 @@ import {
 	batchGenerationPromptSupplementEnabled,
 	useBatchGenerationSettingsPreferenceStore,
 } from "@/domains/generation/stores/batch-generation-settings";
-import type { MediaAsset } from "@/domains/workspace/api/media";
-import { uploadMediaAsset } from "@/domains/workspace/api/media";
+import type { MediaAsset, MediaAssetKind } from "@/domains/workspace/api/media";
 
 export interface UseGenerationSettingsFormOptions {
 	defaultValue?: unknown;
@@ -47,6 +54,9 @@ export interface UseGenerationSettingsFormOptions {
 	projectId?: string;
 	uploadIdPrefix?: string;
 }
+
+const imageReferenceKinds = new Set<MediaAssetKind>(["image"]);
+const emptyReferenceKinds = new Set<MediaAssetKind>();
 
 export interface GenerationSettingsFormController {
 	autoDLWorkflowOptions: AutoDLWorkflowOptionState;
@@ -61,6 +71,7 @@ export interface GenerationSettingsFormController {
 	isBusy: boolean;
 	isReady: boolean;
 	isUploadingReference: boolean;
+	importReferenceFiles: (files: readonly File[]) => Promise<ReferenceImportBatchResult | null>;
 	isValid: boolean;
 	maxReferenceImages?: number;
 	mutateMediaAssets: () => void | Promise<unknown>;
@@ -68,6 +79,7 @@ export interface GenerationSettingsFormController {
 	promptOptimizationModelOptions: PromptOptimizeModelOption[];
 	promptSupplementEnabled: boolean;
 	referenceDialogOpen: boolean;
+	referenceImportProgress: ReferenceImportProgress | null;
 	referenceInputId: string;
 	routeParamControls: ReturnType<typeof resolveGenerationRouteParamControls>;
 	selectedFamily: GenerationFamily;
@@ -147,6 +159,10 @@ export const useGenerationSettingsForm = ({
 	const promptOptimizationDraftRouteClearedRef = useRef(false);
 	const [referenceDialogOpen, setReferenceDialogOpen] = useState(false);
 	const [isUploadingReference, setIsUploadingReference] = useState(false);
+	const [referenceImportProgress, setReferenceImportProgress] =
+		useState<ReferenceImportProgress | null>(null);
+	const referenceImportInFlightRef = useRef(false);
+	const isMountedRef = useRef(true);
 	const [error, setError] = useState<string | null>(null);
 	const defaultValueKey = stableValueKey(defaultValue);
 	const initializationKey = `${kind}:${defaultValueKey}`;
@@ -159,6 +175,13 @@ export const useGenerationSettingsForm = ({
 	useEffect(() => {
 		onValueChangeRef.current = onValueChange;
 	}, [onValueChange]);
+
+	useEffect(() => {
+		isMountedRef.current = true;
+		return () => {
+			isMountedRef.current = false;
+		};
+	}, []);
 
 	const commitValue = useCallback((next: GenerationSettingsValue, notify = true) => {
 		const changed = !sameGenerationSettingsValue(valueRef.current, next);
@@ -332,6 +355,8 @@ export const useGenerationSettingsForm = ({
 			workspace.selectedRoute,
 		[value.routeId, workspace.catalog.routes, workspace.selectedRoute],
 	);
+	const selectedRouteIDRef = useRef(selectedRoute.id);
+	selectedRouteIDRef.current = selectedRoute.id;
 	const selectedFamily = useMemo(
 		() =>
 			workspace.catalog.families.find((family) => family.id === selectedRoute.familyId) ??
@@ -674,7 +699,7 @@ export const useGenerationSettingsForm = ({
 		[workspace.mediaAssets],
 	);
 	const selectedReferenceAssets = useMemo(
-		() => imageReferenceAssets.filter((asset) => value.referenceAssetIds.includes(asset.id)),
+		() => mediaAssetsInIDOrder(value.referenceAssetIds, imageReferenceAssets),
 		[imageReferenceAssets, value.referenceAssetIds],
 	);
 	const maxReferenceImages = supportsReferenceImages
@@ -716,24 +741,104 @@ export const useGenerationSettingsForm = ({
 			workspace.catalog,
 		],
 	);
-	const uploadReferenceAsset = useCallback(
-		async (event: React.ChangeEvent<HTMLInputElement>) => {
-			const file = event.target.files?.[0];
-			event.target.value = "";
-			if (!file || !supportsReferenceImages) return;
+	const importReferenceFiles = useCallback(
+		async (files: readonly File[]): Promise<ReferenceImportBatchResult | null> => {
+			if (referenceImportInFlightRef.current || files.length === 0) return null;
+			referenceImportInFlightRef.current = true;
+			const routeID = selectedRoute.id;
+			const currentValue = valueRef.current;
+			const availableSlots = supportsReferenceImages
+				? maxReferenceImages
+					? Math.max(0, maxReferenceImages - currentValue.referenceAssetIds.length)
+					: undefined
+				: 0;
 			setIsUploadingReference(true);
+			setReferenceImportProgress({ processed: 0, total: files.length });
 			setError(null);
 			try {
-				const asset = await uploadMediaAsset(file, projectId);
-				await workspace.mutateMediaAssets();
-				if (asset.kind === "image") toggleReferenceAsset(asset);
-			} catch (caught) {
-				setError(caught instanceof Error ? caught.message : "素材上传失败。");
+				const batch = await runReferenceFileImport({
+					availableSlots,
+					files,
+					isUploadedAssetCompatible: (asset) => supportsReferenceImages && asset.kind === "image",
+					onProgress: (progress) => {
+						if (isMountedRef.current) setReferenceImportProgress(progress);
+					},
+					projectId,
+					selectableKinds: supportsReferenceImages ? imageReferenceKinds : emptyReferenceKinds,
+				});
+
+				if (batch.storedAssets.length > 0) {
+					await workspace.mutateMediaAssets(
+						(current) => ({
+							assets: mergeMediaAssetsByID(
+								current?.assets ?? workspace.mediaAssets,
+								batch.storedAssets,
+							),
+						}),
+						{ revalidate: false },
+					);
+					void Promise.resolve(workspace.mutateMediaAssets()).catch(() => {
+						if (isMountedRef.current) {
+							setError("素材已入库，但素材列表刷新失败，请稍后重试。");
+						}
+					});
+				}
+
+				if (!isMountedRef.current) return batch;
+				if (selectedRouteIDRef.current !== routeID) {
+					setError("模型已切换，素材已入库，请按当前模型重新选择。");
+					return batch;
+				}
+
+				if (batch.selectableAssets.length > 0) {
+					const latestValue = valueRef.current;
+					commitValue(
+						normalizeGenerationSettingsValue(
+							workspace.catalog,
+							kind,
+							{
+								...latestValue,
+								referenceAssetIds: Array.from(
+									new Set([
+										...latestValue.referenceAssetIds,
+										...batch.selectableAssets.map((asset) => asset.id),
+									]),
+								),
+							},
+							promptItemsForNormalization,
+						),
+					);
+				}
+				setError(referenceImportIssueMessage(batch));
+				return batch;
 			} finally {
-				setIsUploadingReference(false);
+				referenceImportInFlightRef.current = false;
+				if (isMountedRef.current) {
+					setIsUploadingReference(false);
+					setReferenceImportProgress(null);
+				}
 			}
 		},
-		[projectId, supportsReferenceImages, toggleReferenceAsset, workspace.mutateMediaAssets],
+		[
+			commitValue,
+			kind,
+			maxReferenceImages,
+			projectId,
+			promptItemsForNormalization,
+			selectedRoute.id,
+			supportsReferenceImages,
+			workspace.catalog,
+			workspace.mediaAssets,
+			workspace.mutateMediaAssets,
+		],
+	);
+	const uploadReferenceAsset = useCallback(
+		async (event: React.ChangeEvent<HTMLInputElement>) => {
+			const files = Array.from(event.currentTarget.files ?? []);
+			event.currentTarget.value = "";
+			await importReferenceFiles(files);
+		},
+		[importReferenceFiles],
 	);
 
 	const isReady =
@@ -789,6 +894,7 @@ export const useGenerationSettingsForm = ({
 		isBusy,
 		isReady,
 		isUploadingReference,
+		importReferenceFiles,
 		isValid,
 		maxReferenceImages,
 		mutateMediaAssets: workspace.mutateMediaAssets,
@@ -796,6 +902,7 @@ export const useGenerationSettingsForm = ({
 		promptOptimizationModelOptions,
 		promptSupplementEnabled,
 		referenceDialogOpen,
+		referenceImportProgress,
 		referenceInputId: `${uploadIdPrefix}-reference-upload`,
 		routeParamControls,
 		selectedFamily,
