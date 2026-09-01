@@ -668,6 +668,72 @@ func TestCodexImageProviderRejectsUnsafeTaskID(t *testing.T) {
 	}
 }
 
+func TestManagedCodexImageSessionCapabilitiesUseTransientClientWhileGenerationRuns(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	jobDir := t.TempDir()
+	generationClient := &managedCodexClientStub{call: func(ctx context.Context, method string, _ any, _ any) error {
+		if method != "thread/start" {
+			return errors.New("unexpected method " + method)
+		}
+		close(started)
+		select {
+		case <-release:
+			return errors.New("generation released")
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}}
+	capabilityClient := &managedCodexClientStub{call: func(_ context.Context, method string, _ any, result any) error {
+		if method != "modelProvider/capabilities/read" {
+			return errors.New("unexpected method " + method)
+		}
+		capabilities, ok := result.(*codexapp.ModelProviderCapabilities)
+		if !ok {
+			return errors.New("unexpected capabilities result")
+		}
+		*capabilities = codexapp.ModelProviderCapabilities{ImageGeneration: true}
+		return nil
+	}}
+	var factoryCalls atomic.Int32
+	managed := &managedCodexImageSession{
+		parent: context.Background(), gate: newCodexImageFIFO(),
+		factory: func(context.Context, context.Context, string) (codexapp.Client, error) {
+			switch factoryCalls.Add(1) {
+			case 1:
+				return generationClient, nil
+			case 2:
+				return capabilityClient, nil
+			default:
+				return nil, errors.New("unexpected extra client")
+			}
+		},
+	}
+	generationDone := make(chan error, 1)
+	go func() {
+		_, err := managed.GenerateImage(context.Background(), codexapp.ImageGenerationRequest{JobDir: jobDir, Prompt: "prompt"}, nil)
+		generationDone <- err
+	}()
+	<-started
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	capabilities, err := managed.Capabilities(ctx)
+	if err != nil {
+		t.Fatalf("Capabilities() error = %v", err)
+	}
+	if !capabilities.ImageGeneration {
+		t.Fatalf("Capabilities() = %#v", capabilities)
+	}
+	if got := capabilityClient.closeCount.Load(); got != 1 {
+		t.Fatalf("transient Close() count = %d, want 1", got)
+	}
+	close(release)
+	if err := <-generationDone; err == nil || !strings.Contains(err.Error(), "generation released") {
+		t.Fatalf("GenerateImage() error = %v", err)
+	}
+}
+
 func TestManagedCodexImageSessionGateHonorsDeadlineAndShutdown(t *testing.T) {
 	parent, cancelParent := context.WithCancel(context.Background())
 	started := make(chan struct{})
@@ -697,8 +763,8 @@ func TestManagedCodexImageSessionGateHonorsDeadlineAndShutdown(t *testing.T) {
 	<-started
 	deadlineCtx, deadlineCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer deadlineCancel()
-	if _, err := managed.Capabilities(deadlineCtx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Capabilities() error = %v, want deadline exceeded", err)
+	if _, err := managed.GenerateImage(deadlineCtx, codexapp.ImageGenerationRequest{JobDir: t.TempDir(), Prompt: "queued"}, nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("queued GenerateImage() error = %v, want deadline exceeded", err)
 	}
 	cancelParent()
 	if err := <-generateDone; !errors.Is(err, context.Canceled) {

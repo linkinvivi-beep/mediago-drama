@@ -184,19 +184,12 @@ func (*CodexImageProvider) Name() string { return "Codex Image" }
 func (session *managedCodexImageSession) Capabilities(ctx context.Context) (codexapp.ModelProviderCapabilities, error) {
 	ctx, cancel := session.operationContext(ctx)
 	defer cancel()
-	if err := session.gate.acquire(ctx); err != nil {
-		return codexapp.ModelProviderCapabilities{}, err
-	}
-	defer session.gate.release()
-	typed, err := session.ensure(ctx)
+	client, err := session.factory(session.parent, ctx, session.binPath)
 	if err != nil {
 		return codexapp.ModelProviderCapabilities{}, err
 	}
-	capabilities, err := typed.Capabilities(ctx)
-	if err != nil {
-		session.invalidate()
-	}
-	return capabilities, err
+	defer client.Close()
+	return codexapp.ReadModelProviderCapabilities(ctx, client)
 }
 
 func (session *managedCodexImageSession) GenerateImage(ctx context.Context, request codexapp.ImageGenerationRequest, checkpoint func(codexapp.ImageGenerationCheckpoint)) (codexapp.ImageGenerationResult, error) {
