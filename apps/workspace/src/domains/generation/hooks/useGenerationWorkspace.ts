@@ -326,14 +326,15 @@ export const useGenerationWorkspace = ({
 		effectiveReferenceAssetIds,
 		effectiveReferenceUrls,
 		isUploadingAsset,
+		importReferenceFiles,
 		referenceCount,
+		referenceImportProgress,
 		removeReferenceAsset,
 		selectReferenceAsset,
 		selectableReferenceKinds,
 		selectedReferenceAssetIds,
 		selectedReferenceAssets,
 		toggleReferenceAsset,
-		uploadReferenceAsset,
 	} = useGenerationReferences({
 		extraReferenceAssetIds,
 		extraReferenceUrls,
@@ -344,6 +345,14 @@ export const useGenerationWorkspace = ({
 		selectedRoute,
 		setError,
 	});
+	const uploadReferenceAsset = useCallback(
+		async (event: React.ChangeEvent<HTMLInputElement>) => {
+			const files = Array.from(event.currentTarget.files ?? []);
+			event.currentTarget.value = "";
+			await importReferenceFiles(files);
+		},
+		[importReferenceFiles],
+	);
 	const effectiveReferenceBindings = useMemo(
 		() => resolveGenerationExtraValue(extraReferenceBindings, prompt),
 		[extraReferenceBindings, prompt],
@@ -529,6 +538,7 @@ export const useGenerationWorkspace = ({
 		isSubmitting,
 		isImportingMediaAssets,
 		isUploadingAsset,
+		importReferenceFiles,
 		importMediaAssetsToHistory,
 		kind,
 		mediaAssets,
@@ -543,6 +553,7 @@ export const useGenerationWorkspace = ({
 		promptReferenceItems,
 		promptSourceRefs,
 		referenceCount,
+		referenceImportProgress,
 		refreshVideo,
 		removeMediaAsset,
 		renameMediaAsset,

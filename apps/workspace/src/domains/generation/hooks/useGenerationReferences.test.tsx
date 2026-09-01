@@ -1,5 +1,4 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import type React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { GenerationRoute } from "@/domains/generation/api/generation";
 import type { MediaAsset } from "@/domains/workspace/api/media";
@@ -69,13 +68,13 @@ const mediaAsset = (overrides: Partial<MediaAsset> = {}): MediaAsset => ({
 	...overrides,
 });
 
-const uploadEvent = (file: File) =>
-	({
-		target: {
-			files: [file],
-			value: "reference",
-		},
-	}) as unknown as React.ChangeEvent<HTMLInputElement>;
+const deferred = <T,>() => {
+	let resolve!: (value: T) => void;
+	const promise = new Promise<T>((resolvePromise) => {
+		resolve = resolvePromise;
+	});
+	return { promise, resolve };
+};
 
 describe("useGenerationReferences", () => {
 	beforeEach(() => {
@@ -106,12 +105,101 @@ describe("useGenerationReferences", () => {
 		);
 
 		await act(async () => {
-			await result.current.uploadReferenceAsset(
-				uploadEvent(new File(["video"], "scene.mp4", { type: "video/mp4" })),
-			);
+			await result.current.importReferenceFiles([
+				new File(["video"], "scene.mp4", { type: "video/mp4" }),
+			]);
 		});
 
 		expect(result.current.selectedReferenceAssetIds).toEqual(["reference-video"]);
+	});
+
+	it("optimistically caches batch uploads and preserves selection order", async () => {
+		const firstImage = mediaAsset({ filename: "first.png", id: "reference-first" });
+		const secondImage = mediaAsset({ filename: "second.png", id: "reference-second" });
+		vi.mocked(uploadMediaAsset).mockImplementation(async (file) =>
+			file.name === "first.png" ? firstImage : secondImage,
+		);
+		const mutateMediaAssets = vi.fn().mockResolvedValue({ assets: [secondImage, firstImage] });
+
+		const { result } = renderHook(() =>
+			useGenerationReferences({
+				extraReferenceAssetIds: [],
+				extraReferenceUrls: [],
+				mediaAssetProjectId: "project-a",
+				mediaAssets: [secondImage, firstImage],
+				mutateMediaAssets,
+				prompt: "批量图片参考",
+				selectedRoute: { ...imageRoute, maxReferenceUrls: 4 },
+				setError: vi.fn(),
+			}),
+		);
+
+		await act(async () => {
+			await result.current.importReferenceFiles([
+				new File(["first"], "first.png", { type: "image/png" }),
+				new File(["second"], "second.png", { type: "image/png" }),
+			]);
+		});
+
+		expect(result.current.selectedReferenceAssetIds).toEqual([
+			"reference-first",
+			"reference-second",
+		]);
+		expect(result.current.selectedReferenceAssets.map((asset) => asset.id)).toEqual([
+			"reference-first",
+			"reference-second",
+		]);
+		expect(mutateMediaAssets).toHaveBeenCalledWith(expect.any(Function), { revalidate: false });
+		expect(result.current.referenceImportProgress).toBeNull();
+	});
+
+	it("rejects overlapping imports and does not select against a changed route", async () => {
+		const uploadedImage = mediaAsset({ filename: "pending.png", id: "reference-pending" });
+		const pendingUpload = deferred<MediaAsset>();
+		vi.mocked(uploadMediaAsset).mockReturnValue(pendingUpload.promise);
+		const mutateMediaAssets = vi.fn().mockResolvedValue({ assets: [uploadedImage] });
+		const setError = vi.fn();
+		const { result, rerender } = renderHook(
+			({ selectedRoute }: { selectedRoute: GenerationRoute }) =>
+				useGenerationReferences({
+					extraReferenceAssetIds: [],
+					extraReferenceUrls: [],
+					mediaAssetProjectId: "project-a",
+					mediaAssets: [uploadedImage],
+					mutateMediaAssets,
+					prompt: "切换模型",
+					selectedRoute,
+					setError,
+				}),
+			{ initialProps: { selectedRoute: imageRoute } },
+		);
+
+		let firstImport!: ReturnType<typeof result.current.importReferenceFiles>;
+		act(() => {
+			firstImport = result.current.importReferenceFiles([
+				new File(["pending"], "pending.png", { type: "image/png" }),
+			]);
+		});
+		await waitFor(() => expect(uploadMediaAsset).toHaveBeenCalledTimes(1));
+
+		let overlappingResult: Awaited<ReturnType<typeof result.current.importReferenceFiles>> = null;
+		await act(async () => {
+			overlappingResult = await result.current.importReferenceFiles([
+				new File(["other"], "other.png", { type: "image/png" }),
+			]);
+		});
+		expect(overlappingResult).toBeNull();
+		expect(uploadMediaAsset).toHaveBeenCalledTimes(1);
+
+		rerender({ selectedRoute: { ...imageRoute, id: "image-route-next" } });
+		pendingUpload.resolve(uploadedImage);
+		await act(async () => {
+			await firstImport;
+		});
+
+		expect(result.current.selectedReferenceAssetIds).toEqual([]);
+		expect(mutateMediaAssets).toHaveBeenCalledWith(expect.any(Function), { revalidate: false });
+		expect(setError).toHaveBeenCalledWith("模型已切换，素材已入库，请按当前模型重新选择。");
 	});
 
 	it("allows LibTV routes to select image video and audio references", () => {
@@ -212,36 +300,32 @@ describe("useGenerationReferences", () => {
 		expect(setError).toHaveBeenCalledWith("当前模型最多支持 2 个参考素材。");
 	});
 
-	it("does not select an uploaded video for image-only reference routes", async () => {
-		const uploadedVideo = mediaAsset({
-			filename: "scene.mp4",
-			id: "reference-video",
-			kind: "video",
-			mimeType: "video/mp4",
-			url: "/api/v1/media-assets/reference-video/content",
-		});
-		vi.mocked(uploadMediaAsset).mockResolvedValue(uploadedVideo);
-
+	it("does not upload a video for image-only reference routes", async () => {
+		const setError = vi.fn();
 		const { result } = renderHook(() =>
 			useGenerationReferences({
 				extraReferenceAssetIds: [],
 				extraReferenceUrls: [],
 				mediaAssetProjectId: "project-a",
-				mediaAssets: [uploadedVideo],
+				mediaAssets: [],
 				mutateMediaAssets: vi.fn(),
 				prompt: "生成图片",
 				selectedRoute: imageRoute,
-				setError: vi.fn(),
+				setError,
 			}),
 		);
 
 		await act(async () => {
-			await result.current.uploadReferenceAsset(
-				uploadEvent(new File(["video"], "scene.mp4", { type: "video/mp4" })),
-			);
+			await result.current.importReferenceFiles([
+				new File(["video"], "scene.mp4", { type: "video/mp4" }),
+			]);
 		});
 
+		expect(uploadMediaAsset).not.toHaveBeenCalled();
 		expect(result.current.selectedReferenceAssetIds).toEqual([]);
+		expect(setError).toHaveBeenCalledWith(
+			"部分素材未能选为参考：scene.mp4：当前模型不支持视频参考素材。",
+		);
 	});
 
 	it("drops selected references when the active route no longer supports them", async () => {
