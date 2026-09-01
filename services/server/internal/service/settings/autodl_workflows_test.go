@@ -35,7 +35,7 @@ func TestAutoDLSettingsMigratesV1WorkflowWithoutMakingItReady(t *testing.T) {
 	if validation.Status != AutoDLWorkflowValidationStale || validation.Reason != "migrated_v1_without_confirmed_bindings" {
 		t.Fatalf("migrated validation = %#v", validation)
 	}
-	if !strings.Contains(store.value(autoDLSettingsKey), `"version":2`) {
+	if !strings.Contains(store.value(autoDLSettingsKey), `"version":3`) {
 		t.Fatalf("migration was not persisted: %s", store.value(autoDLSettingsKey))
 	}
 }

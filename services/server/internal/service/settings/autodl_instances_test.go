@@ -48,6 +48,48 @@ func TestAutoDLSaveInstancePersistsNoPasswordOrRawCommand(t *testing.T) {
 	}
 }
 
+func TestAutoDLSettingsMigratesV2StartupAndLocalPortDefaults(t *testing.T) {
+	service, appStore, _ := newAutoDLSettingsForTest()
+	appStore.values[autoDLSettingsKey] = `{"version":2,"instances":[{"id":"autodl-v2","name":"GPU A","host":"gpu.example.com","sshPort":22,"sshUser":"root","comfyPort":6006,"credentialRef":"autodl-v2","enabled":true}],"workflowProfiles":[],"workflowDefaults":[]}`
+
+	response, err := service.GetAutoDLSettings(context.Background())
+	if err != nil {
+		t.Fatalf("GetAutoDLSettings() error = %v", err)
+	}
+	if len(response.Instances) != 1 || response.Instances[0].StartupCommand != "" || response.Instances[0].LocalPort != 0 {
+		t.Fatalf("migrated instance = %#v", response.Instances)
+	}
+	var stored autoDLSettingsDocument
+	if err := json.Unmarshal([]byte(appStore.value(autoDLSettingsKey)), &stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Version != 3 {
+		t.Fatalf("stored version = %d, want 3", stored.Version)
+	}
+}
+
+func TestAutoDLSaveInstanceRejectsStartupCommandOverLimit(t *testing.T) {
+	service, _, _ := newAutoDLSettingsForTest()
+	_, err := service.SaveAutoDLInstance(context.Background(), AutoDLInstanceMutation{
+		Name: "GPU A", SSHCommand: "ssh root@gpu.example.com", StartupCommand: strings.Repeat("x", 4097),
+	})
+	if !errors.Is(err, ErrAutoDLSettingsInvalid) {
+		t.Fatalf("SaveAutoDLInstance() error = %v, want ErrAutoDLSettingsInvalid", err)
+	}
+}
+
+func TestAutoDLSaveInstanceRejectsInvalidLocalPort(t *testing.T) {
+	service, _, _ := newAutoDLSettingsForTest()
+	for _, localPort := range []int{-1, 65536} {
+		_, err := service.SaveAutoDLInstance(context.Background(), AutoDLInstanceMutation{
+			Name: "GPU A", SSHCommand: "ssh root@gpu.example.com", LocalPort: localPort,
+		})
+		if !errors.Is(err, ErrAutoDLSettingsInvalid) {
+			t.Fatalf("LocalPort %d error = %v, want ErrAutoDLSettingsInvalid", localPort, err)
+		}
+	}
+}
+
 func TestAutoDLSettingsTreatsEmptyKeychainItemAsMissing(t *testing.T) {
 	service, _, passwords := newAutoDLSettingsForTest()
 	instance, err := service.SaveAutoDLInstance(context.Background(), AutoDLInstanceMutation{

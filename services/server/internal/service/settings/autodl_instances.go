@@ -18,9 +18,10 @@ import (
 const (
 	autoDLSettingsKey         = "medialink.autodl.instance-pool.v1"
 	autoDLKeychainService     = "app.medialink.autodl"
-	autoDLSettingsVersion     = 2
+	autoDLSettingsVersion     = 3
 	defaultAutoDLComfyPort    = 6006
 	autoDLCompensationTimeout = 5 * time.Second
+	maxAutoDLStartupCommand   = 4096
 )
 
 var (
@@ -64,6 +65,8 @@ type AutoDLInstanceProfile struct {
 	SSHPort             int                        `json:"sshPort"`
 	SSHUser             string                     `json:"sshUser"`
 	ComfyPort           int                        `json:"comfyPort"`
+	StartupCommand      string                     `json:"startupCommand,omitempty"`
+	LocalPort           int                        `json:"localPort,omitempty"`
 	HostFingerprint     string                     `json:"hostFingerprint,omitempty"`
 	CredentialRef       string                     `json:"credentialRef"`
 	Enabled             bool                       `json:"enabled"`
@@ -84,6 +87,8 @@ type AutoDLInstanceMutation struct {
 	SSHCommand      string `json:"sshCommand"`
 	Password        string `json:"password,omitempty"`
 	ComfyPort       int    `json:"comfyPort,omitempty"`
+	StartupCommand  string `json:"startupCommand,omitempty"`
+	LocalPort       int    `json:"localPort,omitempty"`
 	HostFingerprint string `json:"hostFingerprint,omitempty"`
 	Enabled         bool   `json:"enabled"`
 }
@@ -193,6 +198,14 @@ func (service *Settings) SaveAutoDLInstance(ctx context.Context, mutation AutoDL
 	if comfyPort < 1 || comfyPort > 65535 {
 		return AutoDLInstanceResponse{}, fmt.Errorf("%w: ComfyUI port", ErrAutoDLSettingsInvalid)
 	}
+	startupCommand := strings.TrimSpace(mutation.StartupCommand)
+	if len(startupCommand) > maxAutoDLStartupCommand {
+		return AutoDLInstanceResponse{}, fmt.Errorf("%w: startup command", ErrAutoDLSettingsInvalid)
+	}
+	localPort := mutation.LocalPort
+	if localPort < 0 || localPort > 65535 {
+		return AutoDLInstanceResponse{}, fmt.Errorf("%w: local port", ErrAutoDLSettingsInvalid)
+	}
 	fingerprint := strings.TrimSpace(mutation.HostFingerprint)
 	if len(fingerprint) > 512 {
 		return AutoDLInstanceResponse{}, fmt.Errorf("%w: host fingerprint", ErrAutoDLSettingsInvalid)
@@ -226,12 +239,14 @@ func (service *Settings) SaveAutoDLInstance(ctx context.Context, mutation AutoDL
 		}
 		profile = document.Instances[index]
 	}
-	connectionChanged := index >= 0 && autoDLConnectionChanged(profile, target, comfyPort, fingerprint)
+	connectionChanged := index >= 0 && autoDLConnectionChanged(profile, target, comfyPort, startupCommand, localPort, fingerprint)
 	profile.Name = name
 	profile.Host = target.Host
 	profile.SSHPort = target.Port
 	profile.SSHUser = target.User
 	profile.ComfyPort = comfyPort
+	profile.StartupCommand = startupCommand
+	profile.LocalPort = localPort
 	profile.HostFingerprint = fingerprint
 	profile.Enabled = mutation.Enabled
 	if connectionChanged {
@@ -399,6 +414,25 @@ func (service *Settings) loadAutoDLDocumentLocked() (autoDLSettingsDocument, err
 		}
 		return document, nil
 	}
+	if envelope.Version == 2 {
+		decoder := json.NewDecoder(strings.NewReader(raw))
+		decoder.DisallowUnknownFields()
+		var document autoDLSettingsDocument
+		if err := decoder.Decode(&document); err != nil {
+			return autoDLSettingsDocument{}, fmt.Errorf("%w: invalid v2 document", ErrAutoDLSettingsCorrupt)
+		}
+		if err := ensureJSONEOF(decoder); err != nil {
+			return autoDLSettingsDocument{}, fmt.Errorf("%w: trailing v2 JSON", ErrAutoDLSettingsCorrupt)
+		}
+		document.Version = autoDLSettingsVersion
+		if err := validateAutoDLDocument(document); err != nil {
+			return autoDLSettingsDocument{}, fmt.Errorf("%w: invalid migrated v2 document", ErrAutoDLSettingsCorrupt)
+		}
+		if err := service.persistAutoDLDocumentLocked(document); err != nil {
+			return autoDLSettingsDocument{}, err
+		}
+		return document, nil
+	}
 	decoder := json.NewDecoder(strings.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	var document autoDLSettingsDocument
@@ -528,7 +562,7 @@ func validateAutoDLDocument(document autoDLSettingsDocument) error {
 	instanceIDs := make(map[string]struct{}, len(document.Instances))
 	credentialRefs := make(map[string]struct{}, len(document.Instances))
 	for _, instance := range document.Instances {
-		if !autoDLProfileIDPattern.MatchString(instance.ID) || !autoDLProfileIDPattern.MatchString(instance.CredentialRef) || strings.TrimSpace(instance.Name) == "" || len(instance.Name) > 128 || instance.ComfyPort < 1 || instance.ComfyPort > 65535 {
+		if !autoDLProfileIDPattern.MatchString(instance.ID) || !autoDLProfileIDPattern.MatchString(instance.CredentialRef) || strings.TrimSpace(instance.Name) == "" || len(instance.Name) > 128 || instance.ComfyPort < 1 || instance.ComfyPort > 65535 || len(instance.StartupCommand) > maxAutoDLStartupCommand || instance.LocalPort < 0 || instance.LocalPort > 65535 {
 			return fmt.Errorf("invalid instance")
 		}
 		parsed, err := platformautodl.ParseSSHLoginCommand(fmt.Sprintf("ssh -p %d -l %s %s", instance.SSHPort, instance.SSHUser, instance.Host))
@@ -655,11 +689,13 @@ func findAutoDLWorkflowValidation(validations []AutoDLWorkflowValidation, profil
 	return -1
 }
 
-func autoDLConnectionChanged(profile AutoDLInstanceProfile, target platformautodl.SSHLoginTarget, comfyPort int, fingerprint string) bool {
+func autoDLConnectionChanged(profile AutoDLInstanceProfile, target platformautodl.SSHLoginTarget, comfyPort int, startupCommand string, localPort int, fingerprint string) bool {
 	return profile.Host != target.Host ||
 		profile.SSHPort != target.Port ||
 		profile.SSHUser != target.User ||
 		profile.ComfyPort != comfyPort ||
+		profile.StartupCommand != startupCommand ||
+		profile.LocalPort != localPort ||
 		profile.HostFingerprint != fingerprint
 }
 

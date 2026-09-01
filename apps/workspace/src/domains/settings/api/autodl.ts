@@ -54,6 +54,8 @@ export interface AutoDLInstance {
 	sshPort: number;
 	sshUser: string;
 	comfyPort: number;
+	startupCommand?: string;
+	localPort?: number;
 	hostFingerprint?: string;
 	credentialRef: string;
 	enabled: boolean;
@@ -124,6 +126,8 @@ export interface AutoDLInstanceMutation {
 	sshCommand: string;
 	password?: string;
 	comfyPort?: number;
+	startupCommand?: string;
+	localPort?: number;
 	hostFingerprint?: string;
 	enabled: boolean;
 }
