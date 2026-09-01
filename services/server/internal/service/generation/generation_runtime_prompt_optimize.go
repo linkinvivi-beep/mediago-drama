@@ -28,7 +28,13 @@ const imagePromptOptimizationSystemInstructionText = promptOptimizationSystemIns
 这是图片生成提示词。必须保持人物、场景和道具的身份及连续性，不得擅自替换、合并或新增。
 明确并保留构图、媒介、光线和宽高比；输入未指定时不要用无关细节覆盖原意。
 严格保持参考图的顺序和角色，使参考图1、参考图2等编号与各自用途一一对应。`
-const h3PromptOptimizationSystemInstructionText = promptOptimizationSystemInstructionText + `
+const videoPromptOptimizationSystemInstructionText = promptOptimizationSystemInstructionText + `
+这是视频生成提示词。把输入整理为一个独立、连贯、可生成的单镜头，不要改写成分镜列表，也不要在同一条提示词中新增转场或第二镜头。
+保持人物身份、外貌、服装、场景空间关系和道具连续性；有参考素材时必须保持其顺序和各自角色。
+只安排一个主要叙事动作和一种主要镜头运动，按“起始状态、动作过程、明确的结束状态”组织，并补充必要的景别、机位、光线、环境变化和声音。
+用户未明确提供时，不要编造时长、画幅、分辨率、帧率、模型专属语法、对白、字幕或背景音乐；这些由目标生成路由及参数控制。
+只加入与当前镜头直接相关的质量约束，不要堆砌通用负面词；如果输入已经完整，只做必要修正，不进行破坏性重写。`
+const h3PromptOptimizationSystemInstructionText = videoPromptOptimizationSystemInstructionText + `
 这是用于 MiniMax H3 工作流的视频生成提示词。把输入整理为一个 4-15 秒内可完成的连贯镜头，不要拆成镜头列表。
 必须保持人物身份、外貌、服装、场景空间关系和道具连续性，不得擅自替换、合并或新增；严格保持参考图顺序及各自角色。
 按时间推进写清起始状态、主体动作与节奏、镜头景别和运动、光线色彩、环境变化以及明确的结束状态。
@@ -829,6 +835,9 @@ func promptOptimizationSystemInstruction(kind coregeneration.Kind, promptGuide .
 			}
 		}
 		return instruction
+	}
+	if kind == coregeneration.KindVideo {
+		return videoPromptOptimizationSystemInstructionText
 	}
 	return promptOptimizationSystemInstructionText
 }

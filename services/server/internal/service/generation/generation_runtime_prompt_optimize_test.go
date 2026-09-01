@@ -22,6 +22,53 @@ import (
 	"github.com/mediago-dev/mediago-drama/services/server/internal/service/textcompletion"
 )
 
+func TestPromptOptimizationSystemInstructionUsesSingleShotContractForVideo(t *testing.T) {
+	instruction := promptOptimizationSystemInstruction(coregeneration.KindVideo)
+	for _, fragment := range []string{
+		"一个独立、连贯、可生成的单镜头",
+		"一个主要叙事动作",
+		"一种主要镜头运动",
+		"起始状态",
+		"明确的结束状态",
+		"不要编造时长、画幅、分辨率、帧率",
+	} {
+		if !strings.Contains(instruction, fragment) {
+			t.Fatalf("generic video instruction missing %q:\n%s", fragment, instruction)
+		}
+	}
+	for _, fragment := range []string{"MiniMax H3", "4-15 秒", "--ar"} {
+		if strings.Contains(instruction, fragment) {
+			t.Fatalf("generic video instruction should be route-neutral, found %q:\n%s", fragment, instruction)
+		}
+	}
+}
+
+func TestH3PromptOptimizationInstructionExtendsGenericVideoContract(t *testing.T) {
+	params := map[string]any{
+		promptOptimizationTargetDurationParam:    "8",
+		promptOptimizationTargetAspectRatioParam: "16:9",
+		promptOptimizationTargetResolutionParam:  "720p",
+	}
+	instruction := promptOptimizationSystemInstructionForTarget(
+		coregeneration.KindVideo,
+		coregeneration.RouteAutoDLH3,
+		params,
+		"",
+	)
+	for _, fragment := range []string{
+		"一个独立、连贯、可生成的单镜头",
+		"这是用于 MiniMax H3 工作流的视频生成提示词",
+		"时长 8 秒",
+		"画幅 16:9",
+		"分辨率 720p",
+		"不要输出 --ar",
+	} {
+		if !strings.Contains(instruction, fragment) {
+			t.Fatalf("H3 instruction missing %q:\n%s", fragment, instruction)
+		}
+	}
+}
+
 func TestCodexImagePromptOptimizationRouting(t *testing.T) {
 	t.Run("disabled sends the original prompt directly to image generation", func(t *testing.T) {
 		workflow := newPromptSupplementsTestWorkflow(t)
