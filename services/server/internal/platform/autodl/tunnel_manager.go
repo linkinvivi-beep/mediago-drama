@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -26,6 +27,8 @@ var (
 	ErrTunnelStale = errors.New("AutoDL tunnel request is stale")
 	// ErrPasswordMissing means the selected instance has no usable SSH password.
 	ErrPasswordMissing = errors.New("AutoDL SSH password is missing")
+	// ErrRemoteCommandFailed means the saved startup command could not complete.
+	ErrRemoteCommandFailed = errors.New("AutoDL remote startup command failed")
 )
 
 // TunnelTarget contains the non-secret connection fields needed to establish
@@ -36,6 +39,7 @@ type TunnelTarget struct {
 	SSHPort           int
 	SSHUser           string
 	ComfyPort         int
+	LocalPort         int
 	HostFingerprint   string
 	CredentialRef     string
 }
@@ -56,6 +60,7 @@ type TunnelPasswordSource interface {
 // AutoDL instances.
 type TunnelManager interface {
 	Ensure(context.Context, TunnelTarget) (Tunnel, error)
+	Run(context.Context, TunnelTarget, string) error
 	Close(string) error
 	CloseAll() error
 }
@@ -168,6 +173,56 @@ func (manager *tunnelManager) Ensure(ctx context.Context, target TunnelTarget) (
 			current.cancel()
 		}
 		return manager.startTunnelOperationLocked(ctx, target, targetKey, instance, nil)
+	}
+}
+
+func (manager *tunnelManager) Run(ctx context.Context, target TunnelTarget, command string) error {
+	if ctx == nil {
+		return fmt.Errorf("AutoDL command context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return fmt.Errorf("AutoDL startup command is required")
+	}
+	if _, err := manager.Ensure(ctx, target); err != nil {
+		return err
+	}
+
+	manager.mu.Lock()
+	instance := manager.instances[target.InstanceProfileID]
+	if manager.closed || instance == nil || instance.tunnel == nil ||
+		instance.tunnel.targetKey != tunnelTargetKey(target) || !instance.tunnel.active.Load() {
+		manager.mu.Unlock()
+		return ErrTunnelStale
+	}
+	client := instance.tunnel.client
+	manager.mu.Unlock()
+
+	session, err := client.NewSession()
+	if err != nil {
+		return ErrRemoteCommandFailed
+	}
+	defer session.Close()
+	session.Stdout = io.Discard
+	session.Stderr = io.Discard
+	if err := session.Start(command); err != nil {
+		return ErrRemoteCommandFailed
+	}
+	done := make(chan error, 1)
+	go func() { done <- session.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			return ErrRemoteCommandFailed
+		}
+		return nil
+	case <-ctx.Done():
+		_ = session.Close()
+		<-done
+		return ctx.Err()
 	}
 }
 
@@ -395,7 +450,7 @@ func validateTunnelTarget(target TunnelTarget) error {
 	if !validSSHHost(target.Host) || !validSSHUser(target.SSHUser) {
 		return fmt.Errorf("invalid AutoDL SSH target")
 	}
-	if target.SSHPort < 1 || target.SSHPort > 65535 || target.ComfyPort < 1 || target.ComfyPort > 65535 {
+	if target.SSHPort < 1 || target.SSHPort > 65535 || target.ComfyPort < 1 || target.ComfyPort > 65535 || target.LocalPort < 0 || target.LocalPort > 65535 {
 		return fmt.Errorf("invalid AutoDL tunnel port")
 	}
 	if !validTunnelIdentifier(target.CredentialRef) {
@@ -433,7 +488,7 @@ func validTunnelIdentifier(value string) bool {
 
 func tunnelTargetKey(target TunnelTarget) string {
 	return target.Host + "\x00" + strconv.Itoa(target.SSHPort) + "\x00" + target.SSHUser + "\x00" +
-		strconv.Itoa(target.ComfyPort) + "\x00" + target.HostFingerprint + "\x00" + target.CredentialRef
+		strconv.Itoa(target.ComfyPort) + "\x00" + strconv.Itoa(target.LocalPort) + "\x00" + target.HostFingerprint + "\x00" + target.CredentialRef
 }
 
 func openManagedTunnel(
@@ -515,7 +570,7 @@ func openManagedTunnel(
 		return nil, contextErr
 	}
 	client := ssh.NewClient(sshConnection, channels, requests)
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(target.LocalPort)))
 	if err != nil {
 		_ = client.Close()
 		return nil, fmt.Errorf("listen for AutoDL tunnel: %w", err)

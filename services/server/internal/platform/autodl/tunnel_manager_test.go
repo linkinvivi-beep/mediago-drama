@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -56,6 +57,105 @@ func TestTunnelManagerOpensIndependentLoopbackTunnels(t *testing.T) {
 	}
 	if got := receiveRemoteAddress(t, secondServer.remoteAddresses); got != "127.0.0.1:8188" {
 		t.Fatalf("second remote address = %q, want 127.0.0.1:8188", got)
+	}
+}
+
+func TestTunnelManagerRunExecutesSavedCommand(t *testing.T) {
+	server := newFakeSSHServerWithExecHandler(t, "password", func(_ string, _ ssh.Channel) uint32 { return 0 })
+	manager := NewTunnelManager(&fakeTunnelPasswordSource{values: map[string][]byte{"credential": []byte("password")}})
+	t.Cleanup(func() { _ = manager.CloseAll() })
+	target := fakeTunnelTarget("instance", "credential", server, 6006)
+
+	if err := manager.Run(context.Background(), target, "/root/start_comfyui.sh"); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	select {
+	case command := <-server.execCommands:
+		if command != "/root/start_comfyui.sh" {
+			t.Fatalf("command = %q", command)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for exec command")
+	}
+}
+
+func TestTunnelManagerRunRedactsCommandFailure(t *testing.T) {
+	server := newFakeSSHServerWithExecHandler(t, "password", func(_ string, channel ssh.Channel) uint32 {
+		_, _ = io.WriteString(channel, "secret command output")
+		return 7
+	})
+	manager := NewTunnelManager(&fakeTunnelPasswordSource{values: map[string][]byte{"credential": []byte("password")}})
+	t.Cleanup(func() { _ = manager.CloseAll() })
+	command := "start --password super-secret"
+	err := manager.Run(context.Background(), fakeTunnelTarget("instance", "credential", server, 6006), command)
+	if !errors.Is(err, ErrRemoteCommandFailed) {
+		t.Fatalf("Run() error = %v, want ErrRemoteCommandFailed", err)
+	}
+	if strings.Contains(err.Error(), command) || strings.Contains(err.Error(), "secret command output") || strings.Contains(err.Error(), "super-secret") {
+		t.Fatalf("Run() error leaked command or output: %v", err)
+	}
+}
+
+func TestTunnelManagerRunHonorsCancellation(t *testing.T) {
+	server := newFakeSSHServerWithExecHandler(t, "password", func(_ string, channel ssh.Channel) uint32 {
+		_, _ = io.Copy(io.Discard, channel)
+		return 0
+	})
+	manager := NewTunnelManager(&fakeTunnelPasswordSource{values: map[string][]byte{"credential": []byte("password")}})
+	t.Cleanup(func() { _ = manager.CloseAll() })
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx, fakeTunnelTarget("instance", "credential", server, 6006), "block") }()
+	<-server.execCommands
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run() ignored cancellation")
+	}
+}
+
+func TestTunnelManagerRunRejectsEmptyCommand(t *testing.T) {
+	manager := NewTunnelManager(&fakeTunnelPasswordSource{})
+	t.Cleanup(func() { _ = manager.CloseAll() })
+	if err := manager.Run(context.Background(), TunnelTarget{}, "   "); err == nil {
+		t.Fatal("Run() accepted an empty command")
+	}
+}
+
+func TestTunnelManagerUsesExactManualLocalPortAndRejectsConflict(t *testing.T) {
+	server := newFakeSSHServer(t, "password")
+	manager := NewTunnelManager(&fakeTunnelPasswordSource{values: map[string][]byte{"credential": []byte("password")}})
+	t.Cleanup(func() { _ = manager.CloseAll() })
+
+	reservation, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manualPort := reservation.Addr().(*net.TCPAddr).Port
+	_ = reservation.Close()
+	target := fakeTunnelTarget("manual", "credential", server, 6006)
+	target.LocalPort = manualPort
+	tunnel, err := manager.Ensure(context.Background(), target)
+	if err != nil {
+		t.Fatalf("Ensure(manual) error = %v", err)
+	}
+	if got := tunnelAddress(t, tunnel); got != net.JoinHostPort("127.0.0.1", strconv.Itoa(manualPort)) {
+		t.Fatalf("manual address = %q", got)
+	}
+
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+	conflict := fakeTunnelTarget("conflict", "credential", server, 6006)
+	conflict.LocalPort = occupied.Addr().(*net.TCPAddr).Port
+	if _, err := manager.Ensure(context.Background(), conflict); err == nil {
+		t.Fatal("Ensure(conflict) error = nil")
 	}
 }
 
@@ -1009,6 +1109,8 @@ type fakeSSHServer struct {
 	connections     map[net.Conn]struct{}
 	connectionCount atomic.Int64
 	channelHandler  func(ssh.Channel)
+	execHandler     func(string, ssh.Channel) uint32
+	execCommands    chan string
 	done            chan struct{}
 	closeOnce       sync.Once
 }
@@ -1020,11 +1122,11 @@ func newFakeSSHServer(t *testing.T, password string) *fakeSSHServer {
 			return nil, fmt.Errorf("authentication rejected")
 		}
 		return nil, nil
-	}, nil)
+	}, nil, nil)
 }
 
 func newFakeSSHServerWithPasswordCallback(t *testing.T, callback func(ssh.ConnMetadata, []byte) (*ssh.Permissions, error)) *fakeSSHServer {
-	return newFakeSSHServerWithOptions(t, callback, nil)
+	return newFakeSSHServerWithOptions(t, callback, nil, nil)
 }
 
 func newFakeSSHServerWithChannelHandler(t *testing.T, password string, handler func(ssh.Channel)) *fakeSSHServer {
@@ -1033,13 +1135,24 @@ func newFakeSSHServerWithChannelHandler(t *testing.T, password string, handler f
 			return nil, fmt.Errorf("authentication rejected")
 		}
 		return nil, nil
-	}, handler)
+	}, handler, nil)
+}
+
+func newFakeSSHServerWithExecHandler(t *testing.T, password string, handler func(string, ssh.Channel) uint32) *fakeSSHServer {
+	t.Helper()
+	return newFakeSSHServerWithOptions(t, func(metadata ssh.ConnMetadata, supplied []byte) (*ssh.Permissions, error) {
+		if metadata.User() != "root" || string(supplied) != password {
+			return nil, fmt.Errorf("authentication rejected")
+		}
+		return nil, nil
+	}, nil, handler)
 }
 
 func newFakeSSHServerWithOptions(
 	t *testing.T,
 	callback func(ssh.ConnMetadata, []byte) (*ssh.Permissions, error),
 	handler func(ssh.Channel),
+	execHandler func(string, ssh.Channel) uint32,
 ) *fakeSSHServer {
 	t.Helper()
 	signer := newFakeSSHSigner(t)
@@ -1055,6 +1168,8 @@ func newFakeSSHServerWithOptions(
 		remoteAddresses: make(chan string, 1024),
 		connections:     make(map[net.Conn]struct{}),
 		channelHandler:  handler,
+		execHandler:     execHandler,
+		execCommands:    make(chan string, 16),
 		done:            make(chan struct{}),
 	}
 	go server.serve(config)
@@ -1106,6 +1221,14 @@ func (server *fakeSSHServer) serveConnection(connection net.Conn, config *ssh.Se
 	defer sshConnection.Close()
 	go ssh.DiscardRequests(requests)
 	for channelRequest := range channels {
+		if channelRequest.ChannelType() == "session" && server.execHandler != nil {
+			channel, channelRequests, acceptErr := channelRequest.Accept()
+			if acceptErr != nil {
+				continue
+			}
+			go server.handleExecSession(channel, channelRequests)
+			continue
+		}
 		if channelRequest.ChannelType() != "direct-tcpip" {
 			_ = channelRequest.Reject(ssh.UnknownChannelType, "unsupported")
 			continue
@@ -1134,6 +1257,26 @@ func (server *fakeSSHServer) serveConnection(connection net.Conn, config *ssh.Se
 				_, _ = io.Copy(channel, channel)
 			}()
 		}
+	}
+}
+
+func (server *fakeSSHServer) handleExecSession(channel ssh.Channel, requests <-chan *ssh.Request) {
+	defer channel.Close()
+	for request := range requests {
+		if request.Type != "exec" {
+			request.Reply(false, nil)
+			continue
+		}
+		var payload struct{ Command string }
+		if ssh.Unmarshal(request.Payload, &payload) != nil {
+			request.Reply(false, nil)
+			return
+		}
+		request.Reply(true, nil)
+		server.execCommands <- payload.Command
+		status := server.execHandler(payload.Command, channel)
+		_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{Status: status}))
+		return
 	}
 }
 
