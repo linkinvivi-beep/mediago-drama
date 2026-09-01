@@ -1649,7 +1649,7 @@ describe("PromptPackEditor", () => {
 		window.mediagoDesktop = {
 			...window.mediagoDesktop,
 			isElectron: false,
-		} as typeof window.mediagoDesktop;
+		} as unknown as typeof window.mediagoDesktop;
 		renderEditorWithSettingsFallback();
 
 		fireEvent.click(await screen.findByRole("button", { name: "返回设置" }));
