@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"syscall"
 
 	"github.com/gin-gonic/gin"
 	httpresponse "github.com/mediago-dev/mediago-drama/services/server/internal/http/response"
@@ -33,6 +34,7 @@ type autoDLSettingsStore interface {
 type autoDLWorkflowAdministrator interface {
 	ScanFingerprint(context.Context, string) (servicegeneration.AutoDLFingerprintResult, error)
 	CheckInstance(context.Context, string) (servicegeneration.AutoDLInstanceCheck, error)
+	ReadinessStatus(string) servicegeneration.AutoDLInstanceCheck
 	Preview(context.Context, servicegeneration.AutoDLWorkflowPreviewRequest) (servicegeneration.AutoDLWorkflowPreview, error)
 	Create(context.Context, servicegeneration.AutoDLWorkflowCreateRequest) (servicesettings.AutoDLWorkflowProfileResponse, error)
 	Replace(context.Context, string, servicegeneration.AutoDLWorkflowReplaceRequest) (servicesettings.AutoDLWorkflowProfileResponse, error)
@@ -61,6 +63,8 @@ type autoDLInstanceRequest struct {
 	SSHCommand      string `json:"sshCommand"`
 	Password        string `json:"password,omitempty"`
 	ComfyPort       int    `json:"comfyPort,omitempty"`
+	StartupCommand  string `json:"startupCommand,omitempty"`
+	LocalPort       int    `json:"localPort,omitempty"`
 	HostFingerprint string `json:"hostFingerprint,omitempty"`
 	Enabled         bool   `json:"enabled"`
 }
@@ -168,7 +172,8 @@ func (handler AutoDLSettings) HandlePutInstance(context *gin.Context) {
 func (handler AutoDLSettings) saveInstance(context *gin.Context, instanceID string, payload autoDLInstanceRequest) {
 	result, err := handler.settings.SaveAutoDLInstance(context.Request.Context(), servicesettings.AutoDLInstanceMutation{
 		ID: instanceID, Name: payload.Name, SSHCommand: payload.SSHCommand, Password: payload.Password,
-		ComfyPort: payload.ComfyPort, HostFingerprint: payload.HostFingerprint, Enabled: payload.Enabled,
+		ComfyPort: payload.ComfyPort, StartupCommand: payload.StartupCommand, LocalPort: payload.LocalPort,
+		HostFingerprint: payload.HostFingerprint, Enabled: payload.Enabled,
 	})
 	if err != nil {
 		var credentialErr *servicesettings.AutoDLCredentialWriteError
@@ -308,6 +313,22 @@ func (handler AutoDLSettings) HandleCheckInstance(context *gin.Context) {
 		return
 	}
 	httpresponse.OK(context, result)
+}
+
+// HandleGetInstanceReadiness godoc
+// @Summary 获取 AutoDL 实例就绪阶段
+// @Description 返回最近一次检查的脱敏阶段和结果。
+// @Tags Settings
+// @Produce json
+// @Param instanceId path string true "Instance ID"
+// @Success 200 {object} SwaggerEnvelope
+// @Router /api/v1/settings/autodl/instances/{instanceId}/readiness [get]
+func (handler AutoDLSettings) HandleGetInstanceReadiness(context *gin.Context) {
+	instanceID, ok := requiredPathParam(context, "instanceId", "instanceId")
+	if !ok {
+		return
+	}
+	httpresponse.OK(context, handler.admin.ReadinessStatus(instanceID))
 }
 
 // HandlePreviewWorkflow godoc
@@ -538,6 +559,23 @@ func writeAutoDLSettingsError(context *gin.Context, err error) {
 		httpresponse.Fail(context, http.StatusUnprocessableEntity, "未保存有效 SSH 密码，请编辑实例后重新输入", err)
 		return
 	}
+	switch {
+	case errors.Is(err, autodl.ErrHostKeyMismatch):
+		httpresponse.Fail(context, http.StatusUnprocessableEntity, "SSH 主机指纹不匹配，请重新扫描并确认", err)
+		return
+	case errors.Is(err, servicegeneration.ErrAutoDLStartupCommandMissing):
+		httpresponse.Fail(context, http.StatusUnprocessableEntity, "远程服务未运行，且未配置启动命令", err)
+		return
+	case errors.Is(err, autodl.ErrRemoteCommandFailed):
+		httpresponse.Fail(context, http.StatusBadGateway, "远程启动命令执行失败，请检查实例高级设置", err)
+		return
+	case errors.Is(err, servicegeneration.ErrAutoDLHealthTimeout):
+		httpresponse.Fail(context, http.StatusGatewayTimeout, "等待远程服务健康超时，请检查启动日志和端口", err)
+		return
+	case errors.Is(err, syscall.EADDRINUSE):
+		httpresponse.Fail(context, http.StatusConflict, "本地端口已被占用，请改用自动分配或指定其他端口", err)
+		return
+	}
 	status := http.StatusInternalServerError
 	switch {
 	case errors.Is(err, servicesettings.ErrAutoDLInstanceNotFound),
@@ -560,7 +598,6 @@ func writeAutoDLSettingsError(context *gin.Context, err error) {
 	case errors.Is(err, servicesettings.ErrAutoDLPasswordStoreUnavailable),
 		errors.Is(err, servicesettings.ErrAutoDLWorkflowUnavailable),
 		errors.Is(err, autodl.ErrTunnelManagerClosed),
-		errors.Is(err, autodl.ErrHostKeyMismatch),
 		errors.Is(err, autodl.ErrTunnelSuperseded),
 		errors.Is(err, autodl.ErrTunnelStale),
 		errors.Is(err, comfyui.ErrInvalidBaseURL),

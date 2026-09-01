@@ -148,6 +148,15 @@ export interface AutoDLWorkflowMutation {
 
 export interface AutoDLInstanceCheck {
 	connected: boolean;
+	stage?:
+		| "connecting"
+		| "probing"
+		| "starting"
+		| "waiting_health"
+		| "tunneling"
+		| "validating_api"
+		| "ready"
+		| "failed";
 	localPort?: number;
 	comfyuiVersion?: string;
 	devices?: string[];
@@ -202,6 +211,13 @@ export const checkAutoDLInstance = async (instanceId: string) =>
 	(
 		await httpClient.post<AutoDLInstanceCheck>(
 			`${autoDLSettingsKey}/instances/${encodeURIComponent(instanceId)}/check`,
+		)
+	).data;
+
+export const getAutoDLInstanceReadiness = async (instanceId: string) =>
+	(
+		await httpClient.get<AutoDLInstanceCheck>(
+			`${autoDLSettingsKey}/instances/${encodeURIComponent(instanceId)}/readiness`,
 		)
 	).data;
 

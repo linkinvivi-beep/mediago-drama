@@ -135,6 +135,7 @@ func registerSettingsRoutes(apiRoutes *gin.RouterGroup, handlers Handlers) {
 	apiRoutes.DELETE("/settings/autodl/instances/:instanceId", handlers.AutoDLSettings.HandleDeleteInstance)
 	apiRoutes.POST("/settings/autodl/instances/:instanceId/scan-fingerprint", handlers.AutoDLSettings.HandleScanFingerprint)
 	apiRoutes.POST("/settings/autodl/instances/:instanceId/check", handlers.AutoDLSettings.HandleCheckInstance)
+	apiRoutes.GET("/settings/autodl/instances/:instanceId/readiness", handlers.AutoDLSettings.HandleGetInstanceReadiness)
 	apiRoutes.POST("/settings/autodl/workflows/preview", handlers.AutoDLSettings.HandlePreviewWorkflow)
 	apiRoutes.POST("/settings/autodl/workflows", handlers.AutoDLSettings.HandleCreateWorkflow)
 	apiRoutes.POST("/settings/autodl/workflows/:profileId/versions", handlers.AutoDLSettings.HandleReplaceWorkflow)
