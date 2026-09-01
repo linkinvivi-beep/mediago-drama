@@ -10,6 +10,9 @@ func TestMediaLinkCatalogRoutes(t *testing.T) {
 	if !ok || imageRoute.Kind != KindImage || imageRoute.Provider != ProviderCodex {
 		t.Fatalf("Codex image route = %+v, %v", imageRoute, ok)
 	}
+	if !imageRoute.SupportsReferenceURLs || imageRoute.MaxReferenceURLs != 10 {
+		t.Fatalf("Codex reference contract = supports:%v max:%d", imageRoute.SupportsReferenceURLs, imageRoute.MaxReferenceURLs)
+	}
 	videoRoute, ok := FindRoute(RouteAutoDLH3)
 	if !ok || videoRoute.Kind != KindVideo || videoRoute.Provider != ProviderAutoDL {
 		t.Fatalf("AutoDL H3 route = %+v, %v", videoRoute, ok)

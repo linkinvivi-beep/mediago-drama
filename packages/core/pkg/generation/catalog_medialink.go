@@ -39,6 +39,7 @@ var mediaLinkFamilySpecs = []familySpec{
 				"https://developers.openai.com/codex/app-server",
 				codexImageParams(),
 				false,
+				withReferenceURLLimit(10),
 			),
 		},
 	},
