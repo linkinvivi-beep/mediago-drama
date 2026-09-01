@@ -1,5 +1,6 @@
 import type React from "react";
 import type { MediaAsset } from "@/domains/workspace/api/media";
+import type { ReferenceImportProgress } from "@/domains/generation/lib/reference-file-import";
 import {
 	GenerationComposerPanel,
 	type GenerationComposerSubmitTone,
@@ -22,13 +23,16 @@ export const MediaGenerationInputPanel: React.FC<{
 	generationCountControl?: MediaGenerationCountControlConfig | null;
 	imageSpecControl?: React.ReactNode;
 	isSubmitting: boolean;
+	isImportingReferences?: boolean;
 	modelSummary: string;
 	modelControls?: React.ReactNode;
 	onCopyPrompt?: () => void;
+	onImportReferenceFiles?: (files: File[]) => Promise<unknown> | void;
 	onOpenReferenceDialog: () => void;
 	onRemoveReferencePreview: (asset: MediaAsset) => void;
 	previewReferenceAssets: MediaAsset[];
 	referenceButtonLabel?: string;
+	referenceImportProgress?: ReferenceImportProgress | null;
 	layeredComposer?: React.ReactNode;
 	primaryParamControls?: React.ReactNode;
 	promptEditor: React.ReactNode;
@@ -48,10 +52,12 @@ export const MediaGenerationInputPanel: React.FC<{
 	generationCountControl,
 	imageSpecControl,
 	isSubmitting,
+	isImportingReferences,
 	modelSummary,
 	modelControls,
 	layeredComposer,
 	onCopyPrompt,
+	onImportReferenceFiles,
 	onOpenReferenceDialog,
 	onRemoveReferencePreview,
 	previewReferenceAssets,
@@ -59,6 +65,7 @@ export const MediaGenerationInputPanel: React.FC<{
 	promptExtras,
 	promptOptimizeControl,
 	referenceButtonLabel,
+	referenceImportProgress,
 	primaryParamControls,
 	referenceBadges,
 	requiresReference,
@@ -75,6 +82,7 @@ export const MediaGenerationInputPanel: React.FC<{
 		error={error}
 		errorTone="error"
 		isSubmitting={isSubmitting}
+		isImportingReferences={isImportingReferences}
 		layeredComposer={layeredComposer}
 		leftControls={
 			<>
@@ -97,6 +105,7 @@ export const MediaGenerationInputPanel: React.FC<{
 			) : null
 		}
 		referenceButtonLabel={referenceButtonLabel}
+		referenceImportProgress={referenceImportProgress}
 		rightControls={
 			<>
 				{promptOptimizeControl}
@@ -116,6 +125,7 @@ export const MediaGenerationInputPanel: React.FC<{
 		submitLabel={submitLabel}
 		submitTone={submitTone}
 		onCopyPrompt={onCopyPrompt}
+		onImportReferenceFiles={onImportReferenceFiles}
 		onOpenReferenceDialog={onOpenReferenceDialog}
 	/>
 );

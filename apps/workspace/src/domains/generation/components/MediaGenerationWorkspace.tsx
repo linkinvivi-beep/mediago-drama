@@ -1801,6 +1801,7 @@ export const MediaGenerationWorkspace: React.FC<MediaGenerationWorkspaceProps> =
 					) : null
 				}
 				isSubmitting={ws.isSubmitting}
+				isImportingReferences={ws.isUploadingAsset}
 				modelControls={modelControls}
 				modelSummary={modelSummary}
 				previewReferenceAssets={previewReferenceAssets}
@@ -1821,6 +1822,7 @@ export const MediaGenerationWorkspace: React.FC<MediaGenerationWorkspaceProps> =
 					/>
 				}
 				referenceButtonLabel={referenceButtonLabel}
+				referenceImportProgress={ws.referenceImportProgress}
 				promptEditor={promptEditor}
 				promptExtras={
 					<>
@@ -1847,6 +1849,7 @@ export const MediaGenerationWorkspace: React.FC<MediaGenerationWorkspaceProps> =
 				submitLabel={resolvedSubmitLabel}
 				submitTone={kind === "video" ? "video" : "image"}
 				onCopyPrompt={() => void resultActions.copyText(ws.fullPrompt, "没有可复制的完整提示词")}
+				onImportReferenceFiles={ws.importReferenceFiles}
 				onOpenReferenceDialog={() => setReferenceDialogOpen(true)}
 				onRemoveReferencePreview={removePreviewReferenceAsset}
 			/>

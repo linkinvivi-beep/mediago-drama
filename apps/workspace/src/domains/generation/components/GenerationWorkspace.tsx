@@ -477,6 +477,7 @@ export const GenerationWorkspace: React.FC<GenerationWorkspaceProps> = ({
 					error={ws.error || sessionRequiredMessage}
 					errorTone={ws.error ? "error" : "warning"}
 					isSubmitting={ws.isSubmitting}
+					isImportingReferences={ws.isUploadingAsset}
 					leftControls={
 						<>
 							{lockKind ? null : <ModeToggle compact kind={ws.kind} onChange={ws.setKind} />}
@@ -542,6 +543,7 @@ export const GenerationWorkspace: React.FC<GenerationWorkspaceProps> = ({
 						/>
 					}
 					referenceButtonLabel={referenceButtonLabel}
+					referenceImportProgress={ws.referenceImportProgress}
 					referencePreview={
 						canSelectReferenceAssets ? (
 							<ReferencePreviewStrip
@@ -585,6 +587,7 @@ export const GenerationWorkspace: React.FC<GenerationWorkspaceProps> = ({
 					submitLabel={submitLabel}
 					submitTone={activeGenerationKind}
 					onCopyPrompt={copyComposerPrompt}
+					onImportReferenceFiles={ws.importReferenceFiles}
 					onOpenReferenceDialog={
 						canSelectReferenceAssets ? () => setReferenceDialogOpen(true) : undefined
 					}
