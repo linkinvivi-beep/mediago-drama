@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mediago-dev/mediago-drama/services/server/internal/platform/autodl"
@@ -16,7 +17,22 @@ import (
 	"github.com/mediago-dev/mediago-drama/services/server/internal/service/settings"
 )
 
-var ErrAutoDLWorkflowValidationInvalid = errors.New("AutoDL workflow is incompatible with the selected instance")
+var (
+	ErrAutoDLWorkflowValidationInvalid = errors.New("AutoDL workflow is incompatible with the selected instance")
+	ErrAutoDLStartupCommandMissing     = errors.New("AutoDL startup command is missing")
+	ErrAutoDLHealthTimeout             = errors.New("AutoDL service health check timed out")
+)
+
+const (
+	AutoDLReadinessStageConnecting    = "connecting"
+	AutoDLReadinessStageProbing       = "probing"
+	AutoDLReadinessStageStarting      = "starting"
+	AutoDLReadinessStageWaitingHealth = "waiting_health"
+	AutoDLReadinessStageTunneling     = "tunneling"
+	AutoDLReadinessStageValidatingAPI = "validating_api"
+	AutoDLReadinessStageReady         = "ready"
+	AutoDLReadinessStageFailed        = "failed"
+)
 
 // AutoDLWorkflowStore is the narrow settings surface required by workflow
 // administration. It intentionally contains no HTTP-facing password method.
@@ -74,6 +90,7 @@ type AutoDLFingerprintResult struct {
 // never part of the response contract.
 type AutoDLInstanceCheck struct {
 	Connected      bool     `json:"connected"`
+	Stage          string   `json:"stage,omitempty"`
 	LocalPort      int      `json:"localPort,omitempty"`
 	ComfyUIVersion string   `json:"comfyuiVersion,omitempty"`
 	Devices        []string `json:"devices,omitempty"`
@@ -86,15 +103,31 @@ type AutoDLWorkflowAdmin struct {
 	scanner  autodl.HostKeyScanner
 	client   func(string) (comfyui.Client, error)
 	clock    func() time.Time
+
+	readinessMu        sync.Mutex
+	readiness          map[string]*autoDLReadinessOperation
+	latestReadiness    map[string]AutoDLInstanceCheck
+	healthPollInterval time.Duration
+	healthTimeout      time.Duration
+}
+
+type autoDLReadinessOperation struct {
+	done   chan struct{}
+	result AutoDLInstanceCheck
+	err    error
 }
 
 func NewAutoDLWorkflowAdmin(store AutoDLWorkflowStore, tunnels autodl.TunnelManager, scanner autodl.HostKeyScanner) *AutoDLWorkflowAdmin {
 	return &AutoDLWorkflowAdmin{
-		settings: store,
-		tunnels:  tunnels,
-		scanner:  scanner,
-		client:   comfyui.NewClient,
-		clock:    time.Now,
+		settings:           store,
+		tunnels:            tunnels,
+		scanner:            scanner,
+		client:             comfyui.NewClient,
+		clock:              time.Now,
+		readiness:          make(map[string]*autoDLReadinessOperation),
+		latestReadiness:    make(map[string]AutoDLInstanceCheck),
+		healthPollInterval: 500 * time.Millisecond,
+		healthTimeout:      90 * time.Second,
 	}
 }
 
@@ -129,6 +162,9 @@ func (admin *AutoDLWorkflowAdmin) Readiness(
 		ready.ObjectInfoDigest == "" || (ready.InstanceFingerprint != "" && ready.InstanceFingerprint != instance.HostFingerprint) {
 		return autodl.Tunnel{}, false
 	}
+	if _, err := admin.EnsureInstanceReady(ctx, instance.ID); err != nil {
+		return autodl.Tunnel{}, false
+	}
 	client, tunnel, err := admin.connectInstance(ctx, instance)
 	if err != nil {
 		return autodl.Tunnel{}, false
@@ -160,29 +196,136 @@ func (admin *AutoDLWorkflowAdmin) ScanFingerprint(ctx context.Context, instanceI
 }
 
 func (admin *AutoDLWorkflowAdmin) CheckInstance(ctx context.Context, instanceID string) (AutoDLInstanceCheck, error) {
-	instance, client, tunnel, err := admin.connect(ctx, instanceID)
-	_ = instance
-	if err != nil {
-		return AutoDLInstanceCheck{Reason: "connection_failed"}, err
+	return admin.EnsureInstanceReady(ctx, instanceID)
+}
+
+// EnsureInstanceReady makes one instance directly usable without submitting a prompt.
+// Concurrent checks for the same instance share one startup operation.
+func (admin *AutoDLWorkflowAdmin) EnsureInstanceReady(ctx context.Context, instanceID string) (AutoDLInstanceCheck, error) {
+	if ctx == nil {
+		return AutoDLInstanceCheck{}, fmt.Errorf("AutoDL readiness context is required")
 	}
-	stats, err := client.SystemStats(ctx)
+	instance, err := admin.instance(ctx, instanceID, true)
 	if err != nil {
-		return AutoDLInstanceCheck{Reason: "comfyui_unavailable"}, err
+		return AutoDLInstanceCheck{Stage: AutoDLReadinessStageFailed, Reason: "connection_failed"}, err
 	}
+
+	admin.readinessMu.Lock()
+	if admin.readiness == nil {
+		admin.readiness = make(map[string]*autoDLReadinessOperation)
+	}
+	if operation := admin.readiness[instance.ID]; operation != nil {
+		admin.readinessMu.Unlock()
+		select {
+		case <-operation.done:
+			return operation.result, operation.err
+		case <-ctx.Done():
+			return AutoDLInstanceCheck{}, ctx.Err()
+		}
+	}
+	operation := &autoDLReadinessOperation{done: make(chan struct{})}
+	admin.readiness[instance.ID] = operation
+	admin.readinessMu.Unlock()
+
+	result, readyErr := admin.ensureInstanceReady(ctx, instance)
+	admin.readinessMu.Lock()
+	operation.result, operation.err = result, readyErr
+	delete(admin.readiness, instance.ID)
+	if admin.latestReadiness == nil {
+		admin.latestReadiness = make(map[string]AutoDLInstanceCheck)
+	}
+	admin.latestReadiness[instance.ID] = result
+	close(operation.done)
+	admin.readinessMu.Unlock()
+	return result, readyErr
+}
+
+func (admin *AutoDLWorkflowAdmin) ensureInstanceReady(ctx context.Context, instance settings.AutoDLInstanceProfile) (AutoDLInstanceCheck, error) {
+	admin.updateReadiness(instance.ID, AutoDLInstanceCheck{Stage: AutoDLReadinessStageConnecting})
+	admin.updateReadiness(instance.ID, AutoDLInstanceCheck{Stage: AutoDLReadinessStageTunneling})
+	client, tunnel, err := admin.connectInstance(ctx, instance)
+	if err != nil {
+		return admin.failedReadiness(instance.ID, "connection_failed", err)
+	}
+	admin.updateReadiness(instance.ID, AutoDLInstanceCheck{Stage: AutoDLReadinessStageProbing})
+	stats, probeErr := client.SystemStats(ctx)
+	if probeErr == nil {
+		return admin.readyInstance(instance.ID, tunnel, stats)
+	}
+	if strings.TrimSpace(instance.StartupCommand) == "" {
+		return admin.failedReadiness(instance.ID, "startup_command_missing", ErrAutoDLStartupCommandMissing)
+	}
+
+	target := tunnelTargetForInstance(instance)
+	admin.updateReadiness(instance.ID, AutoDLInstanceCheck{Stage: AutoDLReadinessStageStarting})
+	if err := admin.tunnels.Run(ctx, target, instance.StartupCommand); err != nil {
+		return admin.failedReadiness(instance.ID, "startup_failed", err)
+	}
+	admin.updateReadiness(instance.ID, AutoDLInstanceCheck{Stage: AutoDLReadinessStageWaitingHealth})
+	timeout := admin.healthTimeout
+	if timeout <= 0 {
+		timeout = 90 * time.Second
+	}
+	pollInterval := admin.healthPollInterval
+	if pollInterval <= 0 {
+		pollInterval = 500 * time.Millisecond
+	}
+	healthCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	timer := time.NewTimer(pollInterval)
+	defer timer.Stop()
+	for {
+		select {
+		case <-healthCtx.Done():
+			if ctx.Err() != nil {
+				return admin.failedReadiness(instance.ID, "connection_failed", ctx.Err())
+			}
+			return admin.failedReadiness(instance.ID, "health_timeout", ErrAutoDLHealthTimeout)
+		case <-timer.C:
+			stats, err = client.SystemStats(healthCtx)
+			if err == nil {
+				return admin.readyInstance(instance.ID, tunnel, stats)
+			}
+			timer.Reset(pollInterval)
+		}
+	}
+}
+
+func (admin *AutoDLWorkflowAdmin) readyInstance(instanceID string, tunnel autodl.Tunnel, stats comfyui.SystemStats) (AutoDLInstanceCheck, error) {
+	admin.updateReadiness(instanceID, AutoDLInstanceCheck{Stage: AutoDLReadinessStageValidatingAPI})
 	localPort, err := tunnelLocalPort(tunnel)
 	if err != nil {
-		return AutoDLInstanceCheck{Reason: "tunnel_unavailable"}, err
+		return admin.failedReadiness(instanceID, "tunnel_unavailable", err)
 	}
-	result := AutoDLInstanceCheck{
-		Connected: true, LocalPort: localPort, ComfyUIVersion: stats.System.ComfyUIVersion,
-		Devices: make([]string, 0, len(stats.Devices)),
-	}
+	result := AutoDLInstanceCheck{Connected: true, Stage: AutoDLReadinessStageReady, LocalPort: localPort, ComfyUIVersion: stats.System.ComfyUIVersion, Devices: make([]string, 0, len(stats.Devices))}
 	for _, device := range stats.Devices {
 		if name := strings.TrimSpace(device.Name); name != "" {
 			result.Devices = append(result.Devices, name)
 		}
 	}
+	admin.updateReadiness(instanceID, result)
 	return result, nil
+}
+
+func (admin *AutoDLWorkflowAdmin) failedReadiness(instanceID, reason string, err error) (AutoDLInstanceCheck, error) {
+	result := AutoDLInstanceCheck{Stage: AutoDLReadinessStageFailed, Reason: reason}
+	admin.updateReadiness(instanceID, result)
+	return result, err
+}
+
+func (admin *AutoDLWorkflowAdmin) updateReadiness(instanceID string, result AutoDLInstanceCheck) {
+	admin.readinessMu.Lock()
+	defer admin.readinessMu.Unlock()
+	if admin.latestReadiness == nil {
+		admin.latestReadiness = make(map[string]AutoDLInstanceCheck)
+	}
+	admin.latestReadiness[instanceID] = result
+}
+
+func (admin *AutoDLWorkflowAdmin) ReadinessStatus(instanceID string) AutoDLInstanceCheck {
+	admin.readinessMu.Lock()
+	defer admin.readinessMu.Unlock()
+	return admin.latestReadiness[strings.TrimSpace(instanceID)]
 }
 
 func (admin *AutoDLWorkflowAdmin) Preview(ctx context.Context, request AutoDLWorkflowPreviewRequest) (AutoDLWorkflowPreview, error) {
@@ -299,10 +442,7 @@ func (admin *AutoDLWorkflowAdmin) connectInstance(ctx context.Context, instance 
 	if admin.tunnels == nil {
 		return nil, autodl.Tunnel{}, fmt.Errorf("AutoDL tunnel manager is unavailable")
 	}
-	tunnel, err := admin.tunnels.Ensure(ctx, autodl.TunnelTarget{
-		InstanceProfileID: instance.ID, Host: instance.Host, SSHPort: instance.SSHPort, SSHUser: instance.SSHUser,
-		ComfyPort: instance.ComfyPort, HostFingerprint: instance.HostFingerprint, CredentialRef: instance.CredentialRef,
-	})
+	tunnel, err := admin.tunnels.Ensure(ctx, tunnelTargetForInstance(instance))
 	if err != nil {
 		return nil, autodl.Tunnel{}, err
 	}
@@ -318,6 +458,13 @@ func (admin *AutoDLWorkflowAdmin) connectInstance(ctx context.Context, instance 
 		return nil, autodl.Tunnel{}, err
 	}
 	return client, tunnel, nil
+}
+
+func tunnelTargetForInstance(instance settings.AutoDLInstanceProfile) autodl.TunnelTarget {
+	return autodl.TunnelTarget{
+		InstanceProfileID: instance.ID, Host: instance.Host, SSHPort: instance.SSHPort, SSHUser: instance.SSHUser,
+		ComfyPort: instance.ComfyPort, LocalPort: instance.LocalPort, HostFingerprint: instance.HostFingerprint, CredentialRef: instance.CredentialRef,
+	}
 }
 
 func (admin *AutoDLWorkflowAdmin) instance(ctx context.Context, instanceID string, requireReady bool) (settings.AutoDLInstanceProfile, error) {

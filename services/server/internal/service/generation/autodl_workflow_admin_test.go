@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -111,6 +113,105 @@ func TestAutoDLInstanceCheckReturnsPortAndHealthWithoutBaseURL(t *testing.T) {
 	}
 	if bytes.Contains(encoded, []byte("baseUrl")) || bytes.Contains(encoded, []byte("127.0.0.1")) {
 		t.Fatalf("check response leaks tunnel origin: %s", encoded)
+	}
+}
+
+func TestAutoDLEnsureReadyHealthyServiceSkipsStartup(t *testing.T) {
+	store, _ := workflowAdminStoreFixture(t)
+	tunnels := &workflowAdminReadinessTunnels{}
+	client := &workflowAdminFakeComfyClient{stats: readyWorkflowAdminStats()}
+	admin := workflowAdminForTest(store, client)
+	admin.tunnels = tunnels
+
+	got, err := admin.EnsureInstanceReady(context.Background(), "instance-a")
+	if err != nil || !got.Connected || got.Stage != AutoDLReadinessStageReady {
+		t.Fatalf("EnsureInstanceReady()=%#v error=%v", got, err)
+	}
+	if tunnels.runCalls.Load() != 0 {
+		t.Fatalf("startup calls = %d, want 0", tunnels.runCalls.Load())
+	}
+}
+
+func TestAutoDLEnsureReadyStartsOnceThenBecomesHealthy(t *testing.T) {
+	store, _ := workflowAdminStoreFixture(t)
+	store.instance.StartupCommand = "/root/start_comfyui.sh"
+	tunnels := &workflowAdminReadinessTunnels{}
+	var probes atomic.Int32
+	client := &workflowAdminFakeComfyClient{statsFunc: func(context.Context) (comfyui.SystemStats, error) {
+		if probes.Add(1) == 1 {
+			return comfyui.SystemStats{}, errors.New("connection refused")
+		}
+		return readyWorkflowAdminStats(), nil
+	}}
+	admin := workflowAdminForTest(store, client)
+	admin.tunnels = tunnels
+	admin.healthPollInterval = time.Millisecond
+
+	got, err := admin.EnsureInstanceReady(context.Background(), "instance-a")
+	if err != nil || !got.Connected || got.Stage != AutoDLReadinessStageReady {
+		t.Fatalf("EnsureInstanceReady()=%#v error=%v", got, err)
+	}
+	if tunnels.runCalls.Load() != 1 {
+		t.Fatalf("startup calls = %d, want 1", tunnels.runCalls.Load())
+	}
+}
+
+func TestAutoDLEnsureReadyRequiresStartupCommand(t *testing.T) {
+	store, _ := workflowAdminStoreFixture(t)
+	client := &workflowAdminFakeComfyClient{statsFunc: func(context.Context) (comfyui.SystemStats, error) {
+		return comfyui.SystemStats{}, errors.New("connection refused")
+	}}
+	admin := workflowAdminForTest(store, client)
+
+	got, err := admin.EnsureInstanceReady(context.Background(), "instance-a")
+	if !errors.Is(err, ErrAutoDLStartupCommandMissing) || got.Reason != "startup_command_missing" || got.Stage != AutoDLReadinessStageFailed {
+		t.Fatalf("EnsureInstanceReady()=%#v error=%v", got, err)
+	}
+}
+
+func TestAutoDLEnsureReadyHealthTimeout(t *testing.T) {
+	store, _ := workflowAdminStoreFixture(t)
+	store.instance.StartupCommand = "/root/start_comfyui.sh"
+	client := &workflowAdminFakeComfyClient{statsFunc: func(context.Context) (comfyui.SystemStats, error) {
+		return comfyui.SystemStats{}, errors.New("connection refused")
+	}}
+	admin := workflowAdminForTest(store, client)
+	admin.tunnels = &workflowAdminReadinessTunnels{}
+	admin.healthPollInterval = time.Millisecond
+	admin.healthTimeout = 10 * time.Millisecond
+
+	got, err := admin.EnsureInstanceReady(context.Background(), "instance-a")
+	if !errors.Is(err, ErrAutoDLHealthTimeout) || got.Reason != "health_timeout" || got.Stage != AutoDLReadinessStageFailed {
+		t.Fatalf("EnsureInstanceReady()=%#v error=%v", got, err)
+	}
+}
+
+func TestAutoDLEnsureReadyConcurrentCallsShareOperation(t *testing.T) {
+	store, _ := workflowAdminStoreFixture(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	var probes atomic.Int32
+	client := &workflowAdminFakeComfyClient{statsFunc: func(context.Context) (comfyui.SystemStats, error) {
+		probes.Add(1)
+		once.Do(func() { close(started) })
+		<-release
+		return readyWorkflowAdminStats(), nil
+	}}
+	admin := workflowAdminForTest(store, client)
+	results := make(chan error, 2)
+	go func() { _, err := admin.EnsureInstanceReady(context.Background(), "instance-a"); results <- err }()
+	<-started
+	go func() { _, err := admin.EnsureInstanceReady(context.Background(), "instance-a"); results <- err }()
+	time.Sleep(10 * time.Millisecond)
+	close(release)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatalf("EnsureInstanceReady() error = %v", err)
+		}
+	}
+	if probes.Load() != 1 {
+		t.Fatalf("health probes = %d, want 1 shared operation", probes.Load())
 	}
 }
 
@@ -325,18 +426,44 @@ func (scanner *workflowAdminFakeScanner) Scan(_ context.Context, host string, po
 func (fake workflowAdminFakeTunnels) Ensure(context.Context, autodl.TunnelTarget) (autodl.Tunnel, error) {
 	return fake.tunnel, fake.err
 }
+func (fake workflowAdminFakeTunnels) Run(context.Context, autodl.TunnelTarget, string) error {
+	return fake.err
+}
 func (workflowAdminFakeTunnels) Close(string) error { return nil }
 func (workflowAdminFakeTunnels) CloseAll() error    { return nil }
 
+type workflowAdminReadinessTunnels struct {
+	runCalls atomic.Int32
+	runErr   error
+}
+
+func (*workflowAdminReadinessTunnels) Ensure(_ context.Context, target autodl.TunnelTarget) (autodl.Tunnel, error) {
+	return autodl.Tunnel{InstanceProfileID: target.InstanceProfileID, BaseURL: "http://127.0.0.1:42123"}, nil
+}
+func (fake *workflowAdminReadinessTunnels) Run(context.Context, autodl.TunnelTarget, string) error {
+	fake.runCalls.Add(1)
+	return fake.runErr
+}
+func (*workflowAdminReadinessTunnels) Close(string) error { return nil }
+func (*workflowAdminReadinessTunnels) CloseAll() error    { return nil }
+
 type workflowAdminFakeComfyClient struct {
 	stats       comfyui.SystemStats
+	statsFunc   func(context.Context) (comfyui.SystemStats, error)
 	objectInfo  comfyui.ObjectInfo
 	uploadCalls int
 	submitCalls int
 }
 
-func (fake *workflowAdminFakeComfyClient) SystemStats(context.Context) (comfyui.SystemStats, error) {
+func (fake *workflowAdminFakeComfyClient) SystemStats(ctx context.Context) (comfyui.SystemStats, error) {
+	if fake.statsFunc != nil {
+		return fake.statsFunc(ctx)
+	}
 	return fake.stats, nil
+}
+
+func readyWorkflowAdminStats() comfyui.SystemStats {
+	return comfyui.SystemStats{System: comfyui.SystemInfo{ComfyUIVersion: "0.3.60"}, Devices: []comfyui.DeviceInfo{{Name: "GPU 0"}}}
 }
 func (fake *workflowAdminFakeComfyClient) ObjectInfo(context.Context) (comfyui.ObjectInfo, error) {
 	return fake.objectInfo, nil
