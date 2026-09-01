@@ -1,4 +1,3 @@
-import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
 	GenerationFamily,
@@ -107,7 +106,6 @@ export interface GenerationSettingsFormController {
 	updateParam: (name: string, value: unknown) => void;
 	updateWorkflowParameter: (name: string, value: string | number | boolean | undefined) => void;
 	updateWorkflowProfile: (workflowProfileId: string) => void;
-	uploadReferenceAsset: (event: React.ChangeEvent<HTMLInputElement>) => Promise<void>;
 }
 
 export const useGenerationSettingsForm = ({
@@ -832,14 +830,6 @@ export const useGenerationSettingsForm = ({
 			workspace.mutateMediaAssets,
 		],
 	);
-	const uploadReferenceAsset = useCallback(
-		async (event: React.ChangeEvent<HTMLInputElement>) => {
-			const files = Array.from(event.currentTarget.files ?? []);
-			event.currentTarget.value = "";
-			await importReferenceFiles(files);
-		},
-		[importReferenceFiles],
-	);
 
 	const isReady =
 		workspace.hasLiveCatalog &&
@@ -930,7 +920,6 @@ export const useGenerationSettingsForm = ({
 		updateParam,
 		updateWorkflowParameter,
 		updateWorkflowProfile,
-		uploadReferenceAsset,
 	};
 };
 

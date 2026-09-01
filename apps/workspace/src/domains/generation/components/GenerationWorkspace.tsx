@@ -629,6 +629,7 @@ export const GenerationWorkspace: React.FC<GenerationWorkspaceProps> = ({
 				entries={ws.generationEntries}
 				inputId={`${ws.uploadIdPrefix}-reference-dialog-upload`}
 				isUploading={ws.isUploadingAsset}
+				importProgress={ws.referenceImportProgress}
 				maxReferences={maxReferenceUrlsForRoute(ws.selectedRoute)}
 				mediaAssets={ws.mediaAssets}
 				open={referenceDialogOpen}
@@ -639,12 +640,12 @@ export const GenerationWorkspace: React.FC<GenerationWorkspaceProps> = ({
 				selectedAssetIds={ws.selectedReferenceAssetIds}
 				title={referenceDialogTitle}
 				onOpenChange={setReferenceDialogOpen}
+				onImportFiles={ws.importReferenceFiles}
 				onRefreshAssets={() => {
 					void ws.mutateMediaAssets();
 				}}
 				onRemoveReference={ws.toggleReferenceAsset}
 				onToggleReference={ws.toggleReferenceAsset}
-				onUpload={ws.uploadReferenceAsset}
 			/>
 		</div>
 	);

@@ -345,14 +345,6 @@ export const useGenerationWorkspace = ({
 		selectedRoute,
 		setError,
 	});
-	const uploadReferenceAsset = useCallback(
-		async (event: React.ChangeEvent<HTMLInputElement>) => {
-			const files = Array.from(event.currentTarget.files ?? []);
-			event.currentTarget.value = "";
-			await importReferenceFiles(files);
-		},
-		[importReferenceFiles],
-	);
 	const effectiveReferenceBindings = useMemo(
 		() => resolveGenerationExtraValue(extraReferenceBindings, prompt),
 		[extraReferenceBindings, prompt],
@@ -582,7 +574,6 @@ export const useGenerationWorkspace = ({
 		updateRoute,
 		updateVersion,
 		uploadIdPrefix,
-		uploadReferenceAsset,
 		visibleFamilyRoutes,
 		visibleFamilies,
 		visibleRoutes,

@@ -95,7 +95,7 @@ describe("ReferenceSelectionDialog", () => {
 				onRefreshAssets={vi.fn()}
 				onRemoveReference={vi.fn()}
 				onToggleReference={vi.fn()}
-				onUpload={vi.fn()}
+				onImportFiles={vi.fn()}
 			/>,
 		);
 
@@ -157,7 +157,7 @@ describe("ReferenceSelectionDialog", () => {
 				onRefreshAssets={vi.fn()}
 				onRemoveReference={vi.fn()}
 				onToggleReference={vi.fn()}
-				onUpload={vi.fn()}
+				onImportFiles={vi.fn()}
 			/>,
 		);
 
@@ -166,6 +166,80 @@ describe("ReferenceSelectionDialog", () => {
 		expect(screen.queryByText("scene.mp4")).toBeNull();
 		expect(screen.queryByRole("tab", { name: /视频/ })).toBeNull();
 		expect(screen.queryByRole("tab", { name: /音频/ })).toBeNull();
+	});
+
+	it("imports multiple selected or dropped files in their original order", () => {
+		const onImportFiles = vi.fn();
+		render(
+			<ReferenceSelectionDialog
+				disabled={false}
+				entries={[]}
+				inputId="reference-upload"
+				isUploading={false}
+				mediaAssets={[]}
+				onImportFiles={onImportFiles}
+				onOpenChange={vi.fn()}
+				onRemoveReference={vi.fn()}
+				onToggleReference={vi.fn()}
+				open
+				references={[]}
+				requiresReference={false}
+				selectableKinds={new Set(["image"])}
+				selectedAssetIds={[]}
+			/>,
+		);
+		const first = new File(["a"], "a.png", { type: "image/png" });
+		const second = new File(["b"], "b.png", { type: "image/png" });
+		const input = document.getElementById("reference-upload") as HTMLInputElement;
+
+		expect(input.multiple).toBe(true);
+		fireEvent.change(input, { target: { files: [first, second] } });
+		expect(onImportFiles).toHaveBeenLastCalledWith([first, second]);
+		expect(input.value).toBe("");
+
+		fireEvent.drop(screen.getByTestId("reference-drop-target"), {
+			dataTransfer: { files: [second, first], types: ["Files"] },
+		});
+		expect(onImportFiles).toHaveBeenLastCalledWith([second, first]);
+	});
+
+	it("shows import progress and ignores drops while busy or disabled", () => {
+		const onImportFiles = vi.fn();
+		const props = {
+			entries: [],
+			inputId: "reference-upload",
+			mediaAssets: [],
+			onImportFiles,
+			onOpenChange: vi.fn(),
+			onRemoveReference: vi.fn(),
+			onToggleReference: vi.fn(),
+			open: true,
+			references: [],
+			requiresReference: false,
+			selectableKinds: new Set<MediaAsset["kind"]>(["image"]),
+			selectedAssetIds: [],
+		};
+		const file = new File(["a"], "a.png", { type: "image/png" });
+		const { rerender } = render(
+			<ReferenceSelectionDialog
+				{...props}
+				disabled={false}
+				importProgress={{ processed: 2, total: 5 }}
+				isUploading
+			/>,
+		);
+
+		expect(screen.getByText("正在导入 2/5")).toBeTruthy();
+		fireEvent.drop(screen.getByTestId("reference-drop-target"), {
+			dataTransfer: { files: [file], types: ["Files"] },
+		});
+		expect(onImportFiles).not.toHaveBeenCalled();
+
+		rerender(<ReferenceSelectionDialog {...props} disabled isUploading={false} />);
+		fireEvent.drop(screen.getByTestId("reference-drop-target"), {
+			dataTransfer: { files: [file], types: ["Files"] },
+		});
+		expect(onImportFiles).not.toHaveBeenCalled();
 	});
 
 	it("renders audio references with a playback button instead of an image preview", async () => {
@@ -194,7 +268,7 @@ describe("ReferenceSelectionDialog", () => {
 				onRefreshAssets={vi.fn()}
 				onRemoveReference={vi.fn()}
 				onToggleReference={vi.fn()}
-				onUpload={vi.fn()}
+				onImportFiles={vi.fn()}
 			/>,
 		);
 
@@ -224,7 +298,7 @@ describe("ReferenceSelectionDialog", () => {
 				onRefreshAssets={vi.fn()}
 				onRemoveReference={vi.fn()}
 				onToggleReference={vi.fn()}
-				onUpload={vi.fn()}
+				onImportFiles={vi.fn()}
 			/>,
 		);
 
@@ -271,7 +345,7 @@ describe("ReferenceSelectionDialog", () => {
 				onRemoveReference={vi.fn()}
 				onToggleReference={vi.fn()}
 				onToggleShortcutReference={onToggleShortcutReference}
-				onUpload={vi.fn()}
+				onImportFiles={vi.fn()}
 			/>,
 		);
 
@@ -313,7 +387,7 @@ describe("ReferenceSelectionDialog", () => {
 				onRefreshAssets={vi.fn()}
 				onRemoveReference={vi.fn()}
 				onToggleReference={onToggleReference}
-				onUpload={vi.fn()}
+				onImportFiles={vi.fn()}
 			/>,
 		);
 

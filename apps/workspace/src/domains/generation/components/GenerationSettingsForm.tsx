@@ -400,6 +400,7 @@ export const GenerationSettingsForm: React.FC<GenerationSettingsFormProps> = ({
 				entries={[]}
 				inputId={controller.referenceInputId}
 				isUploading={controller.isUploadingReference}
+				importProgress={controller.referenceImportProgress}
 				maxReferences={controller.maxReferenceImages}
 				mediaAssets={controller.imageReferenceAssets}
 				open={controller.referenceDialogOpen}
@@ -411,12 +412,12 @@ export const GenerationSettingsForm: React.FC<GenerationSettingsFormProps> = ({
 				title="选择参考图"
 				visibleKindFilters={imageReferenceKindFilters}
 				onOpenChange={controller.setReferenceDialogOpen}
+				onImportFiles={controller.importReferenceFiles}
 				onRefreshAssets={() => {
 					void controller.mutateMediaAssets();
 				}}
 				onRemoveReference={controller.toggleReferenceAsset}
 				onToggleReference={controller.toggleReferenceAsset}
-				onUpload={controller.uploadReferenceAsset}
 			/>
 		</>
 	);
