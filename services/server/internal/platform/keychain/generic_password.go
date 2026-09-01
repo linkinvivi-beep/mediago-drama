@@ -52,7 +52,7 @@ type genericPasswordStore struct {
 
 // NewGenericPasswordStore creates the production macOS Keychain adapter.
 func NewGenericPasswordStore() GenericPasswordStore {
-	return newGenericPasswordStore(execRunner{factory: execSecurityCommandFactory{}})
+	return newPlatformGenericPasswordStore()
 }
 
 func newGenericPasswordStore(runner commandRunner) *genericPasswordStore {
