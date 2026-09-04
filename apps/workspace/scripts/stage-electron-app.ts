@@ -17,57 +17,73 @@ type WorkspacePackage = {
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const workspaceDir = resolve(scriptDir, "..");
+const repositoryDir = resolve(workspaceDir, "../..");
 const workspacePackagePath = join(workspaceDir, "package.json");
 const rendererDistDir = join(workspaceDir, "dist");
 const electronDistDir = join(workspaceDir, "electron", "dist");
 const electronAppDir = join(workspaceDir, "electron", "app");
-const electronTargetPlatform = process.env.MEDIAGO_ELECTRON_TARGET_PLATFORM?.trim();
-const buildsMacOS = electronTargetPlatform
-	? electronTargetPlatform.startsWith("darwin-")
-	: process.platform === "darwin";
-const requiresCodeSigning =
-	process.env.MEDIAGO_CODE_SIGN === "1" || process.env.MEDIAGO_MAC_SIGN === "1";
-const enablesElectronFuses = !buildsMacOS || requiresCodeSigning;
-
+const serviceBinaryNames = ["mediago-server", "mediago-document-mcp", "mediago-generation-mcp"];
 function main(): void {
+	const electronTargetPlatform = process.env.MEDIAGO_ELECTRON_TARGET_PLATFORM?.trim();
+	assertDarwinArm64Target(electronTargetPlatform);
 	ensureDirectory(rendererDistDir, "missing renderer build output");
 	ensureDirectory(electronDistDir, "missing Electron main process build output");
-	ensureStagedServerBinary();
+	assertStagedServiceBinariesMatchTarget(
+		join(workspaceDir, "electron", "resources", "bin"),
+		join(repositoryDir, "bin", electronTargetPlatform),
+		serviceBinaryNames,
+	);
 
 	const workspacePackage = readWorkspacePackage();
 	const electronVersion = normalizeVersion(workspacePackage.devDependencies?.electron);
-	const electronUpdaterVersion =
-		workspacePackage.dependencies?.["electron-updater"] ??
-		workspacePackage.devDependencies?.["electron-updater"];
-	if (!electronUpdaterVersion) {
-		throw new Error("missing electron-updater dependency in workspace package");
+	const requiresCodeSigning =
+		process.env.MEDIAGO_CODE_SIGN === "1" || process.env.MEDIAGO_MAC_SIGN === "1";
+	const appPackage = createElectronAppPackage(
+		workspacePackage,
+		electronVersion,
+		requiresCodeSigning,
+	);
+
+	rmSync(electronAppDir, { recursive: true, force: true });
+	mkdirSync(electronAppDir, { recursive: true });
+
+	writeFileSync(join(electronAppDir, "package.json"), `${JSON.stringify(appPackage, null, 2)}\n`);
+	cpSync(electronDistDir, electronAppDir, { recursive: true });
+	cpSync(rendererDistDir, join(electronAppDir, "renderer"), { recursive: true });
+}
+
+export function assertDarwinArm64Target(
+	target: string | undefined,
+): asserts target is "darwin-arm64" {
+	if (target !== "darwin-arm64") {
+		throw new Error(
+			`MEDIAGO_ELECTRON_TARGET_PLATFORM must be darwin-arm64 (received ${target || "unset"})`,
+		);
 	}
-	const stagedDependencies = { "electron-updater": electronUpdaterVersion };
-	const channel = readElectronChannel();
-	const githubPublisher = githubPublisherOptions(channel);
-	const appPackage = {
-		name: "mediago-drama",
-		productName: "MediaGo Drama",
+}
+
+export function createElectronAppPackage(
+	workspacePackage: WorkspacePackage,
+	electronVersion: string,
+	requiresCodeSigning: boolean,
+) {
+	return {
+		name: "medialink",
+		productName: "MediaLink",
 		version: workspacePackage.version ?? "0.0.0",
-		description: "MediaGo Drama desktop workspace",
-		author: "MediaGo Dev",
+		description: "MediaLink desktop workspace",
 		license: workspacePackage.license ?? "Apache-2.0",
-		repository: {
-			type: "git",
-			url: `https://github.com/${githubOwner}/${githubRepo}.git`,
-		},
 		private: true,
 		type: "module",
 		main: "main.js",
-		dependencies: stagedDependencies,
 		build: {
-			appId: "team.torchstellar.mediagodrama",
-			productName: "MediaGo Drama",
+			appId: "app.medialink.desktop",
+			productName: "MediaLink",
 			asar: true,
 			// Flipping Electron fuses mutates the macOS framework binary. Only do so when
 			// the build will be signed afterwards; otherwise its embedded signature becomes
 			// invalid and macOS terminates the app with CODESIGNING/Invalid Page at launch.
-			...(enablesElectronFuses
+			...(requiresCodeSigning
 				? {
 						electronFuses: {
 							runAsNode: false,
@@ -76,24 +92,18 @@ function main(): void {
 							enableNodeCliInspectArguments: false,
 							enableEmbeddedAsarIntegrityValidation: true,
 							onlyLoadAppFromAsar: true,
-							// Electron does not ship browser_v8_context_snapshot.bin by default.
-							// Keep the browser process on the bundled architecture-specific snapshot.
 							loadBrowserProcessSpecificV8Snapshot: false,
 							grantFileProtocolExtraPrivileges: false,
 						},
 					}
 				: {}),
 			...(requiresCodeSigning ? { forceCodeSigning: true } : {}),
-			// Keep the on-disk filename identical to electron-builder's updater YAML path.
-			// Spaces in productName otherwise trigger provider-specific safeArtifactName
-			// rewriting, while our manual GitHub upload keeps a different basename.
-			artifactName: "${name}-${version}-${os}-${arch}.${ext}",
+			artifactName: "MediaLink-${version}-macos-arm64.${ext}",
 			electronVersion,
 			npmRebuild: false,
 			directories: {
 				output: "../../release",
 			},
-			publish: [githubPublisher],
 			files: ["package.json", "*.js", "*.cjs", "renderer/**/*", "!**/*.map"],
 			extraResources: [
 				{
@@ -105,37 +115,12 @@ function main(): void {
 				category: "public.app-category.productivity",
 				target: ["dmg", "zip"],
 				icon: "../../build/icons/icon.icns",
-				// MEDIAGO_MAC_SIGN=1 (set by CI when the signing cert exists) enables Developer
-				// ID signing; MEDIAGO_MAC_NOTARIZE=1 (set only when the Apple notary secrets
-				// also exist) additionally enables notarization — signed-but-not-notarized
-				// builds must not fail on missing notary credentials.
-				...(buildsMacOS
-					? process.env.MEDIAGO_MAC_SIGN === "1"
-						? { hardenedRuntime: true, notarize: process.env.MEDIAGO_MAC_NOTARIZE === "1" }
-						: { identity: null, hardenedRuntime: false }
-					: {}),
-			},
-			win: {
-				target: ["nsis", "zip"],
-				icon: "../../build/icons/icon.ico",
-			},
-			nsis: {
-				oneClick: false,
-				allowToChangeInstallationDirectory: true,
-			},
-			linux: {
-				target: ["AppImage", "deb"],
-				icon: "../../build/icons",
+				...(requiresCodeSigning
+					? { hardenedRuntime: true, notarize: process.env.MEDIAGO_MAC_NOTARIZE === "1" }
+					: { identity: null, hardenedRuntime: false }),
 			},
 		},
 	};
-
-	rmSync(electronAppDir, { recursive: true, force: true });
-	mkdirSync(electronAppDir, { recursive: true });
-
-	writeFileSync(join(electronAppDir, "package.json"), `${JSON.stringify(appPackage, null, 2)}\n`);
-	cpSync(electronDistDir, electronAppDir, { recursive: true });
-	cpSync(rendererDistDir, join(electronAppDir, "renderer"), { recursive: true });
 }
 
 function readWorkspacePackage(): WorkspacePackage {
@@ -148,19 +133,23 @@ function ensureDirectory(path: string, message: string): void {
 	}
 }
 
-function ensureStagedServerBinary(): void {
-	const isWindows = electronTargetPlatform
-		? electronTargetPlatform.startsWith("windows-")
-		: process.platform === "win32";
-	const path = join(
-		workspaceDir,
-		"electron",
-		"resources",
-		"bin",
-		`mediago-server${isWindows ? ".exe" : ""}`,
-	);
-	if (!existsSync(path)) {
-		throw new Error(`missing staged server binary: ${path}`);
+export function assertStagedServiceBinariesMatchTarget(
+	stagedBinDir: string,
+	targetBinDir: string,
+	binaryNames: string[],
+): void {
+	for (const binaryName of binaryNames) {
+		const stagedPath = join(stagedBinDir, binaryName);
+		const targetPath = join(targetBinDir, binaryName);
+		if (!existsSync(stagedPath)) {
+			throw new Error(`missing staged service binary: ${binaryName}`);
+		}
+		if (!existsSync(targetPath)) {
+			throw new Error(`missing target service binary: ${binaryName}`);
+		}
+		if (!readFileSync(stagedPath).equals(readFileSync(targetPath))) {
+			throw new Error(`stale staged service binary: ${binaryName}`);
+		}
 	}
 }
 
@@ -168,43 +157,11 @@ function normalizeVersion(version: string | undefined): string {
 	return version?.replace(/^[^\d]*/, "") || "42.4.1";
 }
 
-type GitHubReleaseType = "draft" | "prerelease" | "release";
-
-const githubOwner = "mediago-dev";
-const githubRepo = "mediago-drama";
-
-function readElectronChannel(): string {
-	const channel = process.env.MEDIAGO_ELECTRON_CHANNEL?.trim() || "beta";
-	if (!/^[a-z0-9-]+$/.test(channel)) {
-		throw new Error(`invalid MEDIAGO_ELECTRON_CHANNEL: ${channel}`);
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+	try {
+		main();
+	} catch (error) {
+		console.error(error instanceof Error ? error.message : String(error));
+		process.exit(1);
 	}
-	return channel;
-}
-
-function githubPublisherOptions(channel: string): {
-	provider: "github";
-	releaseType: GitHubReleaseType;
-	owner: string;
-	repo: string;
-	channel: string;
-} {
-	const value = process.env.MEDIAGO_ELECTRON_RELEASE_TYPE?.trim() || "release";
-	if (value !== "draft" && value !== "prerelease" && value !== "release") {
-		throw new Error(`invalid MEDIAGO_ELECTRON_RELEASE_TYPE: ${value}`);
-	}
-
-	return {
-		provider: "github",
-		releaseType: value,
-		owner: githubOwner,
-		repo: githubRepo,
-		channel,
-	};
-}
-
-try {
-	main();
-} catch (error) {
-	console.error(error instanceof Error ? error.message : String(error));
-	process.exit(1);
 }

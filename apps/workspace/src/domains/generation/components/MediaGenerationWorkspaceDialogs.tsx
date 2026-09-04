@@ -37,6 +37,7 @@ export const MediaGenerationWorkspaceDialogs: React.FC<{
 				entries={generationEntries}
 				inputId={`${workspace.uploadIdPrefix}-reference-dialog-upload`}
 				isUploading={workspace.isUploadingAsset}
+				importProgress={workspace.referenceImportProgress}
 				maxReferences={maxReferenceUrlsForRoute(workspace.selectedRoute)}
 				mediaAssets={workspace.mediaAssets}
 				open={referenceDialogOpen}
@@ -49,13 +50,13 @@ export const MediaGenerationWorkspaceDialogs: React.FC<{
 				shortcutGroups={referenceShortcutGroups}
 				title={workspace.kind === "video" ? "选择参考素材" : "选择参考图"}
 				onOpenChange={onReferenceDialogOpenChange}
+				onImportFiles={workspace.importReferenceFiles}
 				onRefreshAssets={() => {
 					void workspace.mutateMediaAssets();
 				}}
 				onRemoveReference={workspace.toggleReferenceAsset}
 				onToggleShortcutReference={onToggleInlineReference}
 				onToggleReference={workspace.toggleReferenceAsset}
-				onUpload={workspace.uploadReferenceAsset}
 			/>
 		</>
 	);

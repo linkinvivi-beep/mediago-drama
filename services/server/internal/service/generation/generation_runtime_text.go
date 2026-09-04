@@ -41,7 +41,8 @@ func (workflow *GenerationService) StreamGenerationText(
 	default:
 		return http.StatusBadRequest, fmt.Errorf("unknown text executor %q", payload.TextExecutor)
 	}
-	if status, err := workflow.prepareTextPromptOptimization(ctx, &payload); err != nil {
+	optimization, status, err := workflow.prepareTextPromptOptimization(ctx, &payload)
+	if err != nil {
 		return status, err
 	}
 	payload.ReferenceURLs = []string{}
@@ -59,7 +60,7 @@ func (workflow *GenerationService) StreamGenerationText(
 		return status, err
 	}
 	if workflow.shouldUseExecutorText(payload) {
-		return workflow.streamGenerationTextWithExecutor(ctx, payload, hasScopeFilter, emit)
+		return workflow.streamGenerationTextWithExecutor(ctx, payload, hasScopeFilter, optimization, emit)
 	}
 
 	route, err := ResolveGenerationRoute(payload)
@@ -134,6 +135,7 @@ func (workflow *GenerationService) StreamGenerationText(
 	defer cancel()
 
 	generationRequest := GenerationRequestFromMessage(payload, route, nil)
+	generationRequest.Prompt = optimization.Prompt
 	streamProvider, ok := provider.(coregeneration.TextStreamProvider)
 	if !ok {
 		return workflow.generateGenerationTextWithoutStream(
@@ -142,6 +144,7 @@ func (workflow *GenerationService) StreamGenerationText(
 			generationRequest,
 			task,
 			conversation,
+			optimization,
 			emit,
 		)
 	}
@@ -154,9 +157,11 @@ func (workflow *GenerationService) StreamGenerationText(
 				generationRequest,
 				task,
 				conversation,
+				optimization,
 				emit,
 			)
 		}
+		err = optimization.safeFailure(err)
 		message := workflow.persistTextStreamFailure(task, "", err)
 		workflow.appendStudioAssistantTranscript(conversation, message)
 		return http.StatusOK, emit(GenerationTextStreamEvent{
@@ -177,7 +182,11 @@ func (workflow *GenerationService) StreamGenerationText(
 			break
 		}
 		if err != nil {
+			err = optimization.safeFailure(err)
 			partialText := builder.String()
+			if optimization.Enabled {
+				partialText = ""
+			}
 			message := workflow.persistTextStreamFailure(task, partialText, err)
 			workflow.appendStudioAssistantTranscript(conversation, message)
 			return http.StatusOK, emit(GenerationTextStreamEvent{
@@ -198,15 +207,20 @@ func (workflow *GenerationService) StreamGenerationText(
 			}
 		}
 		if event.Delta != "" {
+			if optimization.Enabled && len(event.Delta) > maxPromptOptimizationOutputBytes-builder.Len() {
+				return workflow.finishPromptOptimizationFailure(task, conversation, emit)
+			}
 			builder.WriteString(event.Delta)
-			if err := emit(GenerationTextStreamEvent{
-				Type:           "delta",
-				TaskID:         task.ID,
-				ConversationID: conversation.ID,
-				Delta:          event.Delta,
-				Status:         "running",
-			}); err != nil {
-				return http.StatusOK, err
+			if !optimization.Enabled {
+				if err := emit(GenerationTextStreamEvent{
+					Type:           "delta",
+					TaskID:         task.ID,
+					ConversationID: conversation.ID,
+					Delta:          event.Delta,
+					Status:         "running",
+				}); err != nil {
+					return http.StatusOK, err
+				}
 			}
 		}
 		if event.Done {
@@ -215,6 +229,10 @@ func (workflow *GenerationService) StreamGenerationText(
 	}
 
 	text := builder.String()
+	text, err = optimization.validateOutput(text)
+	if err != nil {
+		return workflow.finishPromptOptimizationFailure(task, conversation, emit)
+	}
 	message := "文本生成已完成。"
 	if strings.TrimSpace(text) == "" {
 		message = "文本生成已完成，但未返回文本。"
@@ -252,6 +270,7 @@ func (workflow *GenerationService) streamGenerationTextWithExecutor(
 	ctx context.Context,
 	payload GenerationMessageRequest,
 	hasScopeFilter bool,
+	optimization promptOptimizationExecution,
 	emit func(GenerationTextStreamEvent) error,
 ) (int, error) {
 	executor := textcompletion.ExecutorType(payload.TextExecutor)
@@ -321,13 +340,14 @@ func (workflow *GenerationService) streamGenerationTextWithExecutor(
 	}
 
 	text, err := workflow.CompleteText(ctx, TextCompletionRequest{
-		Prompt:            payload.Prompt,
+		Prompt:            optimization.Prompt,
 		SystemInstruction: stringGenerationParam(payload.Params, "system_instruction"),
 		Executor:          executor,
 		Model:             requestModel,
 		Params:            payload.Params,
 	})
 	if err != nil {
+		err = optimization.safeFailure(err)
 		message := workflow.persistTextStreamFailure(task, "", err)
 		workflow.appendStudioAssistantTranscript(conversation, message)
 		return http.StatusOK, emit(GenerationTextStreamEvent{
@@ -337,6 +357,10 @@ func (workflow *GenerationService) streamGenerationTextWithExecutor(
 			Status:         "failed",
 			Error:          err.Error(),
 		})
+	}
+	text, err = optimization.validateOutput(text)
+	if err != nil {
+		return workflow.finishPromptOptimizationFailure(task, conversation, emit)
 	}
 	completedResponse := GenerationMessageResponse{
 		ID:      task.ID,
@@ -361,20 +385,103 @@ func stringGenerationParam(params map[string]any, name string) string {
 func (workflow *GenerationService) prepareTextPromptOptimization(
 	ctx context.Context,
 	payload *GenerationMessageRequest,
-) (int, error) {
+) (promptOptimizationExecution, int, error) {
 	if payload == nil || payload.PromptOptimization == nil {
-		return http.StatusOK, nil
+		prompt := ""
+		if payload != nil {
+			prompt = payload.Prompt
+		}
+		return promptOptimizationExecution{Prompt: prompt}, http.StatusOK, nil
+	}
+	protectedBodies := []string{}
+	if entry, resolved, err := workflow.resolvePromptReference(ctx, payload.PromptOptimization.ReferenceID, payload.PromptOptimization.ReferencePrompt); err != nil {
+		return promptOptimizationExecution{}, http.StatusBadRequest, err
+	} else if resolved {
+		protectedBodies = append(protectedBodies, entry.Prompt)
 	}
 	if status, err := workflow.resolveGenerationPromptReferences(ctx, payload); err != nil {
-		return status, err
+		return promptOptimizationExecution{}, status, err
 	}
 	optimization := NormalizeGenerationPromptOptimizationRequest(payload.PromptOptimization)
 	if err := ValidateGenerationPromptOptimizationRequest(optimization); err != nil {
-		return http.StatusBadRequest, err
+		return promptOptimizationExecution{}, http.StatusBadRequest, err
 	}
-	payload.Prompt = promptOptimizationUserPrompt(optimization, payload.Prompt)
+	ordered := orderedGenerationReferencesFromParams(payload.Params)
+	if len(ordered) == 0 {
+		ordered = canonicalOrderedGenerationReferences(*payload)
+		if err := validateOrderedGenerationReferences(ordered); err != nil {
+			return promptOptimizationExecution{}, http.StatusBadRequest, err
+		}
+		payload.Params = generationParamsWithOrderedReferences(payload.Params, ordered)
+	}
+	if err := validatePromptOptimizationInput(optimization, payload.Prompt, ordered, protectedBodies); err != nil {
+		return promptOptimizationExecution{}, http.StatusBadRequest, err
+	}
+	contextDocuments, err := workflow.promptOptimizationContextDocuments(payload)
+	if err != nil {
+		return promptOptimizationExecution{}, http.StatusBadRequest, err
+	}
+	executionPrompt, err := promptOptimizationUserPrompt(optimization, payload.Prompt, ordered, contextDocuments)
+	if err != nil {
+		return promptOptimizationExecution{}, http.StatusBadRequest, err
+	}
+	execution := promptOptimizationExecution{
+		Enabled:         true,
+		Prompt:          executionPrompt,
+		ProtectedBodies: promptOptimizationSensitiveBodies(protectedBodies, ordered),
+	}
+	targetKind := coregeneration.Kind(stringGenerationParam(payload.Params, promptOptimizationTargetKindParam))
+	if targetKind == "" && strings.Contains(stringGenerationParam(payload.Params, "system_instruction"), "这是图片生成提示词") {
+		targetKind = coregeneration.KindImage
+	}
+	targetRouteID := stringGenerationParam(payload.Params, promptOptimizationTargetRouteParam)
+	promptGuide := boundedAutoDLPromptGuide(stringGenerationParam(payload.Params, promptOptimizationWorkflowGuideParam))
+	if promptGuide == "" && isAutoDLGenerationRouteID(targetRouteID) {
+		resolved, resolveErr := workflow.resolveAutoDLWorkflowForNewTask(ctx, coregeneration.Request{
+			RouteID:           targetRouteID,
+			WorkflowProfileID: payload.WorkflowProfileID,
+			ReferenceURLs:     make([]string, len(ordered)),
+		})
+		if resolveErr != nil {
+			return promptOptimizationExecution{}, http.StatusServiceUnavailable, resolveErr
+		}
+		promptGuide = boundedAutoDLPromptGuide(resolved.PromptGuide)
+	}
+	if targetKind == coregeneration.KindVideo && targetRouteID == coregeneration.RouteAutoDLH3 {
+		execution.MaxOutputRunes = maxH3PromptOptimizationOutputRunes
+	}
+	instruction := promptOptimizationSystemInstructionForTarget(targetKind, targetRouteID, payload.Params, promptGuide)
+	params := make(map[string]any, len(payload.Params)+1)
+	for key, value := range payload.Params {
+		params[key] = value
+	}
+	delete(params, promptOptimizationTargetKindParam)
+	delete(params, promptOptimizationTargetRouteParam)
+	delete(params, promptOptimizationWorkflowGuideParam)
+	delete(params, promptOptimizationTargetDurationParam)
+	delete(params, promptOptimizationTargetAspectRatioParam)
+	delete(params, promptOptimizationTargetResolutionParam)
+	params["system_instruction"] = instruction
+	params[generationSensitivePromptParam] = true
+	payload.Params = params
 	payload.PromptOptimization = nil
-	return http.StatusOK, nil
+	return execution, http.StatusOK, nil
+}
+
+func (workflow *GenerationService) finishPromptOptimizationFailure(
+	task GenerationTaskRecord,
+	conversation GenerationConversationRecord,
+	emit func(GenerationTextStreamEvent) error,
+) (int, error) {
+	message := workflow.persistTextStreamFailure(task, "", errPromptOptimizationOutputRejected)
+	workflow.appendStudioAssistantTranscript(conversation, message)
+	return http.StatusOK, emit(GenerationTextStreamEvent{
+		Type:           "error",
+		TaskID:         task.ID,
+		ConversationID: conversation.ID,
+		Status:         "failed",
+		Error:          errPromptOptimizationOutputRejected.Error(),
+	})
 }
 
 func (workflow *GenerationService) persistTextStreamFailure(task GenerationTaskRecord, partialText string, failure error) GenerationMessageResponse {
@@ -395,6 +502,7 @@ func (workflow *GenerationService) generateGenerationTextWithoutStream(
 	request coregeneration.Request,
 	task GenerationTaskRecord,
 	conversation GenerationConversationRecord,
+	optimization promptOptimizationExecution,
 	emit func(GenerationTextStreamEvent) error,
 ) (int, error) {
 	response, err := workflow.generateWithProvider(
@@ -404,6 +512,7 @@ func (workflow *GenerationService) generateGenerationTextWithoutStream(
 		generationProviderLogContext{Action: "create", TaskID: task.ID},
 	)
 	if err != nil {
+		err = optimization.safeFailure(err)
 		message := workflow.persistTextStreamFailure(task, "", err)
 		workflow.appendStudioAssistantTranscript(conversation, message)
 		return http.StatusOK, emit(GenerationTextStreamEvent{
@@ -413,6 +522,10 @@ func (workflow *GenerationService) generateGenerationTextWithoutStream(
 			Status:         "failed",
 			Error:          err.Error(),
 		})
+	}
+	response.Text, err = optimization.validateOutput(response.Text)
+	if err != nil {
+		return workflow.finishPromptOptimizationFailure(task, conversation, emit)
 	}
 
 	response.ID = task.ID

@@ -15,12 +15,15 @@ import type { ChatMessage, GenerationEntry } from "./generationTypes";
 const pendingGenerationStatuses = new Set([
 	"loading",
 	"streaming",
+	"preparing",
 	"submitting",
 	"submitted",
 	"running",
 	"pending",
 	"processing",
 	"queued",
+	"waiting_reconnect",
+	"importing",
 ]);
 
 const sortableTimeOf = (item: { createdAt?: string; updatedAt?: string }) => {

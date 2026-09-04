@@ -10,6 +10,7 @@ const presets: PromptPreset[] = [
 		name: "视频镜头",
 		prompt: "推轨镜头，运动自然。",
 		source: "user",
+		type: "video",
 	},
 	{
 		id: "style-cinematic",
@@ -28,6 +29,7 @@ const presets: PromptPreset[] = [
 		name: "角色多视图",
 		prompt: "同一角色三视图。",
 		source: "user",
+		type: "image",
 	},
 	{
 		id: "empty-style",
@@ -80,7 +82,9 @@ describe("promptInsertItemsFromPresets", () => {
 			expect.objectContaining({
 				categoryLabel: "通用",
 				sourceLabel: "用户新增",
+				type: "image",
 			}),
 		);
+		expect(items[2]?.type).toBe("video");
 	});
 });

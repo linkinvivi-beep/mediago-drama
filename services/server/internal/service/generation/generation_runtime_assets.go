@@ -21,8 +21,20 @@ func (workflow *GenerationService) resolveGenerationReferences(
 		return []string{}, nil
 	}
 
-	references, referenceAssetIDs := splitReferenceURLs(request.ReferenceURLs)
-	for _, assetID := range uniqueCompactStrings(append(referenceAssetIDs, request.ReferenceAssetIDs...)) {
+	ordered := orderedGenerationReferencesFromParams(request.Params)
+	if len(ordered) == 0 {
+		ordered = canonicalOrderedGenerationReferences(request)
+	}
+	if err := validateOrderedGenerationReferences(ordered); err != nil {
+		return nil, err
+	}
+	references := make([]string, 0, len(ordered))
+	for _, item := range ordered {
+		if strings.HasPrefix(item.Source, "url:") {
+			references = append(references, strings.TrimPrefix(item.Source, "url:"))
+			continue
+		}
+		assetID := strings.TrimPrefix(item.Source, "asset:")
 		asset, ok, err := workflow.mediaAssets.Get(assetID)
 		if err != nil {
 			return nil, err
@@ -204,27 +216,104 @@ func (workflow *GenerationService) cacheGenerationResponseAssetsWithOptions(
 	response coregeneration.Response,
 	options media.MediaAssetSaveOptions,
 ) coregeneration.Response {
-	if workflow.mediaAssets == nil || len(response.Assets) == 0 {
-		return response
+	response, _ = workflow.cacheGenerationResponseAssetsWithOptionsTracked(ctx, response, options)
+	return response
+}
+
+func (workflow *GenerationService) cacheGenerationResponseAssetsWithOptionsTracked(
+	ctx context.Context,
+	response coregeneration.Response,
+	options media.MediaAssetSaveOptions,
+) (coregeneration.Response, []string) {
+	response, receipt := workflow.cacheGenerationResponseAssetsWithOptionsReceipt(ctx, response, options, false)
+	return response, receipt.createdAssetIDs
+}
+
+func (workflow *GenerationService) cacheGenerationResponseAssetsWithOptionsClaimed(
+	ctx context.Context,
+	response coregeneration.Response,
+	options media.MediaAssetSaveOptions,
+) (coregeneration.Response, []media.MediaAssetClaim) {
+	response, receipt := workflow.cacheGenerationResponseAssetsWithOptionsReceipt(ctx, response, options, true)
+	return response, receipt.claims
+}
+
+type generationAssetCacheReceipt struct {
+	createdAssetIDs []string
+	claims          []media.MediaAssetClaim
+}
+
+func (workflow *GenerationService) cacheGenerationResponseAssetsWithOptionsReceipt(
+	ctx context.Context,
+	response coregeneration.Response,
+	options media.MediaAssetSaveOptions,
+	claimAssets bool,
+) (coregeneration.Response, generationAssetCacheReceipt) {
+	if len(response.Assets) == 0 {
+		return response, generationAssetCacheReceipt{}
 	}
 
 	warnings := []string{}
+	receipt := generationAssetCacheReceipt{}
+	codexImportFailed := false
 	for index, asset := range response.Assets {
-		cached, err := workflow.cacheGenerationAsset(ctx, asset, options)
+		internalCodexPayload, _ := asset.Metadata[codexImageInternalPayloadKey].(bool)
+		asset.Metadata = generationAssetMetadataWithoutInternalSources(asset.Metadata)
+		response.Assets[index].Metadata = asset.Metadata
+		var cached media.MediaAsset
+		var created bool
+		var claim media.MediaAssetClaim
+		var err error
+		switch {
+		case workflow.mediaAssets == nil:
+			if !internalCodexPayload {
+				continue
+			}
+			err = fmt.Errorf("MediaLink media asset store is unavailable")
+		case internalCodexPayload && ctx.Err() != nil:
+			err = ctx.Err()
+		default:
+			if claimAssets {
+				cached, claim, err = workflow.cacheGenerationAssetClaimed(ctx, asset, options)
+				created = claim.Created
+			} else {
+				cached, created, err = workflow.cacheGenerationAssetTracked(ctx, asset, options)
+			}
+		}
+		if internalCodexPayload && err == nil && cached.ID == "" {
+			err = fmt.Errorf("Codex image output did not produce a MediaLink asset")
+		}
+		if internalCodexPayload {
+			response.Assets[index].Base64 = ""
+			if err != nil {
+				response.Assets[index].URL = ""
+				codexImportFailed = true
+			}
+		}
 		if err != nil {
-			warnings = append(warnings, err.Error())
+			warning := err.Error()
+			if internalCodexPayload {
+				warning = "Codex image output could not be imported into MediaLink assets"
+			}
+			warnings = append(warnings, warning)
 			slog.Warn(
 				"generation asset cache failed",
 				"response_id", response.ID,
 				"model", response.Model,
 				"asset_kind", asset.Kind,
-				"asset_url", asset.URL,
+				"asset_url", sanitizedLogString(asset.URL),
 				"error", err,
 			)
 			continue
 		}
 		if cached.ID == "" {
 			continue
+		}
+		if created {
+			receipt.createdAssetIDs = append(receipt.createdAssetIDs, cached.ID)
+		}
+		if claim.AssetID != "" {
+			receipt.claims = append(receipt.claims, claim)
 		}
 
 		response.Assets[index].URL = cached.URL
@@ -241,6 +330,15 @@ func (workflow *GenerationService) cacheGenerationResponseAssetsWithOptions(
 			response.Assets[index].Metadata["poster_url"] = cached.PosterURL
 		}
 	}
+	if codexImportFailed {
+		if response.Metadata == nil {
+			response.Metadata = map[string]any{}
+		}
+		response.Status = "failed"
+		response.Metadata["error"] = "Codex image output could not be imported into MediaLink assets"
+		response.Metadata["failure_message"] = "图像已生成，但导入 MediaLink 素材库失败。"
+		response.Metadata["retryable"] = true
+	}
 	if len(warnings) > 0 {
 		if response.Metadata == nil {
 			response.Metadata = map[string]any{}
@@ -248,7 +346,7 @@ func (workflow *GenerationService) cacheGenerationResponseAssetsWithOptions(
 		response.Metadata["asset_cache_warnings"] = warnings
 	}
 
-	return response
+	return response, receipt
 }
 
 // CacheGenerationResponseAssets stores generated assets in the local media store when possible.
@@ -264,38 +362,116 @@ func (workflow *GenerationService) cacheGenerationAsset(
 	asset coregeneration.Asset,
 	options media.MediaAssetSaveOptions,
 ) (media.MediaAsset, error) {
+	cached, _, err := workflow.cacheGenerationAssetTracked(ctx, asset, options)
+	return cached, err
+}
+
+func (workflow *GenerationService) cacheGenerationAssetTracked(
+	ctx context.Context,
+	asset coregeneration.Asset,
+	options media.MediaAssetSaveOptions,
+) (media.MediaAsset, bool, error) {
 	kind := string(asset.Kind)
 	if asset.Base64 != "" {
-		cached, err := workflow.mediaAssets.SaveBase64WithOptions(kind, asset.MIMEType, asset.Base64, "", options)
+		cached, created, err := workflow.mediaAssets.SaveBase64WithOptionsTracked(kind, asset.MIMEType, asset.Base64, "", options)
 		if err != nil {
-			return media.MediaAsset{}, fmt.Errorf("saving base64 asset: %w", err)
+			return media.MediaAsset{}, false, fmt.Errorf("saving base64 asset: %w", err)
 		}
 
-		return cached, nil
+		return cached, created, nil
 	}
 	if asset.URL == "" || isLocalMediaAssetURL(asset.URL) {
-		return media.MediaAsset{}, nil
+		return media.MediaAsset{}, false, nil
 	}
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(asset.URL)), "data:") {
-		cached, err := workflow.mediaAssets.SaveBase64WithOptions(kind, asset.MIMEType, asset.URL, "", options)
+		cached, created, err := workflow.mediaAssets.SaveBase64WithOptionsTracked(kind, asset.MIMEType, asset.URL, "", options)
 		if err != nil {
-			return media.MediaAsset{}, fmt.Errorf("saving data uri asset: %w", err)
+			return media.MediaAsset{}, false, fmt.Errorf("saving data uri asset: %w", err)
 		}
 
-		return cached, nil
+		return cached, created, nil
 	}
 	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(asset.URL)), "http://") &&
 		!strings.HasPrefix(strings.ToLower(strings.TrimSpace(asset.URL)), "https://") {
-		return media.MediaAsset{}, fmt.Errorf("unsupported generated asset url %q", asset.URL)
+		return media.MediaAsset{}, false, fmt.Errorf("unsupported generated asset url scheme")
 	}
 
-	cached, err := workflow.mediaAssets.SaveRemoteAssetWithOptions(ctx, kind, asset.URL, options)
+	cached, created, err := workflow.mediaAssets.SaveRemoteAssetWithOptionsTracked(ctx, kind, asset.URL, options)
 	if err != nil {
-		return media.MediaAsset{}, fmt.Errorf("caching remote asset: %w", err)
+		return media.MediaAsset{}, false, fmt.Errorf("caching remote asset: %w", err)
 	}
 
 	cached = workflow.renameCachedGenerationAsset(cached, options, asset.URL)
-	return cached, nil
+	return cached, created, nil
+}
+
+func (workflow *GenerationService) cacheGenerationAssetClaimed(
+	ctx context.Context,
+	asset coregeneration.Asset,
+	options media.MediaAssetSaveOptions,
+) (media.MediaAsset, media.MediaAssetClaim, error) {
+	kind := string(asset.Kind)
+	if asset.Base64 != "" {
+		cached, claim, err := workflow.mediaAssets.SaveBase64WithOptionsClaimed(kind, asset.MIMEType, asset.Base64, "", options)
+		if err != nil {
+			return media.MediaAsset{}, media.MediaAssetClaim{}, fmt.Errorf("saving base64 asset: %w", err)
+		}
+		return cached, claim, nil
+	}
+	if asset.URL == "" || isLocalMediaAssetURL(asset.URL) {
+		return media.MediaAsset{}, media.MediaAssetClaim{}, nil
+	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(asset.URL)), "data:") {
+		cached, claim, err := workflow.mediaAssets.SaveBase64WithOptionsClaimed(kind, asset.MIMEType, asset.URL, "", options)
+		if err != nil {
+			return media.MediaAsset{}, media.MediaAssetClaim{}, fmt.Errorf("saving data uri asset: %w", err)
+		}
+		return cached, claim, nil
+	}
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(asset.URL)), "http://") &&
+		!strings.HasPrefix(strings.ToLower(strings.TrimSpace(asset.URL)), "https://") {
+		return media.MediaAsset{}, media.MediaAssetClaim{}, fmt.Errorf("unsupported generated asset url scheme")
+	}
+	cached, claim, err := workflow.mediaAssets.SaveRemoteAssetWithOptionsClaimed(ctx, kind, asset.URL, options)
+	if err != nil {
+		return media.MediaAsset{}, media.MediaAssetClaim{}, fmt.Errorf("caching remote asset: %w", err)
+	}
+	cached = workflow.renameCachedGenerationAsset(cached, options, asset.URL)
+	return cached, claim, nil
+}
+
+func (workflow *GenerationService) finalizeGenerationAssetClaims(claims []media.MediaAssetClaim, persisted bool) {
+	if workflow == nil || workflow.mediaAssets == nil || len(claims) == 0 {
+		return
+	}
+	if persisted {
+		for _, err := range workflow.mediaAssets.CommitGenerationAssetClaims(claims) {
+			slog.Warn("generation asset commit failed", "error", sanitizedLogString(err.Error()))
+		}
+		return
+	}
+	for _, err := range workflow.mediaAssets.CompensateGenerationAssetClaims(claims) {
+		slog.Warn("generation asset compensation failed", "error", sanitizedLogString(err.Error()))
+	}
+}
+
+func generationAssetMetadataWithoutInternalSources(metadata map[string]any) map[string]any {
+	if len(metadata) == 0 {
+		return nil
+	}
+	cleaned := make(map[string]any, len(metadata))
+	for key, value := range metadata {
+		switch strings.ToLower(strings.ReplaceAll(strings.TrimSpace(key), "_", "")) {
+		case "savedpath", "localpath", "medialinkinternalcodeximagepayload":
+			continue
+		default:
+			cleaned[key] = value
+		}
+	}
+	if len(cleaned) == 0 {
+		return nil
+	}
+	return cleaned
 }
 
 func (workflow *GenerationService) renameCachedGenerationAsset(

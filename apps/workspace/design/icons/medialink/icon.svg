@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title description">
+  <title id="title">MediaLink application icon</title>
+  <desc id="description">Two rounded, interlocking link strokes form an abstract letter M.</desc>
+  <defs>
+    <linearGradient id="background" x1="128" y1="96" x2="896" y2="928" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#171D46"/>
+      <stop offset="1" stop-color="#080C22"/>
+    </linearGradient>
+    <linearGradient id="left-link" x1="160" y1="704" x2="612" y2="254" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#23C7D9"/>
+      <stop offset="1" stop-color="#62F0BB"/>
+    </linearGradient>
+    <linearGradient id="right-link" x1="864" y1="704" x2="412" y2="254" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#796DFF"/>
+      <stop offset="1" stop-color="#FF718D"/>
+    </linearGradient>
+    <path id="left-stroke" d="M196 704V438c0-112 90-202 202-202 66 0 128 32 166 86l88 126"/>
+    <path id="right-stroke" d="M828 704V438c0-112-90-202-202-202-66 0-128 32-166 86l-88 126"/>
+  </defs>
+
+  <rect x="72" y="72" width="880" height="880" rx="220" fill="url(#background)"/>
+  <rect x="89" y="89" width="846" height="846" rx="203" fill="none" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="4"/>
+
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <use href="#left-stroke" stroke="#030617" stroke-opacity="0.48" stroke-width="154" transform="translate(0 16)"/>
+    <use href="#right-stroke" stroke="#030617" stroke-opacity="0.48" stroke-width="154" transform="translate(0 16)"/>
+    <use href="#left-stroke" stroke="url(#left-link)" stroke-width="128"/>
+    <use href="#right-stroke" stroke="#0A0F28" stroke-width="156"/>
+    <use href="#right-stroke" stroke="url(#right-link)" stroke-width="128"/>
+    <path d="M478 296c32-38 76-60 124-60 17 0 34 2 50 6" stroke="#0A0F28" stroke-width="156"/>
+    <path d="M478 296c32-38 76-60 124-60 17 0 34 2 50 6" stroke="url(#left-link)" stroke-width="128"/>
+  </g>
+</svg>

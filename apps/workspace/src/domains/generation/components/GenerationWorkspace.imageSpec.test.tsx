@@ -152,6 +152,7 @@ const workspaceDefaults = {
 	generationEntries: [],
 	hasConfiguredRoutesForKind: true,
 	hasLiveCatalog: true,
+	importReferenceFiles: vi.fn(),
 	isSubmitting: false,
 	isUploadingAsset: false,
 	kind: "image",
@@ -162,6 +163,7 @@ const workspaceDefaults = {
 	prompt: "",
 	promptInsertItems: [],
 	referenceCount: 0,
+	referenceImportProgress: null,
 	refreshVideo: vi.fn(),
 	removeMediaAsset: vi.fn(),
 	renameMediaAsset: vi.fn(),
@@ -313,6 +315,26 @@ describe("GenerationWorkspace image spec control", () => {
 
 		expect(screen.getByRole("dialog", { name: "选择参考图" })).toBeTruthy();
 		expect(screen.getByRole("button", { name: "上传" })).toBeTruthy();
+	});
+
+	it("passes composer file drops to the reference importer without submitting", () => {
+		const importReferenceFiles = vi.fn();
+		const submit = vi.fn((event: React.FormEvent<HTMLFormElement>) => event.preventDefault());
+		vi.mocked(useGenerationWorkspace).mockReturnValue({
+			...workspaceDefaults,
+			importReferenceFiles,
+			submit,
+		} as unknown as ReturnType<typeof useGenerationWorkspace>);
+		renderWorkspace();
+		const first = new File(["a"], "a.png", { type: "image/png" });
+		const second = new File(["b"], "b.png", { type: "image/png" });
+
+		fireEvent.drop(screen.getByTestId("generation-composer-drop-target"), {
+			dataTransfer: { files: [first, second], types: ["Files"] },
+		});
+
+		expect(importReferenceFiles).toHaveBeenCalledWith([first, second]);
+		expect(submit).not.toHaveBeenCalled();
 	});
 
 	it("keeps the studio prompt editor between 2 and 9 rows", () => {

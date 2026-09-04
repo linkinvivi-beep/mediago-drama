@@ -237,12 +237,15 @@ export const historySelectionText = (selection: EntrySelectionState) => {
 const failedGenerationStatuses = new Set(["failed", "error", "cancelled", "canceled"]);
 const pendingGenerationStatuses = new Set([
 	"loading",
+	"preparing",
 	"submitting",
 	"pending",
 	"processing",
 	"queued",
 	"running",
 	"submitted",
+	"waiting_reconnect",
+	"importing",
 ]);
 
 export const isFailedGenerationStatus = (status?: string) =>

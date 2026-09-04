@@ -3,6 +3,7 @@ import type { GenerationRoute, GenerationTask } from "@/domains/generation/api/g
 import {
 	generationCreatedAtDetail,
 	providerLabel,
+	providerTypeLabel,
 	userRequestDetails,
 	userTaskDetails,
 } from "./generationFormatters";
@@ -25,6 +26,10 @@ describe("generationCreatedAtDetail", () => {
 		expect(providerLabel("libtv")).toBe("LibTV");
 		expect(providerLabel("xiaoyunque")).toBe("小云雀");
 		expect(providerLabel("pippit")).toBe("小云雀");
+	});
+
+	it("labels custom AutoDL providers", () => {
+		expect(providerTypeLabel("custom")).toBe("自定义");
 	});
 
 	it("hides task params that are no longer declared by the route", () => {

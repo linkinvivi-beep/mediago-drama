@@ -18,7 +18,7 @@ import { generationModelsKey } from "@/domains/generation/api/generation";
 import { openExternalUrl } from "@/shared/desktop/actions";
 import { useSettingsNavigationStore } from "@/lib/stores/settings";
 import { ConfirmDialog } from "@/shared/components/callable/ConfirmDialog";
-import { Settings } from "./Settings";
+import { APIKeysPanel, Settings } from "./Settings";
 
 const swrMocks = vi.hoisted(() => ({
 	mutate: vi.fn(),
@@ -58,6 +58,15 @@ vi.mock("@/hooks/useToast", () => ({
 
 vi.mock("@/domains/settings/components/CodexSkillsPanel", () => ({
 	CodexSkillsPanel: () => <h2>Codex 全局技能</h2>,
+}));
+
+vi.mock("@/domains/settings/components/CodexAccessPanel", () => ({
+	CodexAccessPanel: () => (
+		<section>
+			<h2>Codex 生图接入</h2>
+			<p>使用 Codex 配额</p>
+		</section>
+	),
 }));
 
 vi.mock("@/shared/desktop/actions", () => ({
@@ -472,12 +481,57 @@ describe("Settings Codex skills page", () => {
 	);
 });
 
+describe("MediaLink generation settings visibility", () => {
+	afterEach(() => {
+		cleanup();
+	});
+
+	it("routes the legacy API key tab to Codex access without loading provider cards", async () => {
+		vi.clearAllMocks();
+		useSettingsNavigationStore.setState({ activeTab: "api-keys" });
+
+		renderVisibleSettings();
+
+		expect(await screen.findByRole("heading", { name: "Codex 生图接入" })).toBeInTheDocument();
+		expect(screen.getByText("使用 Codex 配额")).toBeInTheDocument();
+		expect(getAPIKeys).not.toHaveBeenCalled();
+		expect(getModelPlatforms).not.toHaveBeenCalled();
+	});
+});
+
+describe("Settings product identity", () => {
+	afterEach(() => {
+		cleanup();
+	});
+
+	it("renders the MediaLink settings shell without the upstream product name", async () => {
+		useSettingsNavigationStore.setState({ activeTab: "appearance" });
+		renderSettings();
+
+		expect(await screen.findByText("管理 MediaLink 工作区的基础偏好。")).toBeInTheDocument();
+		expect(screen.queryByText(/MediaGo Drama/)).not.toBeInTheDocument();
+	});
+});
+
 const renderSettings = () =>
 	render(
 		<MemoryRouter>
 			<SWRConfig value={{ provider: () => new Map() }}>
-				<Settings />
+				{useSettingsNavigationStore.getState().activeTab === "api-keys" ? (
+					<APIKeysPanel />
+				) : (
+					<Settings />
+				)}
 				<ConfirmDialog />
+			</SWRConfig>
+		</MemoryRouter>,
+	);
+
+const renderVisibleSettings = () =>
+	render(
+		<MemoryRouter>
+			<SWRConfig value={{ provider: () => new Map() }}>
+				<Settings />
 			</SWRConfig>
 		</MemoryRouter>,
 	);

@@ -1,8 +1,10 @@
 package generation
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -140,6 +142,171 @@ func TestGenerationTaskServicePersistToSQLite(t *testing.T) {
 	}
 	if ok {
 		t.Fatal("deleted task is still present")
+	}
+}
+
+func TestGenerationTaskServiceRuntimeStateRoundTrip(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "workspace.db")
+	service := NewGenerationTaskService(dbPath, nil)
+	want := GenerationTaskRuntimeState{
+		CodexThreadID: "thread-1",
+		CodexTurnID:   "turn-1",
+		CodexItemID:   "item-1",
+		RevisedPrompt: "cinematic portrait",
+		SavedPath:     "/tmp/medialink/job/output.png",
+		ComfyPromptID: "comfy-1",
+		SubmittedAt:   "2026-08-30T12:34:56Z",
+	}
+	if err := service.Upsert(GenerationTaskRecord{
+		ID:           "task-runtime-state",
+		Kind:         "image",
+		RouteID:      "codex.imagegen",
+		Prompt:       "portrait",
+		Status:       "waiting_reconnect",
+		RuntimeState: want,
+	}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+
+	restarted := NewGenerationTaskService(dbPath, nil)
+	got, ok, err := restarted.Get("task-runtime-state")
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("Get() ok = false, want persisted task")
+	}
+	if got.RuntimeState != want {
+		t.Fatalf("RuntimeState = %+v, want %+v", got.RuntimeState, want)
+	}
+
+	publicJSON, err := json.Marshal(GenerationTaskForClient(got))
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	for _, forbidden := range []string{"credential", "privateKey", "tunnelEndpoint", "rawCodexEvents", "metadata", "savedPath", want.SavedPath} {
+		if strings.Contains(string(publicJSON), forbidden) {
+			t.Fatalf("public task JSON %s contains forbidden field %q", publicJSON, forbidden)
+		}
+	}
+}
+
+func TestGenerationTaskRuntimeStateRoundTripsAutoDLIdentity(t *testing.T) {
+	service := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	want := GenerationTaskRuntimeState{
+		InstanceProfileID:      "instance-a",
+		WorkflowProfileID:      "zimage-t2i",
+		WorkflowProfileVersion: "v1",
+		WorkflowDigest:         "sha256:abc",
+		ComfyPromptID:          "prompt-123",
+		SubmittedAt:            "2026-08-30T12:00:00Z",
+	}
+	if err := service.Upsert(GenerationTaskRecord{ID: "task-a", Kind: "image", RuntimeState: want}); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := service.Get("task-a")
+	if err != nil || !ok || got.RuntimeState != want {
+		t.Fatalf("state = %+v, ok = %v, err = %v", got.RuntimeState, ok, err)
+	}
+}
+
+func TestGenerationTaskServiceRuntimeStateInvalidJSONReturnsDataError(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "workspace.db")
+	service := NewGenerationTaskService(dbPath, nil)
+	if err := service.Upsert(GenerationTaskRecord{
+		ID:     "task-invalid-runtime-state",
+		Kind:   "image",
+		Prompt: "portrait",
+		Status: "running",
+	}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+
+	db, err := repository.OpenWorkspaceDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenWorkspaceDB() error = %v", err)
+	}
+	if err := db.Model(&domain.GenerationTaskModel{}).
+		Where("id = ?", "task-invalid-runtime-state").
+		Update("runtime_state_json", `{not-json`).Error; err != nil {
+		t.Fatalf("corrupting runtime state fixture: %v", err)
+	}
+
+	_, ok, err := service.Get("task-invalid-runtime-state")
+	if err == nil {
+		t.Fatal("Get() error = nil, want invalid stored runtime state error")
+	}
+	if ok {
+		t.Fatal("Get() ok = true, want false when stored runtime state is invalid")
+	}
+	if !strings.Contains(err.Error(), "decoding generation task runtime state") || !strings.Contains(err.Error(), "invalid character") {
+		t.Fatalf("Get() error = %v, want wrapped runtime-state data error", err)
+	}
+}
+
+func TestGenerationTaskServiceListPendingImageRuntimeStatuses(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "workspace.db")
+	service := NewGenerationTaskService(dbPath, nil)
+	pendingStatuses := []string{"preparing", "queued", "submitting", "submitted", "running", "importing", "waiting_reconnect"}
+	for _, status := range append(append([]string{}, pendingStatuses...), "pending", "processing", "completed") {
+		providerTaskID := ""
+		if status != "pending" && status != "processing" && status != "completed" {
+			providerTaskID = "provider:" + status
+		}
+		if err := service.Upsert(GenerationTaskRecord{
+			ID:             "image-" + status,
+			ProviderTaskID: providerTaskID,
+			Kind:           "image",
+			Prompt:         "portrait",
+			Status:         status,
+		}); err != nil {
+			t.Fatalf("Upsert(%s) error = %v", status, err)
+		}
+	}
+
+	pending, err := service.ListPending(20)
+	if err != nil {
+		t.Fatalf("ListPending() error = %v", err)
+	}
+	gotIDs := make([]string, 0, len(pending))
+	for _, task := range pending {
+		gotIDs = append(gotIDs, task.ID)
+	}
+	wantIDs := make([]string, 0, len(pendingStatuses))
+	for _, status := range pendingStatuses {
+		wantIDs = append(wantIDs, "image-"+status)
+	}
+	sort.Strings(gotIDs)
+	sort.Strings(wantIDs)
+	if strings.Join(gotIDs, ",") != strings.Join(wantIDs, ",") {
+		t.Fatalf("ListPending() IDs = %v, want exactly %v", gotIDs, wantIDs)
+	}
+}
+
+func TestGenerationTaskServiceListPendingPrioritizesExpiredImageWithoutProviderID(t *testing.T) {
+	service := NewGenerationTaskService(filepath.Join(t.TempDir(), "workspace.db"), nil)
+	if err := service.Upsert(GenerationTaskRecord{
+		ID: "video-pending", ProviderTaskID: "video:provider", Kind: "video", Status: "running", Prompt: "video",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Upsert(GenerationTaskRecord{
+		ID:        "image-orphan",
+		Kind:      "image",
+		RouteID:   "codex.imagegen",
+		Status:    "running",
+		Prompt:    "image",
+		CreatedAt: time.Now().UTC().Add(-maxBackgroundImageGenerationAge - time.Minute).Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pending, err := service.ListPending(1)
+	if err != nil {
+		t.Fatalf("ListPending() error = %v", err)
+	}
+	if len(pending) != 1 || pending[0].ID != "image-orphan" {
+		t.Fatalf("ListPending(1) = %#v, want expired image orphan first", pending)
 	}
 }
 
@@ -1270,6 +1437,39 @@ func TestGenerationTaskServiceUpsertExistingDoesNotResurrectDeletedTask(t *testi
 		t.Fatalf("Get(deleted) error = %v", err)
 	} else if ok {
 		t.Fatal("deleted task was resurrected by a late background write")
+	}
+}
+
+func TestGenerationTaskServiceUpsertExistingActiveRejectsTerminalTask(t *testing.T) {
+	service := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	active := testCodexGenerationTask("task-active-cas", "waiting_reconnect")
+	active.ProviderTaskID = codexImageResponseIDPrefix + "thread-active-cas"
+	if err := service.Upsert(active); err != nil {
+		t.Fatal(err)
+	}
+	staleCompletion := active
+	staleCompletion.Status = "completed"
+	staleCompletion.Message = "stale provider completion"
+
+	terminal := active
+	terminal.Status = "completed"
+	terminal.Message = "completed by another poller"
+	if err := service.Upsert(terminal); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := service.UpsertExistingActive(staleCompletion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted {
+		t.Fatal("UpsertExistingActive() persisted stale completion over terminal task")
+	}
+	stored, found, err := service.Get(active.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() = found %v, err %v", found, err)
+	}
+	if stored.Message != "completed by another poller" {
+		t.Fatalf("message = %q, want concurrent terminal value", stored.Message)
 	}
 }
 

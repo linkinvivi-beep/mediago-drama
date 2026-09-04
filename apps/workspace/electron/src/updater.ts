@@ -10,32 +10,11 @@ import {
 
 const { autoUpdater } = electronUpdater;
 
-const defaultReleasePageUrl = "https://github.com/mediago-dev/mediago-drama/releases";
-
-// Flip to true after macOS code signing + notarization are set up in CI. Until then
-// electron-updater cannot install updates on unsigned mac builds (Squirrel.Mac refuses),
-// so mac falls back to opening the GitHub releases page in the browser.
-const macAutoUpdateEnabled = false;
-
-const resolveCapability = (): DesktopUpdateCapability => {
-	if (!app.isPackaged) {
-		return {
-			supportsAutoUpdate: false,
-			releasePageUrl: defaultReleasePageUrl,
-			reason: "非打包运行环境不支持应用内更新。",
-		};
-	}
-	if (process.platform === "darwin" && !macAutoUpdateEnabled) {
-		return {
-			supportsAutoUpdate: false,
-			releasePageUrl: defaultReleasePageUrl,
-			reason: "当前 macOS 版本未启用签名，请前往下载页更新。",
-		};
-	}
-	return { supportsAutoUpdate: true, releasePageUrl: defaultReleasePageUrl };
+const capability: DesktopUpdateCapability = {
+	supportsAutoUpdate: false,
+	releasePageUrl: "",
+	reason: "releaseFeedNotConfigured",
 };
-
-const capability = resolveCapability();
 
 let listenersAttached = false;
 

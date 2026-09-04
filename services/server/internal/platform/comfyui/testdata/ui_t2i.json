@@ -1,0 +1,15 @@
+{
+  "last_node_id": 9,
+  "last_link_id": 2,
+  "nodes": [
+    {"id": 4, "type": "CheckpointLoaderSimple", "inputs": [], "outputs": [{"name": "CLIP", "type": "CLIP", "links": [1]}], "widgets_values": ["model.safetensors"]},
+    {"id": 6, "type": "CLIPTextEncode", "inputs": [{"name": "clip", "type": "CLIP", "link": 1}], "outputs": [{"name": "CONDITIONING", "type": "CONDITIONING", "links": []}], "widgets_values": ["portrait"]},
+    {"id": 8, "type": "EmptyImage", "inputs": [], "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [2]}], "widgets_values": [1024, 1024]},
+    {"id": 9, "type": "SaveImage", "inputs": [{"name": "images", "type": "IMAGE", "link": 2}], "outputs": [], "widgets_values": ["MediaLink"]}
+  ],
+  "links": [[1, 4, 0, 6, 0, "CLIP"], [2, 8, 0, 9, 0, "IMAGE"]],
+  "groups": [],
+  "config": {},
+  "extra": {},
+  "version": 0.4
+}

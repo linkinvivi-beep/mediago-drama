@@ -35,6 +35,14 @@ var imageParamRegistry = map[ParamID]CanonicalParamSpec{
 		Min:   paramFloat(1),
 		Max:   paramFloat(10),
 	},
+	ParamSeed: {
+		ID:    ParamSeed,
+		Label: "Seed",
+		Type:  "number",
+		Group: ParamGroupOther,
+		Min:   paramFloat(-1),
+		Max:   paramFloat(2147483647),
+	},
 	ParamQuality: {
 		ID:    ParamQuality,
 		Label: "Quality",

@@ -1,7 +1,9 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { SWRConfig } from "swr";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { capabilitiesKey } from "@/domains/capabilities/api/capabilities";
 import { projectSettingsGeneralTab } from "@/lib/stores/settings";
-import { SettingsSidebarPanel } from "./ProjectNavigatorPanels";
+import { SettingsSidebarPanel, StudioTypesScreen } from "./ProjectNavigatorPanels";
 
 describe("SettingsSidebarPanel", () => {
 	afterEach(() => {
@@ -25,22 +27,52 @@ describe("SettingsSidebarPanel", () => {
 		expect(onSelectTab).toHaveBeenCalledWith("shortcuts");
 	});
 
-	it("shows API keys without the retired agent model profile entry", () => {
-		const onSelectTab = vi.fn();
-
+	it("labels the settings shell for MediaLink", () => {
 		render(
 			<SettingsSidebarPanel
 				activeTab="appearance"
 				isProjectSettings={false}
 				onBack={vi.fn()}
-				onSelectTab={onSelectTab}
+				onSelectTab={vi.fn()}
+			/>,
+		);
+
+		expect(screen.getByRole("heading", { level: 2, name: "MediaLink 设置" })).toBeInTheDocument();
+		expect(screen.queryByText(/MediaGo Drama/)).not.toBeInTheDocument();
+	});
+
+	it("does not expose the upstream GitHub help button", () => {
+		render(
+			<SWRConfig
+				value={{
+					fallback: { [capabilitiesKey]: { capabilities: [] } },
+					revalidateOnMount: false,
+				}}
+			>
+				<StudioTypesScreen
+					activeCapabilityId={null}
+					activeTab={null}
+					onOpenSettings={vi.fn()}
+					onSelectTab={vi.fn()}
+				/>
+			</SWRConfig>,
+		);
+
+		expect(screen.queryByRole("button", { name: "打开 GitHub 页面" })).not.toBeInTheDocument();
+	});
+
+	it("hides legacy API key and agent model entries", () => {
+		render(
+			<SettingsSidebarPanel
+				activeTab="appearance"
+				isProjectSettings={false}
+				onBack={vi.fn()}
+				onSelectTab={vi.fn()}
 			/>,
 		);
 
 		expect(screen.queryByRole("button", { name: "模型接入" })).toBeNull();
-
-		fireEvent.click(screen.getByRole("button", { name: "API 密钥" }));
-		expect(onSelectTab).toHaveBeenCalledWith("api-keys");
+		expect(screen.queryByRole("button", { name: "API 密钥" })).toBeNull();
 	});
 
 	it("shows the Codex access settings entry for Codex", () => {
@@ -104,8 +136,8 @@ describe("SettingsSidebarPanel", () => {
 			within(codexGroup as HTMLElement)
 				.getAllByRole("button")
 				.map((button) => button.textContent)
-				.slice(0, 4),
-		).toEqual(["API 密钥", "Codex 接入", "Codex 技能", "智能体指令"]);
+				.slice(0, 3),
+		).toEqual(["MediaLink 配置", "Codex 接入", "Codex 技能"]);
 
 		rerender(
 			<SettingsSidebarPanel
@@ -122,7 +154,7 @@ describe("SettingsSidebarPanel", () => {
 				.getAllByRole("button")
 				.map((button) => button.textContent)
 				.slice(0, 3),
-		).toEqual(["API 密钥", "Codex 技能", "智能体指令"]);
+		).toEqual(["MediaLink 配置", "Codex 技能", "智能体指令"]);
 	});
 
 	it("shows the app updates settings entry", () => {
@@ -202,7 +234,7 @@ describe("SettingsSidebarPanel", () => {
 		expect(screen.getByText("项目设置")).toBeTruthy();
 		expect(screen.getByRole("button", { name: "常规" }).className).toContain("bg-ide-list-active");
 		expect(screen.getByRole("button", { name: "基础设置" })).toBeTruthy();
-		expect(screen.getByRole("button", { name: "API 密钥" })).toBeTruthy();
+		expect(screen.queryByRole("button", { name: "API 密钥" })).toBeNull();
 
 		fireEvent.click(screen.getByRole("button", { name: "基础设置" }));
 		expect(onSelectTab).toHaveBeenCalledWith("appearance");

@@ -146,6 +146,22 @@ func (handler Settings) HandleCodexAccount(context *gin.Context) {
 	httpresponse.OK(context, account)
 }
 
+// HandleCodexImagePreflight godoc
+// @Summary 检查 Codex 生图就绪状态
+// @Description 读取共享 ChatGPT 登录和 Codex 生图能力，不启动生图任务且不返回凭证。
+// @Tags Settings
+// @Produce json
+// @Success 200 {object} SwaggerEnvelope
+// @Router /api/v1/settings/codex-image/preflight [get]
+func (handler Settings) HandleCodexImagePreflight(context *gin.Context) {
+	preflight, err := handler.service.GetCodexImagePreflight(context.Request.Context())
+	if err != nil {
+		writeSettingsError(context, err)
+		return
+	}
+	httpresponse.OK(context, preflight)
+}
+
 // HandlePostCodexAccountLogin godoc
 // @Summary 开始 ChatGPT 浏览器登录
 // @Description 使用内置 Codex app-server 发起共享全局 Codex 账号的浏览器 OAuth 登录。

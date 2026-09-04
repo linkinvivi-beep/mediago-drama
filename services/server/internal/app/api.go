@@ -8,6 +8,7 @@ import (
 
 	appevents "github.com/mediago-dev/mediago-drama/services/server/internal/app/events"
 	appworkspace "github.com/mediago-dev/mediago-drama/services/server/internal/app/workspace"
+	platformautodl "github.com/mediago-dev/mediago-drama/services/server/internal/platform/autodl"
 	"github.com/mediago-dev/mediago-drama/services/server/internal/platform/timestamp"
 	serviceagent "github.com/mediago-dev/mediago-drama/services/server/internal/service/agent"
 	servicebilling "github.com/mediago-dev/mediago-drama/services/server/internal/service/billing"
@@ -42,6 +43,9 @@ type apiHandler struct {
 	agentRuntime      *serviceagent.AgentRuntime
 	backendService    *serviceagent.AgentBackendService
 	settings          *servicesettings.Settings
+	autoDLTunnels     platformautodl.TunnelManager
+	autoDLAdmin       *servicegeneration.AutoDLWorkflowAdmin
+	autoDLScheduler   servicegeneration.InstanceScheduler
 	capability        *servicecapability.Service
 	billing           *servicebilling.Service
 	generation        *servicegeneration.GenerationService
@@ -174,10 +178,16 @@ func (handler *apiHandler) Close() error {
 	}
 	handler.workers.Wait()
 	var closeErr error
+	if handler.autoDLTunnels != nil {
+		closeErr = errors.Join(closeErr, handler.autoDLTunnels.CloseAll())
+	}
 	for _, extension := range handler.runtimeExtensions {
 		if extension != nil {
 			closeErr = errors.Join(closeErr, extension.Close())
 		}
+	}
+	if handler.mediaAssets != nil {
+		closeErr = errors.Join(closeErr, handler.mediaAssets.Close())
 	}
 	if handler.workspaceState != nil {
 		closeErr = errors.Join(closeErr, handler.workspaceState.Close())

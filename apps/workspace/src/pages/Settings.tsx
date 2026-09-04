@@ -73,6 +73,7 @@ import { getProjects, projectsKey } from "@/domains/projects/api/projects";
 import { isDesktopRuntime, openProjectDirectory } from "@/domains/projects/lib/project-directory";
 import { openExternalUrl, pickDesktopDirectory } from "@/shared/desktop/actions";
 import { UpdatesPanel } from "@/domains/settings/components/UpdatesPanel";
+import { AutoDLSettingsPanel } from "@/domains/settings/components/AutoDLSettingsPanel";
 
 const jianyingDraftSettingsEnabled: boolean = false;
 const customProvidersEnabled = import.meta.env.VITE_ENABLE_CUSTOM_PROVIDERS !== "false";
@@ -94,6 +95,7 @@ type SettingsTabValue =
 	| "codex-access"
 	| "codex-skills"
 	| "jianying-draft"
+	| "medialink-config"
 	| "updates"
 	| "shortcuts"
 	| DebugTabValue;
@@ -104,21 +106,20 @@ const isSettingsTabValue = (value: string): value is SettingsTabValue =>
 	value === "billing" ||
 	value === "codex-access" ||
 	value === "codex-skills" ||
+	value === "medialink-config" ||
 	value === "updates" ||
 	(jianyingDraftSettingsEnabled && value === "jianying-draft") ||
 	value === "shortcuts" ||
 	debugTabs.some((tab) => tab.value === value);
 
 const normalizeSettingsTab = (value: string) =>
-	value === "codex-relay"
+	value === "codex-relay" || value === "api-keys" || value === "agent-model-profiles"
 		? "codex-access"
-		: value === "agent-model-profiles"
-			? "api-keys"
-			: value === "prompt-templates" || value === "instructions"
-				? "instructions"
-				: value === "prompts" || value === "skills" || value === "prompt-library"
-					? "prompt-packs"
-					: value;
+		: value === "prompt-templates" || value === "instructions"
+			? "instructions"
+			: value === "prompts" || value === "skills" || value === "prompt-library"
+				? "prompt-packs"
+				: value;
 
 export const Settings: React.FC = () => {
 	const location = useLocation();
@@ -149,6 +150,7 @@ export const Settings: React.FC = () => {
 			{visibleTab === "billing" ? <BillingPanel /> : null}
 			{visibleTab === "codex-access" ? <CodexAccessPanel /> : null}
 			{visibleTab === "codex-skills" ? <CodexSkillsPanel /> : null}
+			{visibleTab === "medialink-config" ? <AutoDLSettingsPanel /> : null}
 			{visibleTab === "updates" ? <UpdatesPanel /> : null}
 			{visibleTab === "shortcuts" ? <ShortcutKeysPanel /> : null}
 
@@ -159,7 +161,7 @@ export const Settings: React.FC = () => {
 	);
 };
 
-const APIKeysPanel: React.FC = () => {
+export const APIKeysPanel: React.FC = () => {
 	const toast = useToast();
 	const { mutate: mutateGlobal } = useSWRConfig();
 	const { data, mutate, isLoading } = useSWR(apiKeysKey, getAPIKeys);
@@ -1322,7 +1324,7 @@ const AppearancePanel: React.FC<{
 	return (
 		<SettingsPanelLayout
 			title="基础设置"
-			description="管理工作区的基础偏好。"
+			description="管理 MediaLink 工作区的基础偏好。"
 			icon={<SlidersHorizontal className="size-4" />}
 		>
 			<div className="divide-y divide-border">

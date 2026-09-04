@@ -105,27 +105,28 @@ describe("generationStatusForSection", () => {
 		expect(generationStatusForSection(tasks, "doc-1", "sec-1")?.taskId).toBe("newer-pending");
 	});
 
-	it("prefers an in-progress task over a later failed one (生成中 wins over 失败)", () => {
+	it("lets a newer terminal attempt supersede an older pending attempt", () => {
 		const withLaterFailure = [
 			makeTask({
-				id: "earlier-pending",
+				id: "old-pending",
 				documentId: "doc-1",
 				sectionId: "sec-1",
 				status: "running",
-				updatedAt: "2026-01-01T00:00:00.000Z",
+				createdAt: "2026-01-01T00:00:00.000Z",
+				updatedAt: "2026-01-03T00:00:00.000Z",
 			}),
 			makeTask({
-				id: "latest-failed",
+				id: "new-failed",
 				documentId: "doc-1",
 				sectionId: "sec-1",
 				status: "failed",
 				error: "boom",
+				createdAt: "2026-01-02T00:00:00.000Z",
 				updatedAt: "2026-01-02T00:00:00.000Z",
 			}),
 		];
 		const status = generationStatusForSection(withLaterFailure, "doc-1", "sec-1");
-		expect(status?.taskId).toBe("earlier-pending");
-		expect(status?.kind).toBe("pending");
+		expect(status).toMatchObject({ taskId: "new-failed", kind: "failed", message: "boom" });
 	});
 
 	it("falls back to the latest terminal record when nothing is in progress", () => {

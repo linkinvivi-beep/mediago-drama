@@ -328,3 +328,29 @@ func TestSettingsHandlerValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestSettingsHandlerCodexImagePreflightReturnsNonSecretReadiness(t *testing.T) {
+	gin.SetMode(gin.ReleaseMode)
+	router := gin.New()
+	settings := service.NewSettings(nil)
+	settings.SetCodexCLIPath("")
+	handler := NewSettings(settings)
+	router.GET("/settings/codex-image/preflight", handler.HandleCodexImagePreflight)
+
+	request := httptest.NewRequest(http.MethodGet, "/settings/codex-image/preflight", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, body = %s", response.Code, response.Body.String())
+	}
+	want := `"data":{"accountStatus":"unavailable","imageGeneration":false,"ready":false,"reason":"cli_unavailable"}`
+	if !strings.Contains(response.Body.String(), want) {
+		t.Fatalf("GET body = %s, want non-secret readiness payload %s", response.Body.String(), want)
+	}
+	for _, forbidden := range []string{"apiKey", "token", "codexHome", "email"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("GET body = %s, contains forbidden field %q", response.Body.String(), forbidden)
+		}
+	}
+}

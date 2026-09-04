@@ -26,6 +26,7 @@ func TestOpenWorkspaceDBMigratesWorkspaceSchema(t *testing.T) {
 		&domain.DocumentEditStreamModel{},
 		&domain.AgentSessionModel{},
 		&domain.AssetModel{},
+		&domain.MediaAssetCleanupIntentModel{},
 		&domain.GenerationConversationModel{},
 		&domain.GenerationTaskModel{},
 		&domain.GenerationTaskAttemptModel{},
@@ -50,6 +51,18 @@ func TestOpenWorkspaceDBMigratesWorkspaceSchema(t *testing.T) {
 			t.Fatalf("expected table for %T to exist", model)
 		}
 	}
+	for _, indexed := range []struct {
+		model any
+		name  string
+	}{
+		{&domain.AssetModel{}, "assets_cleanup_pending_idx"},
+		{&domain.MediaAssetCleanupIntentModel{}, "media_cleanup_intents_stage_idx"},
+		{&domain.MediaAssetCleanupIntentModel{}, "media_cleanup_intents_next_attempt_idx"},
+	} {
+		if !db.Migrator().HasIndex(indexed.model, indexed.name) {
+			t.Fatalf("expected index %s to exist", indexed.name)
+		}
+	}
 
 	removedTables := []string{
 		"documents",
@@ -64,6 +77,55 @@ func TestOpenWorkspaceDBMigratesWorkspaceSchema(t *testing.T) {
 		if db.Migrator().HasTable(table) {
 			t.Fatalf("table %s should not be created", table)
 		}
+	}
+}
+
+func TestEnsureWorkspaceSchemaMigratesGenerationTaskRuntimeState(t *testing.T) {
+	db, err := OpenGormSQLite(filepath.Join(t.TempDir(), "legacy-workspace.sqlite"))
+	if err != nil {
+		t.Fatalf("OpenGormSQLite() error = %v", err)
+	}
+	if err := db.AutoMigrate(&domain.GenerationTaskModel{}); err != nil {
+		t.Fatalf("creating generation task schema fixture: %v", err)
+	}
+	now := domain.TimeFromString("2026-08-30T00:00:00Z")
+	if err := db.Create(&domain.GenerationTaskModel{
+		ID:         "legacy-task",
+		Kind:       "image",
+		RouteID:    "codex.imagegen",
+		FamilyID:   "codex-imagegen",
+		VersionID:  "builtin",
+		Provider:   "codex",
+		ModelID:    "codex.imagegen",
+		Model:      "Codex ImageGen",
+		Prompt:     "portrait",
+		ParamsJSON: "{}",
+		Status:     "queued",
+		Message:    "queued",
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}).Error; err != nil {
+		t.Fatalf("creating legacy generation task fixture: %v", err)
+	}
+	if err := db.Migrator().DropColumn(&domain.GenerationTaskModel{}, "RuntimeStateJSON"); err != nil {
+		t.Fatalf("dropping runtime state column for legacy fixture: %v", err)
+	}
+	if db.Migrator().HasColumn(&domain.GenerationTaskModel{}, "RuntimeStateJSON") {
+		t.Fatal("legacy fixture still has runtime_state_json")
+	}
+
+	if err := EnsureWorkspaceSchema(db); err != nil {
+		t.Fatalf("EnsureWorkspaceSchema() error = %v", err)
+	}
+	if !db.Migrator().HasColumn(&domain.GenerationTaskModel{}, "RuntimeStateJSON") {
+		t.Fatal("runtime_state_json column was not added")
+	}
+	got, err := NewGenerationTaskRepositoryFromDB(db).GetGenerationTask("legacy-task")
+	if err != nil {
+		t.Fatalf("GetGenerationTask() error = %v", err)
+	}
+	if got.RuntimeStateJSON != "{}" {
+		t.Fatalf("RuntimeStateJSON = %q, want default {}", got.RuntimeStateJSON)
 	}
 }
 

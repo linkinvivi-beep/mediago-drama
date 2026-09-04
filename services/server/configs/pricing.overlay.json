@@ -1,6 +1,21 @@
 {
   "prices": [
     {
+      "routeId": "codex.imagegen",
+      "currency": "CNY",
+      "unit": "external"
+    },
+    {
+      "routeId": "autodl.image",
+      "currency": "CNY",
+      "unit": "external"
+    },
+    {
+      "routeId": "autodl.minimax-h3",
+      "currency": "CNY",
+      "unit": "external"
+    },
+    {
       "routeId": "dmx.seedream-5-lite",
       "currency": "CNY",
       "unit": "per_call",

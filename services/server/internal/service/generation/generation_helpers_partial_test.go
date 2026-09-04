@@ -54,6 +54,27 @@ func TestGenerationTaskWithMessageIgnoresDeletedSlotsForPartial(t *testing.T) {
 	}
 }
 
+func TestGenerationTaskWithMessageClearsErrorsForRecoveryStatuses(t *testing.T) {
+	for _, status := range []string{"preparing", "importing", "waiting_reconnect"} {
+		t.Run(status, func(t *testing.T) {
+			task := GenerationTaskRecord{
+				ID:        "task-" + status,
+				Kind:      "image",
+				Status:    "failed",
+				Error:     "old provider error",
+				ErrorCode: "provider_error",
+				ErrorType: "provider_error",
+				Retryable: true,
+			}
+
+			merged := GenerationTaskWithMessage(task, GenerationMessageResponse{Status: status})
+			if merged.Error != "" || merged.ErrorCode != "" || merged.ErrorType != "" || merged.Retryable {
+				t.Fatalf("merged task = %+v, want active recovery state with old errors cleared", merged)
+			}
+		})
+	}
+}
+
 type assertableError string
 
 func (e assertableError) Error() string { return string(e) }

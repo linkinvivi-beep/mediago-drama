@@ -2,7 +2,9 @@ package generation
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -30,9 +32,14 @@ func (workflow *GenerationService) generateWithProvider(
 	response, err := provider.Generate(ctx, request)
 	duration := time.Since(startedAt)
 	if err != nil {
+		loggedError := err
+		if generationRequestHasSensitivePrompt(request) {
+			loggedError = errors.New("protected prompt generation failed")
+			err = errors.New("提示词优化执行失败")
+		}
 		slog.Warn(
 			"generation provider request failed",
-			append(logArgs, "duration_ms", duration.Milliseconds(), "error", err)...,
+			append(logArgs, "duration_ms", duration.Milliseconds(), "error", loggedError)...,
 		)
 		return response, err
 	}
@@ -69,6 +76,10 @@ func generationProviderLogArgs(
 }
 
 func sanitizedGenerationRequest(request coregeneration.Request) map[string]any {
+	prompt := request.Prompt
+	if generationRequestHasSensitivePrompt(request) {
+		prompt = "<protected-prompt-omitted>"
+	}
 	return map[string]any{
 		"kind":            request.Kind,
 		"route_id":        request.RouteID,
@@ -77,7 +88,7 @@ func sanitizedGenerationRequest(request coregeneration.Request) map[string]any {
 		"provider":        request.Provider,
 		"model_id":        request.ModelID,
 		"model":           request.Model,
-		"prompt":          request.Prompt,
+		"prompt":          prompt,
 		"prompt_bytes":    len(request.Prompt),
 		"reference_count": len(request.ReferenceURLs),
 		"reference_urls":  sanitizedReferenceURLs(request.ReferenceURLs),
@@ -87,6 +98,11 @@ func sanitizedGenerationRequest(request coregeneration.Request) map[string]any {
 		"params":          sanitizedLogValue(request.Params),
 		"options":         sanitizedLogValue(request.Options),
 	}
+}
+
+func generationRequestHasSensitivePrompt(request coregeneration.Request) bool {
+	value, _ := request.Options[generationSensitivePromptRequestOption].(bool)
+	return value
 }
 
 func sanitizedGenerationResponse(response coregeneration.Response) map[string]any {
@@ -146,7 +162,11 @@ func sanitizedReferenceURL(index int, value string) map[string]any {
 	}
 
 	reference["type"] = "url"
-	reference["value"] = sanitizedLogString(trimmed)
+	if strings.HasPrefix(strings.ToLower(trimmed), "http://") || strings.HasPrefix(strings.ToLower(trimmed), "https://") {
+		reference["value"] = "<remote-url-omitted>"
+	} else {
+		reference["value"] = sanitizedLogString(trimmed)
+	}
 	return reference
 }
 
@@ -171,6 +191,9 @@ func sanitizedLogValue(value any) any {
 	case map[string]any:
 		values := make(map[string]any, len(typed))
 		for key, item := range typed {
+			if strings.HasPrefix(key, generationInternalParamPrefix) || generationLogKeyIsInternalAssetSource(key) {
+				continue
+			}
 			values[key] = sanitizedLogValue(item)
 		}
 		return values
@@ -182,15 +205,36 @@ func sanitizedLogValue(value any) any {
 		return values
 	case coregeneration.ProgressCallback:
 		return "<progress-callback>"
+	case GenerationTaskRuntimeState:
+		return map[string]any{
+			"codexThreadId": typed.CodexThreadID,
+			"codexTurnId":   typed.CodexTurnID,
+			"codexItemId":   typed.CodexItemID,
+			"revisedPrompt": typed.RevisedPrompt,
+			"autoDLSubmissionState": typed.AutoDLSubmissionState,
+			"comfyPromptId": typed.ComfyPromptID,
+			"submittedAt":   typed.SubmittedAt,
+		}
 	default:
 		return value
 	}
+}
+
+func generationLogKeyIsInternalAssetSource(key string) bool {
+	normalized := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(key), "_", ""))
+	return normalized == "savedpath" || normalized == "localpath" || normalized == "medialinkinternalcodeximagepayload"
 }
 
 func sanitizedLogString(value string) string {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
 		return value
+	}
+	if strings.HasPrefix(trimmed, "/api/") {
+		return value
+	}
+	if filepath.IsAbs(trimmed) || strings.HasPrefix(strings.ToLower(trimmed), "file://") {
+		return "<local-path-omitted>"
 	}
 	metadata, encoded, ok := strings.Cut(trimmed, ",")
 	if ok && strings.HasPrefix(strings.ToLower(metadata), "data:") {

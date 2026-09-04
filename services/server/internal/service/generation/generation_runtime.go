@@ -27,6 +27,10 @@ type GenerationService struct {
 	mediaAssets                   *media.MediaAssets
 	documents                     GenerationDocumentResolver
 	generationProviderFactory     func(coregeneration.ModelRoute) (coregeneration.Provider, error)
+	legacyProviderFactory         func(coregeneration.ModelRoute) (coregeneration.Provider, error)
+	autoDLTaskCanceller           autoDLTaskCanceller
+	autoDLWorkflowResolver        AutoDLWorkflowResolver
+	mediaLinkReadiness            func(context.Context, string) (bool, string)
 	multimodalTextProviderFactory runtime.MultimodalTextProviderFactory
 	voicePreviews                 *VoicePreviewStore
 	stylePreviews                 *StylePreviewStore
@@ -43,6 +47,23 @@ type GenerationService struct {
 	pippitBinPath                 string
 	pippitBinDir                  string
 	jimengSeedanceQueueMu         sync.Mutex
+	generationRootCtx             context.Context
+	generationRootCancel          context.CancelFunc
+	generationCancelMu            sync.Mutex
+	generationCancels             map[string]map[*generationTaskCancellation]struct{}
+	generationPreflightCancels    map[string]map[*generationTaskCancellation]struct{}
+	generationDeleteMu            sync.Mutex
+	generationDeleting            map[string]int
+	// Test-only synchronization seams for the otherwise sub-millisecond
+	// claim/delete transfer window. Production construction leaves both nil.
+	generationRetryClaimedHook   func()
+	generationDeleteStartingHook func()
+	generationAssetsCachedHook   func(string)
+	generationSubmitFinishedHook func(string)
+}
+
+type generationTaskCancellation struct {
+	cancel context.CancelFunc
 }
 
 // SetTextCompletionService configures executor-neutral internal text completion.
@@ -62,7 +83,8 @@ func NewGenerationService(settings *settings.Settings, generationTasks *Generati
 	if len(generationPreferences) > 0 {
 		preferences = generationPreferences[0]
 	}
-	return &GenerationService{
+	rootCtx, rootCancel := context.WithCancel(context.Background())
+	service := &GenerationService{
 		settings:                      settings,
 		generationPreferences:         preferences,
 		generationTasks:               generationTasks,
@@ -70,7 +92,187 @@ func NewGenerationService(settings *settings.Settings, generationTasks *Generati
 		multimodalTextProviderFactory: defaultMultimodalTextProviderFactory,
 		voicePreviews:                 NewVoicePreviewStore(configassets.VoicePreviews),
 		stylePreviews:                 NewStylePreviewStore(configassets.StylePresets),
+		generationRootCtx:             rootCtx,
+		generationRootCancel:          rootCancel,
+		generationCancels:             map[string]map[*generationTaskCancellation]struct{}{},
+		generationPreflightCancels:    map[string]map[*generationTaskCancellation]struct{}{},
+		generationDeleting:            map[string]int{},
 	}
+	if settings != nil {
+		service.autoDLWorkflowResolver = NewAutoDLWorkflowResolver(settings)
+	}
+	return service
+}
+
+// SetGenerationRuntimeContext binds background generation jobs to app shutdown.
+func (workflow *GenerationService) SetGenerationRuntimeContext(parent context.Context) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	workflow.generationCancelMu.Lock()
+	oldCancel := workflow.generationRootCancel
+	workflow.generationRootCtx, workflow.generationRootCancel = context.WithCancel(parent)
+	workflow.generationCancelMu.Unlock()
+	if oldCancel != nil {
+		oldCancel()
+	}
+}
+
+func (workflow *GenerationService) launchSubmittedGeneration(task generationTaskRecord, provider coregeneration.Provider, request coregeneration.Request, action string, projectID string, conversationID string) {
+	ctx, done := workflow.generationTaskContext(task.ID)
+	workflow.launchClaimedSubmittedGeneration(ctx, done, task, provider, request, action, projectID, conversationID)
+}
+
+func (workflow *GenerationService) launchClaimedSubmittedGeneration(ctx context.Context, done func(), task generationTaskRecord, provider coregeneration.Provider, request coregeneration.Request, action string, projectID string, conversationID string) {
+	go func() {
+		defer done()
+		workflow.completeSubmittedGeneration(ctx, task, provider, request, action, projectID, conversationID)
+	}()
+}
+
+func (workflow *GenerationService) generationTaskContext(taskID string) (context.Context, func()) {
+	workflow.generationCancelMu.Lock()
+	ctx, entry := workflow.registerGenerationTaskContextLocked(taskID)
+	workflow.generationCancelMu.Unlock()
+	return ctx, workflow.generationTaskContextRelease(taskID, entry)
+}
+
+func (workflow *GenerationService) generationTaskLocallyOwned(taskID string) bool {
+	workflow.generationCancelMu.Lock()
+	owned := len(workflow.generationCancels[strings.TrimSpace(taskID)]) > 0
+	workflow.generationCancelMu.Unlock()
+	return owned
+}
+
+func (workflow *GenerationService) registerGenerationTaskContextLocked(taskID string) (context.Context, *generationTaskCancellation) {
+	parent := workflow.generationRootCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
+	entry := &generationTaskCancellation{cancel: cancel}
+	entries := workflow.generationCancels[taskID]
+	if entries == nil {
+		entries = map[*generationTaskCancellation]struct{}{}
+		workflow.generationCancels[taskID] = entries
+	}
+	entries[entry] = struct{}{}
+	return ctx, entry
+}
+
+func (workflow *GenerationService) generationTaskContextRelease(taskID string, entry *generationTaskCancellation) func() {
+	return func() {
+		if entry == nil {
+			return
+		}
+		workflow.generationCancelMu.Lock()
+		workflow.unregisterGenerationTaskContextLocked(taskID, entry)
+		workflow.generationCancelMu.Unlock()
+	}
+}
+
+func (workflow *GenerationService) unregisterGenerationTaskContextLocked(taskID string, entry *generationTaskCancellation) {
+	entry.cancel()
+	entries := workflow.generationCancels[taskID]
+	delete(entries, entry)
+	if len(entries) == 0 {
+		delete(workflow.generationCancels, taskID)
+	}
+}
+
+func (workflow *GenerationService) claimFailedCodexRetryContext(preflight context.Context, taskID string, message string) (GenerationTaskRuntimeState, context.Context, func(), bool, error) {
+	workflow.generationCancelMu.Lock()
+	defer workflow.generationCancelMu.Unlock()
+	if err := preflight.Err(); err != nil {
+		return GenerationTaskRuntimeState{}, nil, nil, false, err
+	}
+	if workflow.generationTaskDeletionRequested(taskID) {
+		return GenerationTaskRuntimeState{}, nil, nil, false, nil
+	}
+	ctx, entry := workflow.registerGenerationTaskContextLocked(taskID)
+	state, claimed, err := workflow.generationTasks.ClaimFailedCodexRetry(taskID, message)
+	if err != nil || !claimed {
+		workflow.unregisterGenerationTaskContextLocked(taskID, entry)
+		return state, nil, nil, claimed, err
+	}
+	if workflow.generationRetryClaimedHook != nil {
+		workflow.generationRetryClaimedHook()
+	}
+	return state, ctx, workflow.generationTaskContextRelease(taskID, entry), true, nil
+}
+
+// generationPreflightContext is caller-owned but also cancellable by task
+// deletion and app shutdown. It is deliberately kept separate from the
+// app-lifetime task registry used after a failed retry is atomically claimed.
+func (workflow *GenerationService) generationPreflightContext(taskID string, caller context.Context) (context.Context, func()) {
+	workflow.generationCancelMu.Lock()
+	parent := workflow.generationRootCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
+	stopCaller := func() bool { return false }
+	if caller != nil {
+		stopCaller = context.AfterFunc(caller, cancel)
+	}
+	entry := &generationTaskCancellation{cancel: cancel}
+	entries := workflow.generationPreflightCancels[taskID]
+	if entries == nil {
+		entries = map[*generationTaskCancellation]struct{}{}
+		workflow.generationPreflightCancels[taskID] = entries
+	}
+	entries[entry] = struct{}{}
+	workflow.generationCancelMu.Unlock()
+	return ctx, func() {
+		stopCaller()
+		cancel()
+		workflow.generationCancelMu.Lock()
+		entries := workflow.generationPreflightCancels[taskID]
+		delete(entries, entry)
+		if len(entries) == 0 {
+			delete(workflow.generationPreflightCancels, taskID)
+		}
+		workflow.generationCancelMu.Unlock()
+	}
+}
+
+func (workflow *GenerationService) cancelGenerationTask(taskID string) {
+	workflow.generationCancelMu.Lock()
+	workflow.cancelGenerationTaskLocked(taskID)
+	workflow.generationCancelMu.Unlock()
+}
+
+func (workflow *GenerationService) cancelGenerationTaskLocked(taskID string) {
+	entries := workflow.generationCancels[strings.TrimSpace(taskID)]
+	for entry := range entries {
+		entry.cancel()
+	}
+	preflightEntries := workflow.generationPreflightCancels[strings.TrimSpace(taskID)]
+	for entry := range preflightEntries {
+		entry.cancel()
+	}
+}
+
+func (workflow *GenerationService) markGenerationTaskDeleting(taskID string) func() {
+	taskID = strings.TrimSpace(taskID)
+	workflow.generationDeleteMu.Lock()
+	workflow.generationDeleting[taskID]++
+	workflow.generationDeleteMu.Unlock()
+	return func() {
+		workflow.generationDeleteMu.Lock()
+		workflow.generationDeleting[taskID]--
+		if workflow.generationDeleting[taskID] <= 0 {
+			delete(workflow.generationDeleting, taskID)
+		}
+		workflow.generationDeleteMu.Unlock()
+	}
+}
+
+func (workflow *GenerationService) generationTaskDeletionRequested(taskID string) bool {
+	workflow.generationDeleteMu.Lock()
+	deleting := workflow.generationDeleting[strings.TrimSpace(taskID)] > 0
+	workflow.generationDeleteMu.Unlock()
+	return deleting
 }
 
 // SetStylePromptLibrary wires the prompt library that owns style presets.
@@ -124,14 +326,9 @@ func (workflow *GenerationService) SetDocumentResolver(documents GenerationDocum
 
 // ListGenerationModels returns the generation model catalog for HTTP handlers.
 func (workflow *GenerationService) ListGenerationModels() generationModelsResponse {
-	catalog := coregeneration.Catalog()
-	mediagoModels, hasMediagoCatalog := workflow.mediagoAvailableModelsForCatalog(context.Background())
+	catalog := mediaLinkCatalog(coregeneration.Catalog())
 	for index := range catalog.Routes {
-		catalog.Routes[index].Configured = workflow.generationRouteConfiguredWithMediagoModels(
-			catalog.Routes[index],
-			mediagoModels,
-			hasMediagoCatalog,
-		)
+		catalog.Routes[index].Configured = workflow.generationRouteConfigured(catalog.Routes[index])
 	}
 
 	return generationModelsResponse{
@@ -192,6 +389,11 @@ func (workflow *GenerationService) CreateGenerationMessage(ctx context.Context, 
 		payload.Kind = string(coregeneration.KindImage)
 	}
 	payload.Params = NormalizeGenerationParams(payload.Params)
+	orderedReferences := canonicalOrderedGenerationReferences(payload)
+	if err := validateOrderedGenerationReferences(orderedReferences); err != nil {
+		return generationMessageResponse{}, http.StatusBadRequest, err
+	}
+	payload.Params = generationParamsWithOrderedReferences(payload.Params, orderedReferences)
 	if payload.Prompt == "" {
 		return generationMessageResponse{}, http.StatusBadRequest, fmt.Errorf("缺少 prompt")
 	}
@@ -213,7 +415,7 @@ func (workflow *GenerationService) CreateGenerationMessage(ctx context.Context, 
 	if payload.ModelID == "" {
 		payload.ModelID = route.LegacyModelID
 	}
-	if err := workflow.requireGenerationRouteConfigured(route); err != nil {
+	if err := workflow.requireGenerationRouteConfiguredContext(ctx, route); err != nil {
 		return generationMessageResponse{}, http.StatusServiceUnavailable, err
 	}
 	conversation, status, err := workflow.resolveGenerationConversationWithScopeFilter(payload.ConversationID, payload.ScopeID, payload.Kind, hasScopeFilter)
@@ -237,11 +439,22 @@ func (workflow *GenerationService) CreateGenerationMessage(ctx context.Context, 
 	payload.Model = generationModelForReferences(route, payload.Model, referenceURLs)
 
 	generationRequest := GenerationRequestFromMessage(payload, route, referenceURLs)
+	if isAutoDLGenerationRouteID(route.ID) {
+		resolved, resolveErr := workflow.resolveAutoDLWorkflowForNewTask(ctx, generationRequest)
+		if resolveErr != nil {
+			return generationMessageResponse{}, http.StatusServiceUnavailable, resolveErr
+		}
+		generationRequest.WorkflowProfileID = resolved.ProfileID
+		if generationRequest.Options == nil {
+			generationRequest.Options = make(map[string]any)
+		}
+		generationRequest.Options[generationAutoDLWorkflowSnapshotOption] = resolved
+	}
 	generationRequest.Prompt = workflow.providerPromptForGeneration(route, payload)
 	if err := coregeneration.ValidateRequestForRoute(generationRequest, route); err != nil {
 		return generationMessageResponse{}, http.StatusBadRequest, err
 	}
-	provider, err := workflow.newGenerationProvider(route)
+	provider, err := workflow.newGenerationProviderContext(ctx, route)
 	if err != nil {
 		return generationMessageResponse{}, http.StatusServiceUnavailable, err
 	}
@@ -289,7 +502,7 @@ func (workflow *GenerationService) CreateGenerationMessage(ctx context.Context, 
 		workflow.trackGenerationNotificationTarget(task, payload.NotificationTarget)
 		workflow.syncGenerationNotificationTask(task)
 		_ = workflow.generationTasks.RecordAttempt(task.ID, "create", messageResponse.Status, messageResponse.Message, nil)
-		go workflow.completeSubmittedGeneration(context.Background(), task, provider, generationRequest, "create", projectID, payload.ConversationID)
+		workflow.launchSubmittedGeneration(task, provider, generationRequest, "create", projectID, payload.ConversationID)
 		return messageResponse, http.StatusOK, nil
 	}
 
@@ -317,9 +530,10 @@ func (workflow *GenerationService) CreateGenerationMessage(ctx context.Context, 
 		}
 		return messageResponse, http.StatusOK, nil
 	}
-	response = workflow.cacheGenerationResponseAssetsWithOptions(ctx, response, generationMediaSaveOptionsWithTitle(projectID, payload.ConversationID, payload.SectionID, payload.AssetTitle))
+	response, assetClaims := workflow.cacheGenerationResponseAssetsWithOptionsClaimed(ctx, response, generationMediaSaveOptionsWithTitle(projectID, payload.ConversationID, payload.SectionID, payload.AssetTitle))
 
 	messageResponse := generationResponseWithAssetTitle(GenerationResponseFromCore(response, payload.Kind), payload.AssetTitle)
+	persistedAssets := !ShouldPersistGenerationTask(route)
 	if ShouldPersistGenerationTask(route) {
 		task := GenerationTaskFromMessage(payload, route, messageResponse)
 		// A synchronous completed task has no persisted notification yet. Suppress
@@ -334,12 +548,14 @@ func (workflow *GenerationService) CreateGenerationMessage(ctx context.Context, 
 		if persistErr != nil {
 			messageResponse.Message = AppendStorageWarning(messageResponse.Message, persistErr)
 		} else {
+			persistedAssets = true
 			messageResponse.Assets = generationAssetsWithTaskSlots(task.ID, task.Assets)
 			workflow.trackGenerationNotificationTarget(task, payload.NotificationTarget)
 			workflow.syncGenerationNotificationTask(task)
 			_ = workflow.generationTasks.RecordAttempt(task.ID, "create", messageResponse.Status, messageResponse.Message, nil)
 		}
 	}
+	workflow.finalizeGenerationAssetClaims(assetClaims, persistedAssets)
 	workflow.appendStudioAssistantTranscript(conversation, messageResponse)
 
 	return messageResponse, http.StatusOK, nil

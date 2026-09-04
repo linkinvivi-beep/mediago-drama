@@ -57,6 +57,8 @@ type GenerationMessageRequest struct {
 	FamilyID           string                               `json:"familyId,omitempty"`
 	VersionID          string                               `json:"versionId,omitempty"`
 	Provider           string                               `json:"provider,omitempty"`
+	InstanceProfileID  string                               `json:"instanceProfileId,omitempty"`
+	WorkflowProfileID  string                               `json:"workflowProfileId,omitempty"`
 	TextExecutor       string                               `json:"textExecutor,omitempty"`
 	ModelID            string                               `json:"modelId"`
 	Model              string                               `json:"model"`
@@ -205,17 +207,18 @@ type ImportGenerationMediaAssetsRequest struct {
 
 // GenerationMessageResponse is returned by generation create/poll/retry calls.
 type GenerationMessageResponse struct {
-	ID        string            `json:"id"`
-	Role      string            `json:"role"`
-	Status    string            `json:"status"`
-	Message   string            `json:"message"`
-	Text      string            `json:"text,omitempty"`
-	Assets    []GenerationAsset `json:"assets"`
-	Usage     GenerationUsage   `json:"usage"`
-	Error     string            `json:"error,omitempty"`
-	ErrorCode string            `json:"errorCode,omitempty"`
-	ErrorType string            `json:"errorType,omitempty"`
-	Retryable bool              `json:"retryable,omitempty"`
+	ID           string                     `json:"id"`
+	Role         string                     `json:"role"`
+	Status       string                     `json:"status"`
+	Message      string                     `json:"message"`
+	Text         string                     `json:"text,omitempty"`
+	Assets       []GenerationAsset          `json:"assets"`
+	Usage        GenerationUsage            `json:"usage"`
+	RuntimeState GenerationTaskRuntimeState `json:"runtimeState"`
+	Error        string                     `json:"error,omitempty"`
+	ErrorCode    string                     `json:"errorCode,omitempty"`
+	ErrorType    string                     `json:"errorType,omitempty"`
+	Retryable    bool                       `json:"retryable,omitempty"`
 }
 
 // GenerationTextStreamEvent is one server-sent event for text generation.
@@ -305,6 +308,24 @@ type GenerationUsage struct {
 	CachedTokens    int `json:"cachedTokens"`
 }
 
+// GenerationTaskRuntimeState contains only non-secret identifiers and recovery data.
+type GenerationTaskRuntimeState struct {
+	LocalTaskID            string `json:"-"`
+	CodexThreadID          string `json:"codexThreadId,omitempty"`
+	CodexTurnID            string `json:"codexTurnId,omitempty"`
+	CodexItemID            string `json:"codexItemId,omitempty"`
+	RevisedPrompt          string `json:"revisedPrompt,omitempty"`
+	SavedPath              string `json:"savedPath,omitempty"`
+	InstanceProfileID      string `json:"instanceProfileId,omitempty"`
+	WorkflowProfileID      string `json:"workflowProfileId,omitempty"`
+	WorkflowProfileVersion string `json:"workflowProfileVersion,omitempty"`
+	WorkflowDigest         string `json:"workflowDigest,omitempty"`
+	APITemplateDigest      string `json:"apiTemplateDigest,omitempty"`
+	AutoDLSubmissionState string `json:"autoDLSubmissionState,omitempty"`
+	ComfyPromptID          string `json:"comfyPromptId,omitempty"`
+	SubmittedAt            string `json:"submittedAt,omitempty"`
+}
+
 // GenerationTaskRecord is a persisted generation task.
 type GenerationTaskRecord struct {
 	ID                string                        `json:"id"`
@@ -331,6 +352,7 @@ type GenerationTaskRecord struct {
 	ReferenceURLs     []string                      `json:"referenceUrls"`
 	ReferenceAssetIDs []string                      `json:"referenceAssetIds"`
 	Params            map[string]any                `json:"params"`
+	RuntimeState      GenerationTaskRuntimeState    `json:"runtimeState"`
 	Status            string                        `json:"status"`
 	Message           string                        `json:"message"`
 	Text              string                        `json:"text,omitempty"`

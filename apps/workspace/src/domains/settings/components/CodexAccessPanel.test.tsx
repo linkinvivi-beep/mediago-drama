@@ -1,14 +1,26 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { SWRConfig } from "swr";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { StrictMode } from "react";
 import {
 	beginCodexAccountLogin,
 	getCodexAccount,
 	getCodexAccountLogin,
-	getCodexRelaySettings,
+	getCodexImagePreflight,
+	logoutCodexAccount,
 } from "@/domains/settings/api/settings";
 import { openExternalUrl } from "@/shared/desktop/actions";
 import { CodexAccessPanel } from "./CodexAccessPanel";
+
+const testSpies = vi.hoisted(() => ({
+	confirmDialog: vi.fn(),
+	toast: {
+		error: vi.fn(),
+		info: vi.fn(),
+		success: vi.fn(),
+		warning: vi.fn(),
+	},
+}));
 
 vi.mock("@/domains/settings/api/settings", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("@/domains/settings/api/settings")>();
@@ -18,64 +30,29 @@ vi.mock("@/domains/settings/api/settings", async (importOriginal) => {
 		cancelCodexAccountLogin: vi.fn(),
 		getCodexAccount: vi.fn(),
 		getCodexAccountLogin: vi.fn(),
-		getCodexRelaySettings: vi.fn(),
+		getCodexImagePreflight: vi.fn(),
 		logoutCodexAccount: vi.fn(),
-		saveCodexRelaySettings: vi.fn(),
 	};
 });
-
-vi.mock("@/domains/settings/components/CodexRelayPanel", () => ({
-	CodexRelayPanel: ({
-		officialChannel,
-		title,
-	}: {
-		officialChannel?: {
-			busy: boolean;
-			detail?: string;
-			email?: string;
-			onLogin: () => void;
-			onLogout: () => void;
-			onReopen: () => void;
-			status: string;
-		};
-		title?: unknown;
-	}) => (
-		<div>
-			<h2>{String(title)}</h2>
-			<p>{officialChannel?.email}</p>
-			<p>{officialChannel?.detail}</p>
-			{officialChannel?.status === "loggedIn" ? (
-				<button type="button" onClick={officialChannel.onLogout}>
-					退出全局账号
-				</button>
-			) : null}
-			{officialChannel?.status === "loggedOut" ? (
-				<button type="button" onClick={officialChannel.onLogin}>
-					使用 ChatGPT 登录
-				</button>
-			) : null}
-			{officialChannel?.status === "pending" ? (
-				<button type="button" onClick={officialChannel.onReopen}>
-					重新打开浏览器
-				</button>
-			) : null}
-		</div>
-	),
-}));
 
 vi.mock("@/shared/desktop/actions", () => ({ openExternalUrl: vi.fn() }));
 
 vi.mock("@/hooks/useToast", () => ({
-	useToast: () => ({ error: vi.fn(), info: vi.fn(), success: vi.fn(), warning: vi.fn() }),
+	useToast: () => testSpies.toast,
+}));
+
+vi.mock("@/shared/components/callable/ConfirmDialog", () => ({
+	confirmDialog: testSpies.confirmDialog,
 }));
 
 describe("CodexAccessPanel", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
-		vi.mocked(getCodexRelaySettings).mockResolvedValue({
-			enabled: false,
-			activeProfileId: "",
-			profiles: [],
+		vi.mocked(getCodexImagePreflight).mockResolvedValue({
+			accountStatus: "loggedIn",
+			imageGeneration: true,
+			ready: true,
+			reason: "ready",
 		});
 	});
 
@@ -94,8 +71,420 @@ describe("CodexAccessPanel", () => {
 
 		expect(await screen.findByText("user@example.com")).toBeInTheDocument();
 		expect(screen.getByText("ChatGPT Plus · /Users/test/.codex")).toBeInTheDocument();
+		expect(screen.getByText("Codex 生图已就绪")).toBeInTheDocument();
+		expect(screen.getByRole("status")).toHaveTextContent("Codex 生图已就绪");
+		expect(screen.getByText("生图会使用当前 ChatGPT 账号的 Codex 配额。")).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: "刷新并测试" })).toBeInTheDocument();
 		expect(screen.getByRole("button", { name: "退出全局账号" })).toBeInTheDocument();
 		expect(beginCodexAccountLogin).not.toHaveBeenCalled();
+	});
+
+	it("shows the not logged in preflight state", async () => {
+		vi.mocked(getCodexAccount).mockResolvedValue({
+			status: "notLoggedIn",
+			codexHome: "/Users/test/.codex",
+			shared: true,
+		});
+		vi.mocked(getCodexImagePreflight).mockResolvedValue({
+			accountStatus: "notLoggedIn",
+			imageGeneration: false,
+			ready: false,
+			reason: "not_logged_in",
+		});
+
+		renderPanel();
+
+		expect(await screen.findByText("尚未登录 ChatGPT")).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: "使用 ChatGPT 登录" })).toBeInTheDocument();
+	});
+
+	it("shows capability unavailable without offering API credentials", async () => {
+		vi.mocked(getCodexAccount).mockResolvedValue({
+			status: "loggedIn",
+			email: "user@example.com",
+			planType: "plus",
+			codexHome: "/Users/test/.codex",
+			shared: true,
+		});
+		vi.mocked(getCodexImagePreflight).mockResolvedValue({
+			accountStatus: "loggedIn",
+			imageGeneration: false,
+			ready: false,
+			reason: "capability_unavailable",
+		});
+
+		renderPanel();
+
+		expect(await screen.findByText("无法读取 Codex 生图能力")).toBeInTheDocument();
+		expect(screen.queryByText(/API Key/i)).not.toBeInTheDocument();
+		expect(screen.queryByText(/Base URL/i)).not.toBeInTheDocument();
+		expect(screen.queryByText(/Image API/i)).not.toBeInTheDocument();
+	});
+
+	it("shows a refresh failure and keeps the last readiness result", async () => {
+		vi.mocked(getCodexAccount).mockResolvedValue({
+			status: "loggedIn",
+			email: "user@example.com",
+			planType: "plus",
+			codexHome: "/Users/test/.codex",
+			shared: true,
+		});
+		vi.mocked(getCodexImagePreflight)
+			.mockResolvedValueOnce({
+				accountStatus: "loggedIn",
+				imageGeneration: true,
+				ready: true,
+				reason: "ready",
+			})
+			.mockRejectedValueOnce(new Error("connection closed"));
+
+		renderPanel();
+		fireEvent.click(await screen.findByRole("button", { name: "刷新并测试" }));
+
+		expect(await screen.findByRole("alert")).toHaveTextContent("检查失败：connection closed");
+		expect(screen.getByText("Codex 生图已就绪")).toBeInTheDocument();
+	});
+
+	it("keeps a completed login successful when preflight refresh fails", async () => {
+		vi.mocked(getCodexAccount)
+			.mockResolvedValueOnce({
+				status: "notLoggedIn",
+				codexHome: "/Users/test/.codex",
+				shared: true,
+			})
+			.mockResolvedValue({
+				status: "loggedIn",
+				email: "user@example.com",
+				planType: "plus",
+				codexHome: "/Users/test/.codex",
+				shared: true,
+			});
+		vi.mocked(getCodexImagePreflight)
+			.mockResolvedValueOnce({
+				accountStatus: "notLoggedIn",
+				imageGeneration: false,
+				ready: false,
+				reason: "not_logged_in",
+			})
+			.mockRejectedValue(new Error("preflight offline"));
+		vi.mocked(beginCodexAccountLogin).mockResolvedValue({
+			loginId: "login-completed",
+			status: "pending",
+		});
+		vi.mocked(getCodexAccountLogin).mockResolvedValue({
+			loginId: "login-completed",
+			status: "completed",
+		});
+
+		renderPanel();
+		fireEvent.click(await screen.findByRole("button", { name: "使用 ChatGPT 登录" }));
+
+		await waitFor(() =>
+			expect(testSpies.toast.success).toHaveBeenCalledWith("ChatGPT 登录成功", {
+				description: "已复用全局 Codex 登录态。",
+			}),
+		);
+		expect(testSpies.toast.error).not.toHaveBeenCalledWith("检查登录状态失败", expect.anything());
+		await waitFor(() =>
+			expect(testSpies.toast.warning).toHaveBeenCalledWith("Codex 生图状态刷新失败", {
+				description: "preflight offline",
+			}),
+		);
+	});
+
+	it("returns logout success when preflight refresh fails", async () => {
+		vi.mocked(getCodexAccount).mockResolvedValue({
+			status: "loggedIn",
+			email: "user@example.com",
+			planType: "plus",
+			codexHome: "/Users/test/.codex",
+			shared: true,
+		});
+		vi.mocked(getCodexImagePreflight)
+			.mockResolvedValueOnce({
+				accountStatus: "loggedIn",
+				imageGeneration: true,
+				ready: true,
+				reason: "ready",
+			})
+			.mockRejectedValue(new Error("preflight offline"));
+		vi.mocked(logoutCodexAccount).mockResolvedValue({
+			status: "notLoggedIn",
+			codexHome: "/Users/test/.codex",
+			shared: true,
+		});
+		let logoutResult: Promise<boolean> | undefined;
+		testSpies.confirmDialog.mockImplementation(
+			(input: { onConfirm: () => boolean | Promise<boolean> }) => {
+				logoutResult = Promise.resolve(input.onConfirm());
+			},
+		);
+
+		renderPanel();
+		fireEvent.click(await screen.findByRole("button", { name: "退出全局账号" }));
+		await waitFor(() => expect(logoutResult).toBeDefined());
+
+		await expect(logoutResult).resolves.toBe(true);
+		expect(testSpies.toast.success).toHaveBeenCalledWith("已退出全局 Codex 账号");
+		expect(testSpies.toast.error).not.toHaveBeenCalledWith("退出失败", expect.anything());
+		await waitFor(() =>
+			expect(testSpies.toast.warning).toHaveBeenCalledWith("Codex 生图状态刷新失败", {
+				description: "preflight offline",
+			}),
+		);
+	});
+
+	it("does not publish a late manual refresh failure after unmount", async () => {
+		vi.mocked(getCodexAccount).mockResolvedValue({
+			status: "loggedIn",
+			email: "user@example.com",
+			planType: "plus",
+			codexHome: "/Users/test/.codex",
+			shared: true,
+		});
+		const latePreflight = deferredPromise<never>();
+		vi.mocked(getCodexImagePreflight)
+			.mockResolvedValueOnce({
+				accountStatus: "loggedIn",
+				imageGeneration: true,
+				ready: true,
+				reason: "ready",
+			})
+			.mockImplementationOnce(() => latePreflight.promise);
+
+		const view = renderPanel();
+		fireEvent.click(await screen.findByRole("button", { name: "刷新并测试" }));
+		view.unmount();
+		await act(async () => {
+			latePreflight.reject(new Error("late failure"));
+			await Promise.resolve();
+		});
+
+		expect(testSpies.toast.error).not.toHaveBeenCalledWith("Codex 生图检查失败", {
+			description: "late failure",
+		});
+	});
+
+	it("disables a pending manual refresh and exposes its accessible busy state", async () => {
+		const loggedInAccount = {
+			status: "loggedIn" as const,
+			email: "user@example.com",
+			planType: "plus",
+			codexHome: "/Users/test/.codex",
+			shared: true,
+		};
+		const pendingAccount = deferredPromise<typeof loggedInAccount>();
+		const pendingPreflight = deferredPromise<{
+			accountStatus: string;
+			imageGeneration: boolean;
+			ready: boolean;
+			reason: string;
+		}>();
+		vi.mocked(getCodexAccount)
+			.mockResolvedValueOnce(loggedInAccount)
+			.mockImplementationOnce(() => pendingAccount.promise);
+		vi.mocked(getCodexImagePreflight)
+			.mockResolvedValueOnce({
+				accountStatus: "loggedIn",
+				imageGeneration: true,
+				ready: true,
+				reason: "ready",
+			})
+			.mockImplementationOnce(() => pendingPreflight.promise);
+
+		renderPanel();
+		const refresh = await screen.findByRole("button", { name: "刷新并测试" });
+		fireEvent.click(refresh);
+		await waitFor(() => expect(getCodexImagePreflight).toHaveBeenCalledTimes(2));
+		const busyRefresh = screen.getByRole("button", { name: "正在刷新并测试" });
+		expect(busyRefresh).toBeDisabled();
+		expect(busyRefresh).toHaveAttribute("aria-busy", "true");
+		fireEvent.click(busyRefresh);
+
+		expect(getCodexAccount).toHaveBeenCalledTimes(2);
+		expect(getCodexImagePreflight).toHaveBeenCalledTimes(2);
+
+		await act(async () => {
+			pendingAccount.resolve(loggedInAccount);
+			pendingPreflight.resolve({
+				accountStatus: "loggedIn",
+				imageGeneration: true,
+				ready: true,
+				reason: "ready",
+			});
+			await Promise.resolve();
+		});
+	});
+
+	it("lets a completed login supersede a pending manual refresh without leaving it busy", async () => {
+		const loggedInAccount = {
+			status: "loggedIn" as const,
+			email: "user@example.com",
+			planType: "plus",
+			codexHome: "/Users/test/.codex",
+			shared: true,
+		};
+		const loginAttempt = deferredPromise<{
+			loginId: string;
+			status: "completed";
+		}>();
+		const manualAccount = deferredPromise<typeof loggedInAccount>();
+		const manualPreflight = deferredPromise<{
+			accountStatus: string;
+			imageGeneration: boolean;
+			ready: boolean;
+			reason: string;
+		}>();
+		vi.mocked(getCodexAccount)
+			.mockResolvedValueOnce({
+				status: "notLoggedIn",
+				codexHome: "/Users/test/.codex",
+				shared: true,
+			})
+			.mockImplementationOnce(() => manualAccount.promise)
+			.mockResolvedValueOnce(loggedInAccount);
+		vi.mocked(getCodexImagePreflight)
+			.mockResolvedValueOnce({
+				accountStatus: "notLoggedIn",
+				imageGeneration: false,
+				ready: false,
+				reason: "not_logged_in",
+			})
+			.mockImplementationOnce(() => manualPreflight.promise)
+			.mockResolvedValueOnce({
+				accountStatus: "loggedIn",
+				imageGeneration: false,
+				ready: false,
+				reason: "capability_disabled",
+			});
+		vi.mocked(beginCodexAccountLogin).mockResolvedValue({
+			loginId: "login-interleaved",
+			status: "pending",
+		});
+		vi.mocked(getCodexAccountLogin).mockImplementationOnce(() => loginAttempt.promise);
+
+		renderPanel();
+		fireEvent.click(await screen.findByRole("button", { name: "使用 ChatGPT 登录" }));
+		await waitFor(() => expect(getCodexAccountLogin).toHaveBeenCalledTimes(1));
+		fireEvent.click(screen.getByRole("button", { name: "刷新并测试" }));
+		expect(await screen.findByRole("button", { name: "正在刷新并测试" })).toBeDisabled();
+
+		await act(async () => {
+			loginAttempt.resolve({ loginId: "login-interleaved", status: "completed" });
+			await Promise.resolve();
+		});
+
+		await waitFor(() =>
+			expect(screen.getByRole("status")).toHaveTextContent("当前账号未启用 Codex 生图"),
+		);
+		expect(screen.getByRole("button", { name: "刷新并测试" })).toBeEnabled();
+		await act(async () => {
+			manualAccount.resolve(loggedInAccount);
+			manualPreflight.resolve({
+				accountStatus: "loggedIn",
+				imageGeneration: true,
+				ready: true,
+				reason: "ready",
+			});
+			await Promise.resolve();
+		});
+
+		expect(screen.getByRole("status")).toHaveTextContent("当前账号未启用 Codex 生图");
+	});
+
+	it("keeps a newer manual refresh when an older completed-login refresh finishes later", async () => {
+		const loggedInAccount = {
+			status: "loggedIn" as const,
+			email: "user@example.com",
+			planType: "plus",
+			codexHome: "/Users/test/.codex",
+			shared: true,
+		};
+		const loginAccount = deferredPromise<typeof loggedInAccount>();
+		const loginPreflight = deferredPromise<{
+			accountStatus: string;
+			imageGeneration: boolean;
+			ready: boolean;
+			reason: string;
+		}>();
+		vi.mocked(getCodexAccount)
+			.mockResolvedValueOnce({
+				status: "notLoggedIn",
+				codexHome: "/Users/test/.codex",
+				shared: true,
+			})
+			.mockImplementationOnce(() => loginAccount.promise)
+			.mockResolvedValueOnce(loggedInAccount);
+		vi.mocked(getCodexImagePreflight)
+			.mockResolvedValueOnce({
+				accountStatus: "notLoggedIn",
+				imageGeneration: false,
+				ready: false,
+				reason: "not_logged_in",
+			})
+			.mockImplementationOnce(() => loginPreflight.promise)
+			.mockResolvedValueOnce({
+				accountStatus: "loggedIn",
+				imageGeneration: false,
+				ready: false,
+				reason: "capability_disabled",
+			});
+		vi.mocked(beginCodexAccountLogin).mockResolvedValue({
+			loginId: "login-refresh-pending",
+			status: "pending",
+		});
+		vi.mocked(getCodexAccountLogin).mockResolvedValue({
+			loginId: "login-refresh-pending",
+			status: "completed",
+		});
+
+		renderPanel();
+		fireEvent.click(await screen.findByRole("button", { name: "使用 ChatGPT 登录" }));
+		await waitFor(() =>
+			expect(testSpies.toast.success).toHaveBeenCalledWith("ChatGPT 登录成功", {
+				description: "已复用全局 Codex 登录态。",
+			}),
+		);
+		const refresh = screen.getByRole("button", { name: "刷新并测试" });
+		expect(refresh).toBeEnabled();
+		fireEvent.click(refresh);
+
+		await waitFor(() =>
+			expect(screen.getByRole("status")).toHaveTextContent("当前账号未启用 Codex 生图"),
+		);
+		await act(async () => {
+			loginAccount.resolve(loggedInAccount);
+			loginPreflight.resolve({
+				accountStatus: "loggedIn",
+				imageGeneration: true,
+				ready: true,
+				reason: "ready",
+			});
+			await Promise.resolve();
+		});
+
+		expect(screen.getByRole("status")).toHaveTextContent("当前账号未启用 Codex 生图");
+	});
+
+	it("keeps mounted guards active across a StrictMode effect replay", async () => {
+		vi.mocked(getCodexAccount).mockResolvedValue({
+			status: "loggedIn",
+			email: "user@example.com",
+			planType: "plus",
+			codexHome: "/Users/test/.codex",
+			shared: true,
+		});
+
+		render(
+			<StrictMode>
+				<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
+					<CodexAccessPanel />
+				</SWRConfig>
+			</StrictMode>,
+		);
+		fireEvent.click(await screen.findByRole("button", { name: "刷新并测试" }));
+
+		await waitFor(() => expect(testSpies.toast.success).toHaveBeenCalledWith("Codex 生图检查完成"));
 	});
 
 	it("opens the browser URL returned by bundled Codex", async () => {
@@ -131,3 +520,13 @@ const renderPanel = () =>
 			<CodexAccessPanel />
 		</SWRConfig>,
 	);
+
+const deferredPromise = <T,>() => {
+	let resolve!: (value: T | PromiseLike<T>) => void;
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+		resolve = resolvePromise;
+		reject = rejectPromise;
+	});
+	return { promise, reject, resolve };
+};

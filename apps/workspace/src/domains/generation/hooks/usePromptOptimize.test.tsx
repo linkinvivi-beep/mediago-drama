@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { SWRConfig } from "swr";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { GenerationRoute } from "@/domains/generation/api/generation";
 import { usePromptOptimize } from "./usePromptOptimize";
 
 const mocks = vi.hoisted(() => ({
@@ -21,7 +22,18 @@ vi.mock("@/domains/generation/api/generation", async (importOriginal) => {
 const Harness = () => {
 	const optimizer = usePromptOptimize({
 		catalog: { families: [], models: [], providers: [], routes: [], versions: [] },
+		documentContext: {
+			documentId: "storyboard-doc",
+			projectId: "project-1",
+			sectionId: "shot-1",
+		},
+		kind: "image",
 		onOptimized: vi.fn(),
+		projectId: "project-1",
+		referenceAssetIds: ["character-asset"],
+		referenceBindings: [{ assetId: "character-asset", documentId: "character-doc" }],
+		referenceUrls: ["https://example.test/character.png"],
+		targetRoute: { id: "target-image-route", kind: "image" } as GenerationRoute,
 	});
 	return (
 		<button
@@ -120,11 +132,34 @@ describe("usePromptOptimize", () => {
 
 		await waitFor(() => expect(mocks.streamGenerationText).toHaveBeenCalledTimes(1));
 		expect(mocks.streamGenerationText.mock.calls[0]?.[0]).toMatchObject({
+			documentContext: {
+				documentId: "storyboard-doc",
+				projectId: "project-1",
+				sectionId: "shot-1",
+			},
+			documentId: "storyboard-doc",
 			kind: "text",
 			model: "",
+			projectId: "project-1",
+			prompt: "a hero",
+			promptOptimization: {
+				referenceName: "cinematic",
+				referencePrompt: "cinematic lighting",
+			},
+			referenceAssetIds: ["character-asset"],
+			referenceBindings: [{ assetId: "character-asset", documentId: "character-doc" }],
+			referenceUrls: ["https://example.test/character.png"],
 			routeId: "",
+			sectionId: "shot-1",
 			textExecutor: "codex",
 		});
+		expect(mocks.streamGenerationText.mock.calls[0]?.[0].params).toMatchObject({
+			_mediago_prompt_optimization_target_kind: "image",
+			_mediago_prompt_optimization_target_route: "target-image-route",
+		});
+		expect(mocks.streamGenerationText.mock.calls[0]?.[0].params).not.toHaveProperty(
+			"system_instruction",
+		);
 	});
 
 	it("uses Codex when it is preferred even if a configured text route exists", async () => {

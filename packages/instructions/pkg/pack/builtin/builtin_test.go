@@ -20,7 +20,7 @@ func TestBuiltinPackParses(t *testing.T) {
 	if bundle.Manifest.ID != "builtin" ||
 		bundle.Manifest.Name != "默认技能包" ||
 		counts[pack.KindSkill] != 9 ||
-		counts[pack.KindPrompt] != 10 {
+		counts[pack.KindPrompt] != 18 {
 		t.Fatalf("builtin manifest=%#v counts=%#v", bundle.Manifest, counts)
 	}
 	foundNovelWriter := false
@@ -58,6 +58,59 @@ func TestBuiltinPackParses(t *testing.T) {
 	}
 	if !foundAutoMentionResolver {
 		t.Fatal("builtin skills missing auto-mention-resolver")
+	}
+}
+
+func TestBuiltinVideoPhotographyStyles(t *testing.T) {
+	bundle, err := Builtin(context.Background())
+	if err != nil {
+		t.Fatalf("Builtin() error = %v", err)
+	}
+
+	foundCategory := false
+	for _, category := range bundle.Categories {
+		if category.ID == "video-style" && category.Label == "视频摄影风格" {
+			foundCategory = true
+			break
+		}
+	}
+	if !foundCategory {
+		t.Fatalf("builtin categories = %#v, want video-style", bundle.Categories)
+	}
+
+	want := map[string]bool{
+		"video-film-realism":            false,
+		"video-hong-kong-neon-romance": false,
+		"video-cool-crime":              false,
+		"video-naturalist-handheld":     false,
+		"video-neo-noir":                false,
+		"video-dream-soft-focus":        false,
+		"video-symmetrical-deadpan":     false,
+		"video-poetic-road-movie":       false,
+	}
+	for _, entry := range bundle.Entries {
+		if entry.Kind != pack.KindPrompt || entry.Metadata["category"] != "video-style" {
+			continue
+		}
+		if _, ok := want[entry.Slug]; !ok {
+			t.Fatalf("unexpected video photography style %q", entry.Slug)
+		}
+		if entry.Metadata["type"] != "video" {
+			t.Fatalf("%s type = %#v, want video", entry.Slug, entry.Metadata["type"])
+		}
+		want[entry.Slug] = true
+		if entry.Slug == "video-hong-kong-neon-romance" {
+			for _, fragment := range []string{"香港都市爱情电影", "霓虹", "雨夜玻璃反射", "浅景深", "抽帧拖影"} {
+				if !strings.Contains(entry.Body, fragment) {
+					t.Fatalf("Hong Kong neon style missing %q:\n%s", fragment, entry.Body)
+				}
+			}
+		}
+	}
+	for slug, found := range want {
+		if !found {
+			t.Fatalf("missing video photography style %q", slug)
+		}
 	}
 }
 
@@ -247,6 +300,72 @@ func TestVideoGenerationSkillOwnsAgentVideoWorkflow(t *testing.T) {
 	}
 
 	t.Fatal("builtin skills missing video-generation")
+}
+
+func TestBuiltinVideoWritingAssetsUseRouteNeutralSingleShotContract(t *testing.T) {
+	bundle, err := Builtin(context.Background())
+	if err != nil {
+		t.Fatalf("Builtin() error = %v", err)
+	}
+
+	entries := map[string]string{}
+	for _, entry := range bundle.Entries {
+		entries[entry.Slug] = entry.Description + "\n" + entry.Body
+	}
+
+	storyboard := entries["storyboard-writer"]
+	if storyboard == "" {
+		t.Fatal("builtin skills missing storyboard-writer")
+	}
+	for _, fragment := range []string{
+		"一镜一条",
+		"一个主要叙事动作",
+		"一个主要镜头运动",
+		"明确的结束状态",
+		"生成设置表单",
+	} {
+		if !strings.Contains(storyboard, fragment) {
+			t.Fatalf("storyboard-writer missing route-neutral shot rule %q:\n%s", fragment, storyboard)
+		}
+	}
+	for _, fragment := range []string{"Seedance 2.0", "15.00", "8K", "HDR10+", "120fps", "伦勃朗光"} {
+		if strings.Contains(storyboard, fragment) {
+			t.Fatalf("storyboard-writer should not hard-code model/render default %q:\n%s", fragment, storyboard)
+		}
+	}
+
+	videoGeneration := entries["video-generation"]
+	for _, fragment := range []string{
+		"MediaLink MCP",
+		"主体与一致性",
+		"起始状态",
+		"主要动作",
+		"主要镜头运动",
+		"结束状态",
+		"环境与声音",
+	} {
+		if !strings.Contains(videoGeneration, fragment) {
+			t.Fatalf("video-generation missing executable prompt rule %q:\n%s", fragment, videoGeneration)
+		}
+	}
+	if strings.Contains(videoGeneration, "MediaGo Drama MCP") {
+		t.Fatalf("video-generation still uses the former product name:\n%s", videoGeneration)
+	}
+
+	cinematic := entries["video-cinematic-shot"]
+	for _, fragment := range []string{"一个主要动作", "一种主要镜头运动", "结束状态"} {
+		if !strings.Contains(cinematic, fragment) {
+			t.Fatalf("video-cinematic-shot missing single-shot rule %q:\n%s", fragment, cinematic)
+		}
+	}
+
+	orbit := entries["video-product-orbit"]
+	if !strings.Contains(orbit, "缓慢环绕") || !strings.Contains(orbit, "结束状态") {
+		t.Fatalf("video-product-orbit should define a coherent orbit and end state:\n%s", orbit)
+	}
+	if strings.Contains(orbit, "或推近") {
+		t.Fatalf("video-product-orbit should not offer conflicting camera moves:\n%s", orbit)
+	}
 }
 
 func TestCharacterWriterSplitsVisualVariants(t *testing.T) {

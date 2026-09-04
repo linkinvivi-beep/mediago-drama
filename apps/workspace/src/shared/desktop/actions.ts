@@ -19,8 +19,8 @@ const missingBridgeAck: DesktopUpdateAck = {
 
 const browserFallbackCapability: DesktopUpdateCapability = {
 	supportsAutoUpdate: false,
-	releasePageUrl: "https://github.com/mediago-dev/mediago-drama/releases",
-	reason: "当前运行环境不支持应用内更新。",
+	releasePageUrl: "",
+	reason: "releaseFeedNotConfigured",
 };
 
 export const copyDesktopFileToDirectory = async ({

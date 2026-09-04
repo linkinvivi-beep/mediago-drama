@@ -22,6 +22,7 @@ var videoParamRegistry = map[ParamID]CanonicalParamSpec{
 		Options: []ParamOption{
 			{Label: "480p", Value: "480p"},
 			{Label: "720p", Value: "720p"},
+			{Label: "768p", Value: "768p"},
 			{Label: "1080p", Value: "1080p"},
 			{Label: "4K", Value: "4k"},
 		},
@@ -73,5 +74,15 @@ var videoParamRegistry = map[ParamID]CanonicalParamSpec{
 		Min:   paramFloat(3600),
 		Max:   paramFloat(259200),
 		Help:  "Seconds before a queued or running task expires.",
+	},
+	ParamProfileKind: {
+		ID:    ParamProfileKind,
+		Label: "Workflow profile",
+		Type:  "select",
+		Group: ParamGroupOther,
+		Options: []ParamOption{
+			{Label: "REF2VA", Value: "ref2va"},
+			{Label: "FL2VA", Value: "fl2va"},
+		},
 	},
 }

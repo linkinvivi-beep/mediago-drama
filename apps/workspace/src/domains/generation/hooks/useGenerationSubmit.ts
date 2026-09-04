@@ -71,6 +71,7 @@ export interface GenerationSubmitOverrides {
 	referenceAssetIds?: string[];
 	referenceBindings?: GenerationReferenceBinding[];
 	referenceUrls?: string[];
+	instanceProfileId?: string;
 	resetPrompt?: boolean;
 	sectionId?: string | null;
 	selectedFamily?: GenerationFamily;
@@ -79,6 +80,8 @@ export interface GenerationSubmitOverrides {
 	selectedVersion?: GenerationVersion;
 	sourceRefs?: GenerationContentSourceRef[];
 	taskType?: GenerationTaskType;
+	workflowParameters?: Record<string, string | number | boolean>;
+	workflowProfileId?: string;
 }
 
 export const generationRequestPrompt = ({
@@ -234,6 +237,7 @@ export const useGenerationSubmit = ({
 			const requestFamilyId = overrides.selectedFamily?.id ?? selectedFamily.id;
 			const requestVersionId = overrides.selectedVersion?.id ?? selectedVersion.id;
 			const requestSelectedParams = overrides.selectedParams ?? selectedParams;
+			const requestWorkflowParameters = overrides.workflowParameters ?? {};
 			const requestSourceRefs = overrides.sourceRefs ?? sourceRefs;
 			const requestReferenceCount = requestReferenceUrls.length + requestReferenceAssetIds.length;
 			const maxReferenceUrls = maxReferenceUrlsForRoute(requestRoute);
@@ -315,7 +319,7 @@ export const useGenerationSubmit = ({
 				...userRequestDetails(requestRoute, requestSelectedParams, requestReferences.length),
 			];
 			const requestParams = generationParamsWithRequestDetails(
-				requestSelectedParams,
+				{ ...requestSelectedParams, ...requestWorkflowParameters },
 				overrides.requestDetails,
 			);
 			const userMessage: ChatMessage = {
@@ -473,7 +477,9 @@ export const useGenerationSubmit = ({
 					notificationTarget: requestNotificationTarget ?? undefined,
 					routeId: requestRoute.id,
 					familyId: requestFamilyId,
+					instanceProfileId: overrides.instanceProfileId || undefined,
 					versionId: requestVersionId,
+					workflowProfileId: overrides.workflowProfileId || undefined,
 					provider: requestRoute.provider,
 					modelId: requestRoute.legacyModelId ?? "",
 					model: requestRoute.model,

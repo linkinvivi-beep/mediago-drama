@@ -295,6 +295,112 @@ describe("useGenerationModelSelection", () => {
 		expect(readGenerationModelSelection().routeIds["version-image-alt"]).toBe("route-image-alt");
 	});
 
+	it("keeps the selected route in the requested kind when no route is configured", () => {
+		const videoCatalog: GenerationModelsResponse = {
+			...catalog,
+			families: [
+				...catalog.families,
+				{ id: "seedance", label: "Seedance", kind: "video" },
+				{ id: "minimax-h3", label: "MiniMax H3", kind: "video" },
+			],
+			versions: [
+				...catalog.versions,
+				{
+					id: "version-seedance",
+					familyId: "seedance",
+					label: "Seedance",
+					kind: "video",
+					canonicalModel: "seedance",
+					capabilities: {
+						async: true,
+						supportsReferenceUrls: true,
+					},
+				},
+				{
+					id: "version-h3",
+					familyId: "minimax-h3",
+					label: "MiniMax H3",
+					kind: "video",
+					canonicalModel: "MiniMax-H3",
+					capabilities: {
+						async: true,
+						supportsReferenceUrls: true,
+					},
+				},
+			],
+			routes: [
+				...catalog.routes,
+				{
+					id: "route-seedance",
+					familyId: "seedance",
+					versionId: "version-seedance",
+					label: "Seedance",
+					kind: "video",
+					provider: "dmx",
+					model: "seedance",
+					adapter: "dmx.video",
+					docUrl: "",
+					async: true,
+					supportsReferenceUrls: true,
+					status: "unavailable",
+					configured: false,
+					params: [
+						{
+							name: "resolution",
+							label: "分辨率",
+							type: "select",
+							default: "480p",
+							options: [{ label: "480p", value: "480p" }],
+						},
+					],
+				},
+				{
+					id: "autodl.minimax-h3",
+					familyId: "minimax-h3",
+					versionId: "version-h3",
+					label: "AutoDL · MiniMax H3",
+					kind: "video",
+					provider: "autodl",
+					model: "MiniMax-H3",
+					adapter: "autodl.comfy.h3.video",
+					docUrl: "",
+					async: true,
+					supportsReferenceUrls: true,
+					status: "unavailable",
+					configured: false,
+					params: [
+						{
+							name: "resolution",
+							label: "分辨率",
+							type: "select",
+							default: "1080p",
+							options: [
+								{ label: "768p（1344×768）", value: "768p" },
+								{ label: "1080p（1920×1080）", value: "1080p" },
+							],
+						},
+					],
+				},
+			],
+		};
+
+		const { result } = renderHook(() =>
+			useGenerationModelSelection({
+				initialKind: "video",
+				modelCatalog: videoCatalog,
+				mutatePreferences,
+				preferenceScopeId: "",
+				stylePresets: [],
+			}),
+		);
+
+		expect(result.current.hasConfiguredRoutesForKind).toBe(false);
+		expect(result.current.selectedFamily.id).toBe("minimax-h3");
+		expect(result.current.selectedVersion.id).toBe("version-h3");
+		expect(result.current.selectedRoute.id).toBe("autodl.minimax-h3");
+		expect(result.current.selectedParams.resolution).toBe("1080p");
+	});
+
 	it("uses dialog initial model selection when persistence is disabled", async () => {
 		const jimengCatalog: GenerationModelsResponse = {
 			...catalog,

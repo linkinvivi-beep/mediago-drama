@@ -15,12 +15,16 @@ import (
 	"strings"
 	"unicode/utf16"
 
+	coregeneration "github.com/mediago-dev/mediago-drama/packages/core/pkg/generation"
 	corepricing "github.com/mediago-dev/mediago-drama/packages/core/pkg/pricing"
 	draftlib "github.com/mediago-dev/mediago-drama/packages/jianyingdraft/pkg/jianyingdraft"
 	appagent "github.com/mediago-dev/mediago-drama/services/server/internal/app/agent"
 	appevents "github.com/mediago-dev/mediago-drama/services/server/internal/app/events"
 	appworkspace "github.com/mediago-dev/mediago-drama/services/server/internal/app/workspace"
 	corecapability "github.com/mediago-dev/mediago-drama/services/server/internal/capability"
+	platformautodl "github.com/mediago-dev/mediago-drama/services/server/internal/platform/autodl"
+	platformcomfyui "github.com/mediago-dev/mediago-drama/services/server/internal/platform/comfyui"
+	platformkeychain "github.com/mediago-dev/mediago-drama/services/server/internal/platform/keychain"
 	platformprotectedpack "github.com/mediago-dev/mediago-drama/services/server/internal/platform/protectedpack"
 	"github.com/mediago-dev/mediago-drama/services/server/internal/repository"
 	serviceacp "github.com/mediago-dev/mediago-drama/services/server/internal/service/acp"
@@ -38,6 +42,7 @@ import (
 	serviceprompttemplates "github.com/mediago-dev/mediago-drama/services/server/internal/service/prompttemplates"
 	serviceselection "github.com/mediago-dev/mediago-drama/services/server/internal/service/selection"
 	servicesettings "github.com/mediago-dev/mediago-drama/services/server/internal/service/settings"
+	serviceshared "github.com/mediago-dev/mediago-drama/services/server/internal/service/shared"
 	serviceskill "github.com/mediago-dev/mediago-drama/services/server/internal/service/skill"
 	servicetextcompletion "github.com/mediago-dev/mediago-drama/services/server/internal/service/textcompletion"
 	serviceworkspaceevent "github.com/mediago-dev/mediago-drama/services/server/internal/service/workspaceevent"
@@ -129,6 +134,7 @@ func newAPIHandler(config Config) *apiHandler {
 		settingsRepos.AgentModelProfiles,
 		settingsRepos.AppSettings,
 	)
+	settings.SetAutoDLPasswordStore(platformkeychain.NewGenericPasswordStore())
 	settings.SetJimengCLIPaths(config.JimengBinPath, config.JimengBinDir)
 	settings.SetLibTVCLIPaths(config.LibTVBinPath, config.LibTVBinDir)
 	settings.SetPippitCLIPaths(config.PippitBinPath, config.PippitBinDir)
@@ -140,6 +146,8 @@ func newAPIHandler(config Config) *apiHandler {
 	settings.SetModelPlatforms(config.ModelPlatforms)
 	settings.SetGenerationCLIs(config.GenerationCLIs)
 	settings.SetMediagoBaseURL(config.MediagoBaseURL)
+	autoDLTunnels := platformautodl.NewTunnelManager(settings)
+	autoDLAdmin := servicegeneration.NewAutoDLWorkflowAdmin(settings, autoDLTunnels, platformautodl.NewSSHHostKeyScanner())
 	codexSkills := servicecodexskill.NewService(
 		workspaceState.Dir(),
 		func(ctx context.Context) (servicecodexskill.RuntimeHomeDescriptor, error) {
@@ -236,7 +244,35 @@ func newAPIHandler(config Config) *apiHandler {
 		draftlib.FFProbeReader{BinDir: config.FFmpegBinDir},
 	)
 	generationService := servicegeneration.NewGenerationService(settings, generationTasks, mediaAssets, generationPreferences)
+	generationService.SetGenerationRuntimeContext(shutdownCtx)
+	autoDLScheduler := servicegeneration.NewAutoDLInstanceScheduler(
+		func(ctx context.Context) ([]servicesettings.AutoDLInstanceProfile, error) {
+			configured, err := settings.GetAutoDLSettings(ctx)
+			if err != nil {
+				return nil, err
+			}
+			profiles := make([]servicesettings.AutoDLInstanceProfile, 0, len(configured.Instances))
+			for _, instance := range configured.Instances {
+				profiles = append(profiles, instance.AutoDLInstanceProfile)
+			}
+			return profiles, nil
+		},
+		autoDLAdmin.Readiness,
+	)
+	autoDLWorkflowResolver := servicegeneration.NewAutoDLWorkflowResolver(settings)
+	autoDLImageProvider := servicegeneration.NewAutoDLImageProvider(
+		autoDLWorkflowResolver,
+		autoDLScheduler,
+		platformcomfyui.NewClient,
+	)
+	autoDLH3Provider := servicegeneration.NewAutoDLH3Provider(
+		autoDLWorkflowResolver,
+		autoDLScheduler,
+		platformcomfyui.NewClient,
+	)
+	var codexImageProvider *servicegeneration.CodexImageProvider
 	if codexPath != "" {
+		codexImageProvider = servicegeneration.NewManagedCodexImageProvider(shutdownCtx, codexPath, serviceshared.DefaultUserDataDir())
 		generationService.SetCodexTextBackend(
 			servicetextcompletion.NewCodexBackend(codexPath, workspaceState.Dir()),
 			func(ctx context.Context, _ servicetextcompletion.Request) bool {
@@ -244,6 +280,92 @@ func newAPIHandler(config Config) *apiHandler {
 				return err == nil && status.Status == "loggedIn"
 			},
 		)
+	}
+	generationService.SetMediaLinkProvidersWithAutoDLImage(codexImageProvider, autoDLImageProvider, autoDLH3Provider, func(ctx context.Context, routeID string) (bool, string) {
+		switch routeID {
+		case coregeneration.RouteCodexImage:
+			if codexImageProvider == nil {
+				return false, "Codex executable is unavailable"
+			}
+			return codexImageProvider.Ready(ctx)
+		case coregeneration.RouteAutoDLImage, coregeneration.RouteAutoDLH3:
+			configured, err := settings.GetAutoDLSettings(ctx)
+			if err != nil {
+				return false, "AutoDL settings are unavailable"
+			}
+			hasReadyWorkflow := false
+			for _, profile := range configured.WorkflowProfiles {
+				if profile.RouteID != routeID || !profile.Enabled || profile.Archived {
+					continue
+				}
+				for _, version := range profile.Versions {
+					if version.VersionID != profile.CurrentVersionID || version.BindingStatus != servicesettings.AutoDLBindingStatusConfirmed {
+						continue
+					}
+					for _, instance := range configured.Instances {
+						if !instance.Enabled || !instance.HasPassword || instance.HostFingerprint == "" {
+							continue
+						}
+						for _, validation := range instance.WorkflowValidations {
+							if validation.WorkflowProfileID == profile.ID &&
+								validation.VersionID == version.VersionID &&
+								validation.Status == servicesettings.AutoDLWorkflowValidationReady &&
+								validation.WorkflowDigest == version.WorkflowDigest &&
+								validation.APITemplateDigest == version.APITemplateDigest &&
+								validation.InstanceFingerprint == instance.HostFingerprint {
+								hasReadyWorkflow = true
+								break
+							}
+						}
+						if hasReadyWorkflow {
+							break
+						}
+					}
+					if hasReadyWorkflow {
+						break
+					}
+				}
+				if hasReadyWorkflow {
+					break
+				}
+			}
+			if !hasReadyWorkflow {
+				if routeID == coregeneration.RouteAutoDLH3 {
+					return false, "AutoDL instance or H3 workflow is not configured"
+				}
+				return false, "AutoDL instance or image workflow is not configured"
+			}
+			return true, ""
+		default:
+			return false, fmt.Sprintf("MediaLink route %q is not available", routeID)
+		}
+	})
+	if tasks, err := generationTasks.List(); err != nil {
+		slog.Error("AutoDL reservations could not be restored", "error", err)
+	} else {
+		reservations := make([]servicegeneration.PersistedInstanceReservation, 0)
+		for _, task := range tasks {
+			state := task.RuntimeState
+			recoverableSubmission := state.AutoDLSubmissionState == "accepted" || state.AutoDLSubmissionState == "outcome_unknown"
+			if (!servicegeneration.IsActiveGenerationStatus(task.Status) && !recoverableSubmission) ||
+				(task.RouteID != coregeneration.RouteAutoDLImage && task.RouteID != coregeneration.RouteAutoDLH3) ||
+				state.InstanceProfileID == "" || state.WorkflowProfileID == "" || state.WorkflowProfileVersion == "" {
+				continue
+			}
+			quarantineReason := ""
+			if state.AutoDLSubmissionState == "outcome_unknown" {
+				quarantineReason = "submission_outcome_unknown"
+			}
+			reservations = append(reservations, servicegeneration.PersistedInstanceReservation{
+				TaskID: task.ID, InstanceProfileID: state.InstanceProfileID,
+				WorkflowProfileID: state.WorkflowProfileID, WorkflowVersionID: state.WorkflowProfileVersion,
+				PromptID: state.ComfyPromptID, Quarantined: state.AutoDLSubmissionState == "outcome_unknown",
+				QuarantineReason: quarantineReason,
+			})
+		}
+		if err := autoDLScheduler.RestoreReservations(reservations); err != nil {
+			slog.Error("AutoDL reservations could not be restored", "error", err)
+		}
 	}
 	generationService.SetJimengCLIPaths(config.JimengBinPath, config.JimengBinDir)
 	generationService.SetLibTVCLIConfig(config.LibTVBinPath, config.LibTVBinDir, config.LibTVProjectID)
@@ -320,6 +442,9 @@ func newAPIHandler(config Config) *apiHandler {
 		agentBridgeURL:    agentBridgeURL,
 		agentBridgeToken:  agentBridgeToken,
 		settings:          settings,
+		autoDLTunnels:     autoDLTunnels,
+		autoDLAdmin:       autoDLAdmin,
+		autoDLScheduler:   autoDLScheduler,
 		capability:        capabilityService,
 		billing:           billingService,
 		backendService:    backendService,

@@ -7,7 +7,7 @@ import (
 	"github.com/mediago-dev/mediago-drama/services/server/internal/service/settings"
 )
 
-func TestListGenerationModelsIncludesLibTVImageRoutes(t *testing.T) {
+func TestLegacyCatalogIncludesLibTVImageRoutes(t *testing.T) {
 	routeIDs := []string{
 		coregeneration.RouteLibTVGPTImage2,
 		coregeneration.RouteLibTVNanoBanana31,
@@ -17,10 +17,10 @@ func TestListGenerationModelsIncludesLibTVImageRoutes(t *testing.T) {
 	keyStore := &generationTestAPIKeyStore{values: map[string]string{}}
 	workflow := NewGenerationService(settings.NewSettings(keyStore), nil, nil)
 
-	assertLibTVImageCatalogRoutes(t, workflow.ListGenerationModels(), routeIDs, false)
+	assertLibTVImageCatalogRoutes(t, legacyGenerationModelsForTest(workflow), routeIDs, false)
 
 	keyStore.values[coregeneration.ProviderLibTV] = "oauth:2026-07-14T00:00:00Z"
-	assertLibTVImageCatalogRoutes(t, workflow.ListGenerationModels(), routeIDs, true)
+	assertLibTVImageCatalogRoutes(t, legacyGenerationModelsForTest(workflow), routeIDs, true)
 }
 
 func assertLibTVImageCatalogRoutes(
@@ -38,7 +38,7 @@ func assertLibTVImageCatalogRoutes(
 	for _, routeID := range routeIDs {
 		route, ok := routesByID[routeID]
 		if !ok {
-			t.Errorf("route %q is missing from the generation catalog", routeID)
+			t.Errorf("route %q is missing from the legacy generation catalog", routeID)
 			continue
 		}
 		if route.Kind != coregeneration.KindImage || route.Provider != coregeneration.ProviderLibTV {

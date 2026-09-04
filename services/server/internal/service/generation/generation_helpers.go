@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -17,6 +18,8 @@ const agentGenerationConversationScopeID = "agent"
 const generationProjectScopePrefix = "project-"
 const generationInternalParamPrefix = "_mediago_"
 const generationAssetTitleRequestOption = "_mediago_asset_title"
+const generationSensitivePromptParam = "_mediago_sensitive_prompt"
+const generationSensitivePromptRequestOption = "_mediago_sensitive_prompt"
 
 var generationConversationIDPartPattern = regexp.MustCompile(`[^a-z0-9_-]+`)
 
@@ -24,13 +27,14 @@ var generationConversationIDPartPattern = regexp.MustCompile(`[^a-z0-9_-]+`)
 func GenerationResponseFromCore(response coregeneration.Response, kind string) GenerationMessageResponse {
 	assets := make([]GenerationAsset, 0, len(response.Assets))
 	for _, asset := range response.Assets {
-		if asset.URL == "" && asset.Base64 == "" {
+		publicURL := generationAssetURLForClient(asset.URL)
+		if publicURL == "" && asset.Base64 == "" {
 			continue
 		}
 		assets = append(assets, GenerationAsset{
 			AssetID:      libraryAssetIDFromGenerationAssetURL(asset.URL),
 			Kind:         string(asset.Kind),
-			URL:          asset.URL,
+			URL:          publicURL,
 			PosterURL:    firstNonEmptyMetadataString(asset.Metadata, "poster_url", "posterUrl"),
 			Base64:       asset.Base64,
 			MIMEType:     asset.MIMEType,
@@ -85,6 +89,8 @@ func GenerationResponseFromCore(response coregeneration.Response, kind string) G
 		message += " 本地素材缓存失败：" + strings.Join(warnings, "；")
 	}
 
+	runtimeState, _ := response.Metadata["runtime_state"].(GenerationTaskRuntimeState)
+	runtimeState = generationTaskRuntimeStateForClient(runtimeState)
 	return GenerationMessageResponse{
 		ID:      ValueOrFallback(response.ID, shared.MustRandomID("generation")),
 		Role:    "assistant",
@@ -99,11 +105,23 @@ func GenerationResponseFromCore(response coregeneration.Response, kind string) G
 			ReasoningTokens: response.Usage.ReasoningTokens,
 			CachedTokens:    response.Usage.CachedTokens,
 		},
-		Error:     errorMessage,
-		ErrorCode: StringFromMetadata(response.Metadata, "error_code"),
-		ErrorType: StringFromMetadata(response.Metadata, "error_type"),
-		Retryable: BoolFromMetadata(response.Metadata, "retryable"),
+		RuntimeState: runtimeState,
+		Error:        errorMessage,
+		ErrorCode:    StringFromMetadata(response.Metadata, "error_code"),
+		ErrorType:    StringFromMetadata(response.Metadata, "error_type"),
+		Retryable:    BoolFromMetadata(response.Metadata, "retryable"),
 	}
+}
+
+func generationAssetURLForClient(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if isLocalMediaAssetURL(trimmed) {
+		return value
+	}
+	if filepath.IsAbs(trimmed) || strings.HasPrefix(strings.ToLower(trimmed), "file://") {
+		return ""
+	}
+	return value
 }
 
 func generationResponseWithAssetTitle(response GenerationMessageResponse, assetTitle string) GenerationMessageResponse {
@@ -240,18 +258,24 @@ func SubmittedGenerationResponse(id string, kind coregeneration.Kind) Generation
 // GenerationResponseFromTask maps one stored task to a message response.
 func GenerationResponseFromTask(task GenerationTaskRecord) GenerationMessageResponse {
 	return GenerationMessageResponse{
-		ID:        task.ID,
-		Role:      "assistant",
-		Status:    task.Status,
-		Message:   task.Message,
-		Text:      task.Text,
-		Assets:    task.Assets,
-		Usage:     task.Usage,
-		Error:     task.Error,
-		ErrorCode: task.ErrorCode,
-		ErrorType: task.ErrorType,
-		Retryable: task.Retryable,
+		ID:           task.ID,
+		Role:         "assistant",
+		Status:       task.Status,
+		Message:      task.Message,
+		Text:         task.Text,
+		Assets:       task.Assets,
+		Usage:        task.Usage,
+		RuntimeState: generationTaskRuntimeStateForClient(task.RuntimeState),
+		Error:        task.Error,
+		ErrorCode:    task.ErrorCode,
+		ErrorType:    task.ErrorType,
+		Retryable:    task.Retryable,
 	}
+}
+
+func generationTaskRuntimeStateForClient(state GenerationTaskRuntimeState) GenerationTaskRuntimeState {
+	state.SavedPath = ""
+	return state
 }
 
 // ResolveGenerationRoute resolves a route from a generation API request.
@@ -270,58 +294,70 @@ func GenerationRequestFromMessage(
 	referenceURLs []string,
 ) coregeneration.Request {
 	model := generationModelForReferences(route, payload.Model, referenceURLs)
+	instanceProfileID := ""
+	workflowProfileID := ""
+	if isAutoDLGenerationRouteID(route.ID) {
+		instanceProfileID = strings.TrimSpace(payload.InstanceProfileID)
+		workflowProfileID = strings.TrimSpace(payload.WorkflowProfileID)
+	}
 	if route.Kind == coregeneration.KindText {
 		return coregeneration.Request{
-			Kind:          coregeneration.Kind(payload.Kind),
-			RouteID:       payload.RouteID,
-			FamilyID:      payload.FamilyID,
-			VersionID:     payload.VersionID,
-			Provider:      payload.Provider,
-			ProjectID:     payload.ProjectID,
-			ProjectName:   payload.ProjectName,
-			ModelID:       payload.ModelID,
-			Model:         model,
-			Prompt:        payload.Prompt,
-			ReferenceURLs: referenceURLs,
-			Params:        providerGenerationParams(payload.Params),
-			Options:       generationRequestOptions(payload),
+			Kind:              coregeneration.Kind(payload.Kind),
+			RouteID:           payload.RouteID,
+			FamilyID:          payload.FamilyID,
+			VersionID:         payload.VersionID,
+			Provider:          payload.Provider,
+			InstanceProfileID: instanceProfileID,
+			WorkflowProfileID: workflowProfileID,
+			ProjectID:         payload.ProjectID,
+			ProjectName:       payload.ProjectName,
+			ModelID:           payload.ModelID,
+			Model:             model,
+			Prompt:            payload.Prompt,
+			ReferenceURLs:     referenceURLs,
+			Params:            providerGenerationParams(payload.Params),
+			Options:           generationRequestOptions(payload),
 		}
 	}
 	if route.Kind == coregeneration.KindAudio {
 		return coregeneration.Request{
-			Kind:          coregeneration.Kind(payload.Kind),
-			RouteID:       payload.RouteID,
-			FamilyID:      payload.FamilyID,
-			VersionID:     payload.VersionID,
-			Provider:      payload.Provider,
-			ProjectID:     payload.ProjectID,
-			ProjectName:   payload.ProjectName,
-			ModelID:       payload.ModelID,
-			Model:         model,
-			Prompt:        payload.Prompt,
-			ReferenceURLs: referenceURLs,
-			Params:        providerGenerationParams(payload.Params),
-			Options:       generationRequestOptions(payload),
+			Kind:              coregeneration.Kind(payload.Kind),
+			RouteID:           payload.RouteID,
+			FamilyID:          payload.FamilyID,
+			VersionID:         payload.VersionID,
+			Provider:          payload.Provider,
+			InstanceProfileID: instanceProfileID,
+			WorkflowProfileID: workflowProfileID,
+			ProjectID:         payload.ProjectID,
+			ProjectName:       payload.ProjectName,
+			ModelID:           payload.ModelID,
+			Model:             model,
+			Prompt:            payload.Prompt,
+			ReferenceURLs:     referenceURLs,
+			Params:            providerGenerationParams(payload.Params),
+			Options:           generationRequestOptions(payload),
 		}
 	}
 
 	return coregeneration.Request{
-		Kind:           coregeneration.Kind(payload.Kind),
-		RouteID:        payload.RouteID,
-		FamilyID:       payload.FamilyID,
-		VersionID:      payload.VersionID,
-		Provider:       payload.Provider,
-		ProjectID:      payload.ProjectID,
-		ProjectName:    payload.ProjectName,
-		ModelID:        payload.ModelID,
-		Model:          model,
-		Prompt:         payload.Prompt,
-		ReferenceURLs:  referenceURLs,
-		OutputFormat:   "png",
-		ResponseFormat: ResponseFormatForRoute(route),
-		Watermark:      BoolPtr(false),
-		Params:         providerGenerationParams(payload.Params),
-		Options:        generationRequestOptions(payload),
+		Kind:              coregeneration.Kind(payload.Kind),
+		RouteID:           payload.RouteID,
+		FamilyID:          payload.FamilyID,
+		VersionID:         payload.VersionID,
+		Provider:          payload.Provider,
+		InstanceProfileID: instanceProfileID,
+		WorkflowProfileID: workflowProfileID,
+		ProjectID:         payload.ProjectID,
+		ProjectName:       payload.ProjectName,
+		ModelID:           payload.ModelID,
+		Model:             model,
+		Prompt:            payload.Prompt,
+		ReferenceURLs:     referenceURLs,
+		OutputFormat:      "png",
+		ResponseFormat:    ResponseFormatForRoute(route),
+		Watermark:         BoolPtr(false),
+		Params:            providerGenerationParams(payload.Params),
+		Options:           generationRequestOptions(payload),
 	}
 }
 
@@ -344,12 +380,18 @@ func generationModelForReferences(
 
 func generationRequestOptions(payload GenerationMessageRequest) map[string]any {
 	assetTitle := strings.TrimSpace(payload.AssetTitle)
-	if assetTitle == "" {
+	sensitivePrompt, _ := payload.Params[generationSensitivePromptParam].(bool)
+	if assetTitle == "" && !sensitivePrompt {
 		return nil
 	}
-	return map[string]any{
-		generationAssetTitleRequestOption: assetTitle,
+	options := map[string]any{}
+	if assetTitle != "" {
+		options[generationAssetTitleRequestOption] = assetTitle
 	}
+	if sensitivePrompt {
+		options[generationSensitivePromptRequestOption] = true
+	}
+	return options
 }
 
 func generationAssetTitleFromRequest(request coregeneration.Request) string {
@@ -599,7 +641,19 @@ func GenerationTaskFromMessage(
 	assetTitle := firstNonEmpty(request.AssetTitle, generationFirstAssetTitle(response.Assets))
 	response = generationResponseWithAssetTitle(response, assetTitle)
 	responseError := generationTaskErrorFromResponse(response)
-	return GenerationTaskRecord{
+	runtimeState := GenerationTaskRuntimeState{}
+	if instanceProfileID := strings.TrimSpace(request.InstanceProfileID); isAutoDLGenerationRouteID(route.ID) && instanceProfileID != "" {
+		runtimeState.InstanceProfileID = instanceProfileID
+	}
+	if workflowProfileID := strings.TrimSpace(request.WorkflowProfileID); isAutoDLGenerationRouteID(route.ID) && workflowProfileID != "" {
+		runtimeState.WorkflowProfileID = workflowProfileID
+	}
+	runtimeState, runtimeErr := mergeGenerationTaskRuntimeState(
+		runtimeState,
+		generationRuntimeStateUpdateForRoute(route.ID, response.RuntimeState),
+		isAutoDLGenerationRouteID(route.ID),
+	)
+	task := GenerationTaskRecord{
 		ID:                response.ID,
 		BatchID:           strings.TrimSpace(request.BatchID),
 		BatchItemID:       strings.TrimSpace(request.BatchItemID),
@@ -626,16 +680,22 @@ func GenerationTaskFromMessage(
 			generationParamsWithAssetTitle(request.Params, assetTitle),
 			request.ReferenceBindings,
 		),
-		Status:    response.Status,
-		Message:   response.Message,
-		Text:      response.Text,
-		Assets:    response.Assets,
-		Usage:     response.Usage,
-		Error:     responseError,
-		ErrorCode: response.ErrorCode,
-		ErrorType: response.ErrorType,
-		Retryable: response.Retryable,
+		Status:       response.Status,
+		Message:      response.Message,
+		Text:         response.Text,
+		Assets:       response.Assets,
+		Usage:        response.Usage,
+		Error:        responseError,
+		ErrorCode:    response.ErrorCode,
+		ErrorType:    response.ErrorType,
+		Retryable:    response.Retryable,
+		RuntimeState: runtimeState,
 	}
+	if runtimeErr != nil {
+		task.ProviderTaskID = ""
+		return generationTaskWithRuntimeStateConflict(task, runtimeErr)
+	}
+	return task
 }
 
 func generationTaskErrorFromResponse(response GenerationMessageResponse) string {
@@ -760,12 +820,21 @@ func normalizeGenerationConversationIDPart(value string) string {
 
 // GenerationTaskWithMessage applies response fields to a task record.
 func GenerationTaskWithMessage(task GenerationTaskRecord, response GenerationMessageResponse) GenerationTaskRecord {
+	runtimeState, runtimeErr := mergeGenerationTaskRuntimeState(
+		task.RuntimeState,
+		generationRuntimeStateUpdateForRoute(task.RouteID, response.RuntimeState),
+		isAutoDLGenerationRouteID(task.RouteID),
+	)
+	if runtimeErr != nil {
+		return generationTaskWithRuntimeStateConflict(task, runtimeErr)
+	}
 	if strings.TrimSpace(task.ID) == "" {
 		task.ID = response.ID
 	}
-	if task.ProviderTaskID == "" && task.Kind == string(coregeneration.KindVideo) {
+	if task.ProviderTaskID == "" && (task.Kind == string(coregeneration.KindVideo) || task.RouteID == coregeneration.RouteCodexImage) {
 		task.ProviderTaskID = generationProviderTaskIDFromMessageID(response.ID, task.ID)
 	}
+	task.RuntimeState = runtimeState
 	task.Status = response.Status
 	task.Message = response.Message
 	task.Text = response.Text
@@ -828,6 +897,11 @@ func GenerationTaskProviderPollID(task GenerationTaskRecord) string {
 	if value := strings.TrimSpace(task.ProviderTaskID); value != "" {
 		return value
 	}
+	if task.RouteID == coregeneration.RouteCodexImage {
+		if threadID := strings.TrimSpace(task.RuntimeState.CodexThreadID); threadID != "" {
+			return codexImageResponseIDPrefix + threadID
+		}
+	}
 	if strings.Contains(strings.TrimSpace(task.ID), ":") {
 		return strings.TrimSpace(task.ID)
 	}
@@ -836,9 +910,12 @@ func GenerationTaskProviderPollID(task GenerationTaskRecord) string {
 
 // activeGenerationStatuses contains statuses that mean a task is still in progress.
 var activeGenerationStatuses = []string{
+	"preparing",
 	"submitting",
 	"submitted",
 	"running",
+	"importing",
+	"waiting_reconnect",
 	"pending",
 	"processing",
 	"queued",
@@ -856,10 +933,181 @@ func IsActiveGenerationStatus(status string) bool {
 }
 
 func generationProviderTaskIDForResponse(route coregeneration.ModelRoute, response GenerationMessageResponse) string {
+	if route.ID == coregeneration.RouteCodexImage {
+		return generationProviderTaskIDFromMessageID(response.ID, "")
+	}
 	if route.Kind != coregeneration.KindVideo || !route.Async {
 		return ""
 	}
 	return generationProviderTaskIDFromMessageID(response.ID, "")
+}
+
+const generationRuntimeStateConflictCode = "runtime_state_conflict"
+
+func generationRuntimeStateUpdateForRoute(routeID string, state GenerationTaskRuntimeState) GenerationTaskRuntimeState {
+	if isAutoDLGenerationRouteID(routeID) {
+		return state
+	}
+	state.InstanceProfileID = ""
+	state.WorkflowProfileID = ""
+	state.WorkflowProfileVersion = ""
+	state.WorkflowDigest = ""
+	state.APITemplateDigest = ""
+	state.AutoDLSubmissionState = ""
+	return state
+}
+
+func generationTaskWithRuntimeStateConflict(task GenerationTaskRecord, err error) GenerationTaskRecord {
+	task.Status = "failed"
+	task.Message = "生成任务的恢复标识发生冲突，已停止处理。"
+	task.Error = err.Error()
+	task.ErrorCode = generationRuntimeStateConflictCode
+	task.ErrorType = generationRuntimeStateConflictCode
+	task.Retryable = false
+	return task
+}
+
+type autoDLAttemptIdentity struct {
+	instanceProfileID      string
+	workflowProfileID      string
+	workflowProfileVersion string
+	workflowDigest         string
+	apiTemplateDigest      string
+	comfyPromptID          string
+	submittedAt            string
+}
+
+func autoDLAttemptIdentityFromRuntimeState(state GenerationTaskRuntimeState) autoDLAttemptIdentity {
+	return autoDLAttemptIdentity{
+		instanceProfileID:      strings.TrimSpace(state.InstanceProfileID),
+		workflowProfileID:      strings.TrimSpace(state.WorkflowProfileID),
+		workflowProfileVersion: strings.TrimSpace(state.WorkflowProfileVersion),
+		workflowDigest:         strings.TrimSpace(state.WorkflowDigest),
+		apiTemplateDigest:      strings.TrimSpace(state.APITemplateDigest),
+		comfyPromptID:          strings.TrimSpace(state.ComfyPromptID),
+		submittedAt:            strings.TrimSpace(state.SubmittedAt),
+	}
+}
+
+func (identity autoDLAttemptIdentity) values() []string {
+	return []string{
+		identity.instanceProfileID,
+		identity.workflowProfileID,
+		identity.workflowProfileVersion,
+		identity.workflowDigest,
+		identity.apiTemplateDigest,
+		identity.comfyPromptID,
+		identity.submittedAt,
+	}
+}
+
+func (identity autoDLAttemptIdentity) isZero() bool {
+	for _, value := range identity.values() {
+		if value != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func validateAutoDLAttemptIdentityMerge(current GenerationTaskRuntimeState, update GenerationTaskRuntimeState) error {
+	currentIdentity := autoDLAttemptIdentityFromRuntimeState(current)
+	updateIdentity := autoDLAttemptIdentityFromRuntimeState(update)
+	currentValues := currentIdentity.values()
+	updateValues := updateIdentity.values()
+	extendsIdentity := false
+	for index, currentValue := range currentValues {
+		updateValue := updateValues[index]
+		if currentValue != "" && updateValue != "" && currentValue != updateValue {
+			return fmt.Errorf("AutoDL generation attempt identity conflicts with the stored checkpoint")
+		}
+		if currentValue == "" && updateValue != "" {
+			extendsIdentity = true
+		}
+	}
+	if !currentIdentity.isZero() && extendsIdentity {
+		for index, currentValue := range currentValues {
+			if currentValue != "" && updateValues[index] == "" {
+				return fmt.Errorf("AutoDL generation attempt identity update is incomplete")
+			}
+		}
+	}
+
+	candidateValues := append([]string(nil), currentValues...)
+	for index, updateValue := range updateValues {
+		if updateValue != "" {
+			candidateValues[index] = updateValue
+		}
+	}
+	candidate := autoDLAttemptIdentity{
+		instanceProfileID:      candidateValues[0],
+		workflowProfileID:      candidateValues[1],
+		workflowProfileVersion: candidateValues[2],
+		workflowDigest:         candidateValues[3],
+		apiTemplateDigest:      candidateValues[4],
+		comfyPromptID:          candidateValues[5],
+		submittedAt:            candidateValues[6],
+	}
+	if (candidate.comfyPromptID == "") != (candidate.submittedAt == "") {
+		return fmt.Errorf("AutoDL generation prompt identity must include both prompt ID and submission time")
+	}
+	if candidate.comfyPromptID != "" && (candidate.instanceProfileID == "" ||
+		candidate.workflowProfileID == "" || candidate.workflowProfileVersion == "" || candidate.workflowDigest == "") {
+		return fmt.Errorf("AutoDL generation prompt identity is missing its instance or workflow checkpoint")
+	}
+	return nil
+}
+
+func mergeGenerationTaskRuntimeState(
+	current GenerationTaskRuntimeState,
+	update GenerationTaskRuntimeState,
+	validateAutoDLIdentity bool,
+) (GenerationTaskRuntimeState, error) {
+	if validateAutoDLIdentity {
+		if err := validateAutoDLAttemptIdentityMerge(current, update); err != nil {
+			return current, err
+		}
+	}
+	if update.CodexThreadID != "" {
+		current.CodexThreadID = update.CodexThreadID
+	}
+	if update.CodexTurnID != "" {
+		current.CodexTurnID = update.CodexTurnID
+	}
+	if update.CodexItemID != "" {
+		current.CodexItemID = update.CodexItemID
+	}
+	if update.RevisedPrompt != "" {
+		current.RevisedPrompt = update.RevisedPrompt
+	}
+	if update.SavedPath != "" {
+		current.SavedPath = update.SavedPath
+	}
+	if update.InstanceProfileID != "" {
+		current.InstanceProfileID = strings.TrimSpace(update.InstanceProfileID)
+	}
+	if update.WorkflowProfileID != "" {
+		current.WorkflowProfileID = strings.TrimSpace(update.WorkflowProfileID)
+	}
+	if update.WorkflowProfileVersion != "" {
+		current.WorkflowProfileVersion = strings.TrimSpace(update.WorkflowProfileVersion)
+	}
+	if update.WorkflowDigest != "" {
+		current.WorkflowDigest = strings.TrimSpace(update.WorkflowDigest)
+	}
+	if update.APITemplateDigest != "" {
+		current.APITemplateDigest = strings.TrimSpace(update.APITemplateDigest)
+	}
+	if update.AutoDLSubmissionState != "" {
+		current.AutoDLSubmissionState = strings.TrimSpace(update.AutoDLSubmissionState)
+	}
+	if update.ComfyPromptID != "" {
+		current.ComfyPromptID = strings.TrimSpace(update.ComfyPromptID)
+	}
+	if update.SubmittedAt != "" {
+		current.SubmittedAt = strings.TrimSpace(update.SubmittedAt)
+	}
+	return current, nil
 }
 
 func generationProviderTaskIDFromMessageID(messageID string, localID string) string {

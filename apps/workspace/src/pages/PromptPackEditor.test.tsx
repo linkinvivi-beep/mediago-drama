@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { SWRConfig } from "swr";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -1634,6 +1634,28 @@ describe("PromptPackEditor", () => {
 		expect(updatePromptPackEntry).not.toHaveBeenCalled();
 		expect(screen.queryByRole("button", { name: "保存" })).not.toBeInTheDocument();
 	});
+
+	it("closes the dedicated desktop window when returning to settings", async () => {
+		const closeWindow = vi.spyOn(window, "close").mockImplementation(() => undefined);
+		renderEditor();
+
+		fireEvent.click(await screen.findByRole("button", { name: "返回设置" }));
+
+		expect(closeWindow).toHaveBeenCalledTimes(1);
+		closeWindow.mockRestore();
+	});
+
+	it("navigates direct browser visits back to settings", async () => {
+		window.mediagoDesktop = {
+			...window.mediagoDesktop,
+			isElectron: false,
+		} as unknown as typeof window.mediagoDesktop;
+		renderEditorWithSettingsFallback();
+
+		fireEvent.click(await screen.findByRole("button", { name: "返回设置" }));
+
+		expect(await screen.findByText("设置页回退目标")).toBeInTheDocument();
+	});
 });
 
 const renderEditor = (entry = "/prompt-pack-editor") =>
@@ -1641,6 +1663,18 @@ const renderEditor = (entry = "/prompt-pack-editor") =>
 		<MemoryRouter initialEntries={[entry]}>
 			<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
 				<PromptPackEditor />
+			</SWRConfig>
+		</MemoryRouter>,
+	);
+
+const renderEditorWithSettingsFallback = () =>
+	render(
+		<MemoryRouter initialEntries={["/prompt-pack-editor"]}>
+			<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
+				<Routes>
+					<Route path="/prompt-pack-editor" element={<PromptPackEditor />} />
+					<Route path="/settings" element={<div>设置页回退目标</div>} />
+				</Routes>
 			</SWRConfig>
 		</MemoryRouter>,
 	);

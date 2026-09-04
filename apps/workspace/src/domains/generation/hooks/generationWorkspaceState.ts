@@ -316,12 +316,15 @@ interface GenerationTaskSnapshot {
 const pendingGenerationStatuses = new Set([
 	"loading",
 	"streaming",
+	"preparing",
 	"submitting",
 	"submitted",
 	"running",
 	"pending",
 	"processing",
 	"queued",
+	"waiting_reconnect",
+	"importing",
 ]);
 
 export const removeMessagesBackedByTasks = (

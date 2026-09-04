@@ -65,14 +65,17 @@ func TestPrepareTextPromptOptimizationResolvesProtectedReference(t *testing.T) {
 		},
 	}
 
-	status, err := workflow.prepareTextPromptOptimization(context.Background(), &payload)
+	execution, status, err := workflow.prepareTextPromptOptimization(context.Background(), &payload)
 	if err != nil || status != 200 {
 		t.Fatalf("prepareTextPromptOptimization() status = %d error = %v", status, err)
 	}
 	if payload.PromptOptimization != nil {
 		t.Fatalf("prompt optimization = %#v, want consumed server-side", payload.PromptOptimization)
 	}
-	if !strings.Contains(payload.Prompt, "private optimization prompt") || !strings.Contains(payload.Prompt, "原始视频提示词") {
-		t.Fatalf("prompt = %q, want protected reference and original prompt", payload.Prompt)
+	if payload.Prompt != "原始视频提示词" {
+		t.Fatalf("persistable prompt = %q, want original prompt without protected body", payload.Prompt)
+	}
+	if !strings.Contains(execution.Prompt, "private optimization prompt") || !strings.Contains(execution.Prompt, "原始视频提示词") {
+		t.Fatalf("execution prompt = %q, want protected reference and original prompt in data envelope", execution.Prompt)
 	}
 }

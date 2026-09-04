@@ -175,4 +175,18 @@ describe("UpdatesPanel", () => {
 			expect(openExternalUrl).toHaveBeenCalledWith("https://example.com/releases"),
 		);
 	});
+
+	it("does not render a download-page button when no release feed exists", async () => {
+		vi.mocked(getDesktopUpdateCapability).mockResolvedValue({
+			supportsAutoUpdate: false,
+			releasePageUrl: "",
+			reason: "releaseFeedNotConfigured",
+		});
+		render(<UpdatesPanel />);
+
+		await screen.findByText("当前版本暂未配置更新源。");
+		expect(screen.queryByText("releaseFeedNotConfigured")).not.toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: /前往下载页/ })).not.toBeInTheDocument();
+		expect(openExternalUrl).not.toHaveBeenCalled();
+	});
 });

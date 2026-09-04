@@ -9,6 +9,8 @@ import {
 } from "@/domains/generation/components/mediaGenerationHelpers";
 import { GenerationVideoThumbnail } from "@/domains/generation/components/GenerationVideoThumbnail";
 import { ReferencePreviewStrip } from "@/domains/generation/components/ReferencePreviewStrip";
+import type { ReferenceImportProgress } from "@/domains/generation/lib/reference-file-import";
+import { useReferenceFileDropTarget } from "@/domains/generation/hooks/useReferenceFileDropTarget";
 import type { GenerationEntry } from "@/domains/generation/hooks/useGenerationWorkspace.helpers";
 import { generationStatusLabel } from "@/domains/generation/hooks/useGenerationWorkspace.helpers";
 import type { MediaAsset } from "@/domains/workspace/api/media";
@@ -22,13 +24,14 @@ export interface ReferenceSelectionDialogProps {
 	entries: GenerationEntry[];
 	inputId: string;
 	isUploading: boolean;
+	importProgress?: ReferenceImportProgress | null;
 	maxReferences?: number;
 	mediaAssets: MediaAsset[];
 	onOpenChange: (open: boolean) => void;
+	onImportFiles: (files: File[]) => Promise<unknown> | void;
 	onRefreshAssets?: () => void;
 	onRemoveReference: (asset: MediaAsset) => void;
 	onToggleReference: (asset: MediaAsset) => void;
-	onUpload: (event: React.ChangeEvent<HTMLInputElement>) => void;
 	open: boolean;
 	referenceCount?: number;
 	references: MediaAsset[];
@@ -60,13 +63,14 @@ interface ReferenceSelectionDialogController {
 	disabled: boolean;
 	inputId: string;
 	isUploading: boolean;
+	importProgress?: ReferenceImportProgress | null;
 	kindFilters: ReferenceKindFilter[];
 	maxReferences?: number;
 	onOpenChange: (open: boolean) => void;
+	onImportFiles: (files: File[]) => Promise<unknown> | void;
 	onRemoveReference: (asset: MediaAsset) => void;
 	onToggleReference: (asset: MediaAsset) => void;
 	onToggleShortcutReference?: (asset: MediaAsset) => void;
-	onUpload: (event: React.ChangeEvent<HTMLInputElement>) => void;
 	open: boolean;
 	optionCounts: Record<ReferenceKindFilter, number>;
 	options: GeneratedReferenceOption[];
@@ -95,14 +99,15 @@ const useReferenceSelectionDialogController = ({
 	entries,
 	inputId,
 	isUploading,
+	importProgress,
 	maxReferences,
 	mediaAssets,
 	onOpenChange,
+	onImportFiles,
 	onRefreshAssets,
 	onRemoveReference,
 	onToggleReference,
 	onToggleShortcutReference,
-	onUpload,
 	open,
 	referenceCount,
 	references,
@@ -115,13 +120,16 @@ const useReferenceSelectionDialogController = ({
 	visibleKindFilters,
 }: ReferenceSelectionDialogProps): ReferenceSelectionDialogController => {
 	const kindFilters = useMemo(
-		() => normalizeReferenceKindFilters(visibleKindFilters),
-		[visibleKindFilters],
+		() => normalizeReferenceKindFilters(visibleKindFilters, selectableKinds),
+		[selectableKinds, visibleKindFilters],
 	);
 	const [kindFilter, setKindFilter] = useState<ReferenceKindFilter>(kindFilters[0] ?? "all");
 	const options = useMemo(
-		() => buildGeneratedReferenceOptions(entries, mediaAssets),
-		[entries, mediaAssets],
+		() =>
+			buildGeneratedReferenceOptions(entries, mediaAssets).filter((option) =>
+				selectableKinds.has(option.kind),
+			),
+		[entries, mediaAssets, selectableKinds],
 	);
 	const optionCounts = useMemo(
 		() => ({
@@ -147,12 +155,14 @@ const useReferenceSelectionDialogController = ({
 			shortcutGroups
 				.map((group) => ({
 					...group,
-					items: group.items.filter((item) =>
-						kindFilter === "all" ? true : item.asset.kind === kindFilter,
+					items: group.items.filter(
+						(item) =>
+							selectableKinds.has(item.asset.kind) &&
+							(kindFilter === "all" || item.asset.kind === kindFilter),
 					),
 				}))
 				.filter((group) => group.items.length > 0),
-		[kindFilter, shortcutGroups],
+		[kindFilter, selectableKinds, shortcutGroups],
 	);
 
 	useEffect(() => {
@@ -171,14 +181,15 @@ const useReferenceSelectionDialogController = ({
 		disabled,
 		inputId,
 		isUploading,
+		importProgress,
 		kindFilters,
 		maxReferences,
 		onKindFilterChange: setKindFilter,
 		onOpenChange,
+		onImportFiles,
 		onRemoveReference,
 		onToggleReference,
 		onToggleShortcutReference,
-		onUpload,
 		open,
 		optionCounts,
 		options,
@@ -199,6 +210,13 @@ const useReferenceSelectionDialogController = ({
 const ReferenceSelectionDialogView: React.FC<{
 	controller: ReferenceSelectionDialogController;
 }> = ({ controller }) => {
+	const { dropTargetProps, isDraggingFiles } = useReferenceFileDropTarget({
+		disabled: controller.disabled,
+		isImporting: controller.isUploading,
+		onImportFiles: async (files) => {
+			await controller.onImportFiles(files);
+		},
+	});
 	if (!controller.open) return null;
 
 	return (
@@ -217,7 +235,12 @@ const ReferenceSelectionDialogView: React.FC<{
 						accept={controller.acceptedFileTypes}
 						className="sr-only"
 						disabled={controller.disabled || controller.isUploading}
-						onChange={controller.onUpload}
+						multiple
+						onChange={(event) => {
+							const files = Array.from(event.currentTarget.files ?? []);
+							event.currentTarget.value = "";
+							if (files.length > 0) void controller.onImportFiles(files);
+						}}
 					/>
 					<Button
 						type="button"
@@ -234,13 +257,21 @@ const ReferenceSelectionDialogView: React.FC<{
 						<span>上传</span>
 					</Button>
 					<p className="shrink-0 text-xs text-muted-foreground">
-						已选 {controller.referenceCount}
-						{controller.maxReferences ? ` / ${controller.maxReferences}` : ""} 个
+						{controller.isUploading && controller.importProgress
+							? `正在导入 ${controller.importProgress.processed}/${controller.importProgress.total}`
+							: `已选 ${controller.referenceCount}${
+									controller.maxReferences ? ` / ${controller.maxReferences}` : ""
+								} 个`}
 					</p>
 				</>
 			}
 		>
-			<div className="grid gap-4">
+			<div className="relative grid gap-4" data-testid="reference-drop-target" {...dropTargetProps}>
+				{isDraggingFiles ? (
+					<div className="absolute inset-0 z-20 flex items-center justify-center rounded-sm border-2 border-dashed border-primary bg-primary/10 text-sm font-medium text-primary backdrop-blur-[1px]">
+						松开即可加入素材库并选为参考
+					</div>
+				) : null}
 				<ReferencePreviewStrip
 					tone="card"
 					disabled={controller.disabled}
@@ -341,8 +372,25 @@ const referenceKindTabs: Array<{ label: string; value: ReferenceKindFilter }> = 
 
 const defaultReferenceKindFilters = referenceKindTabs.map((tab) => tab.value);
 
-const normalizeReferenceKindFilters = (filters: ReferenceKindFilter[] | undefined) =>
-	filters?.length ? filters : defaultReferenceKindFilters;
+const normalizeReferenceKindFilters = (
+	filters: ReferenceKindFilter[] | undefined,
+	selectableKinds: Set<MediaAsset["kind"]>,
+) => {
+	const supportedFilters = defaultReferenceKindFilters.filter((filter) => {
+		if (filter === "all") {
+			return (
+				defaultReferenceKindFilters.filter(
+					(candidate) => candidate !== "all" && selectableKinds.has(candidate),
+				).length > 1
+			);
+		}
+		return selectableKinds.has(filter);
+	});
+	if (!filters?.length) return supportedFilters;
+
+	const visibleSupportedFilters = filters.filter((filter) => supportedFilters.includes(filter));
+	return visibleSupportedFilters.length > 0 ? visibleSupportedFilters : supportedFilters;
+};
 
 const referenceKindFilterLabel = (value: ReferenceKindFilter) => {
 	if (value === "video") return "视频";

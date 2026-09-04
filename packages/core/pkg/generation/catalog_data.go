@@ -6,7 +6,7 @@ type familySpec struct {
 	Routes   []ModelRoute
 }
 
-var familySpecs = []familySpec{
+var familySpecs = append([]familySpec{
 	{
 		Family: ModelFamily{
 			ID:          FamilySeedream,
@@ -308,4 +308,4 @@ var familySpecs = []familySpec{
 			officialRoute(RouteOfficialMiniMaxSpeech28Turbo, FamilyMiniMaxSpeech, VersionMiniMaxSpeech28Turbo, KindAudio, "MiniMax 国内", "speech-2.8-turbo", AdapterOfficialMiniMaxSpeech, "https://platform.minimaxi.com/docs/api-reference/speech-t2a-http", []string{ProviderMiniMax}, minimaxSpeechParams(), false, false),
 		},
 	},
-}
+}, mediaLinkFamilySpecs...)

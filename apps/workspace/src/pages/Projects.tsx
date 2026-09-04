@@ -232,7 +232,7 @@ export const Projects: React.FC = () => {
 		void confirmDialog({
 			title: "永久删除项目？",
 			description:
-				"永久删除后，垃圾箱中的项目文件夹和 MediaGo Drama 中的项目记录都会被清除，无法恢复。",
+				"永久删除后，垃圾箱中的项目文件夹和 MediaLink 中的项目记录都会被清除，无法恢复。",
 			confirmLabel: "永久删除",
 			confirmIcon: <Trash2 />,
 			onConfirm: () => permanentlyDeleteCurrentProject(project),

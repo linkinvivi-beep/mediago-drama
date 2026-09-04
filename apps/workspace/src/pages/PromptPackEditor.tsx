@@ -1,4 +1,5 @@
 import {
+	ChevronLeft,
 	Copy,
 	Download,
 	ExternalLink,
@@ -11,7 +12,7 @@ import {
 } from "lucide-react";
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import useSWR, { useSWRConfig } from "swr";
 import {
 	createPromptPack,
@@ -61,6 +62,7 @@ export interface CreateLocalPromptPackInput {
 export const PromptPackEditor: React.FC = () => {
 	const toast = useToast();
 	const startWindowDrag = useDesktopWindowDrag();
+	const navigate = useNavigate();
 	const { mutate: mutateGlobal } = useSWRConfig();
 	const [searchParams, setSearchParams] = useSearchParams();
 	const selectedPackID = searchParams.get("packId") || undefined;
@@ -422,6 +424,14 @@ export const PromptPackEditor: React.FC = () => {
 		}
 	};
 
+	const returnToSettings = useCallback(() => {
+		if (window.mediagoDesktop?.isElectron || window.opener) {
+			window.close();
+			return;
+		}
+		navigate("/settings");
+	}, [navigate]);
+
 	return (
 		<section className="h-screen min-h-0 overflow-hidden bg-ide-editor text-ide-editor-foreground">
 			<PromptPackWorkspace
@@ -434,14 +444,27 @@ export const PromptPackEditor: React.FC = () => {
 						data-desktop-drag-region
 						onPointerDown={startWindowDrag}
 					>
-						<div className="min-w-0" data-desktop-drag-region>
-							<div className="flex items-center gap-2">
-								<PackageOpen className="size-4 text-muted-foreground" />
-								<h1 className="truncate text-sm font-semibold text-foreground">技能包管理</h1>
+						<div className="flex min-w-0 items-center gap-2" data-desktop-drag-region>
+							<Button
+								type="button"
+								variant="ghost"
+								size="icon"
+								aria-label="返回设置"
+								className="shrink-0"
+								data-desktop-no-drag
+								onClick={returnToSettings}
+							>
+								<ChevronLeft className="size-4" />
+							</Button>
+							<div className="min-w-0" data-desktop-drag-region>
+								<div className="flex items-center gap-2">
+									<PackageOpen className="size-4 text-muted-foreground" />
+									<h1 className="truncate text-sm font-semibold text-foreground">技能包管理</h1>
+								</div>
+								<p className="mt-1 text-xs text-muted-foreground">
+									集中管理技能包及其中的 Skill 和提示词。
+								</p>
 							</div>
-							<p className="mt-1 text-xs text-muted-foreground">
-								集中管理技能包及其中的 Skill 和提示词。
-							</p>
 						</div>
 						{selectedPack && !creatingPack ? (
 							<div className="flex items-center gap-2" data-desktop-no-drag>

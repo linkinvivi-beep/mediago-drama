@@ -44,6 +44,7 @@ import {
 	generationComposerToolbarGhostButtonClassName,
 } from "@/domains/generation/components/GenerationComposerPanel";
 import { GenerationModelRoutePicker } from "@/domains/generation/components/GenerationModelRoutePicker";
+import { AutoDLWorkflowControlsView } from "@/domains/generation/components/AutoDLWorkflowControls";
 import { MediaGenerationInputPanel } from "@/domains/generation/components/MediaGenerationInputPanel";
 import { MediaGenerationWorkspaceDialogs } from "@/domains/generation/components/MediaGenerationWorkspaceDialogs";
 import { PromptOptimizeControl } from "@/domains/generation/components/PromptOptimizeControl";
@@ -74,7 +75,11 @@ import {
 	useGeneratedResultActions,
 } from "@/domains/generation/components/generatedResultActions";
 import { useGenerationCountControl } from "@/domains/generation/components/useGenerationCountControl";
-import { useGenerationWorkspace } from "@/domains/generation/hooks/useGenerationWorkspace";
+import { useAutoDLWorkflowOptions } from "@/domains/generation/hooks/useAutoDLWorkflowOptions";
+import {
+	type GenerationSubmitOverrides,
+	useGenerationWorkspace,
+} from "@/domains/generation/hooks/useGenerationWorkspace";
 import {
 	promptOptimizeModelOptions as listPromptOptimizeModelOptions,
 	usePromptOptimize,
@@ -106,6 +111,9 @@ const openDocumentationUrl = async (url: string) => {
 };
 
 const voicePreviewPlaybackBlockedMessage = "浏览器拦截了自动播放，请再点一次播放。";
+
+const isAutoDLGenerationRoute = (routeId: string) =>
+	routeId === "autodl.image" || routeId === "autodl.minimax-h3";
 
 const generationKindCopy: Record<
 	GenerationKind,
@@ -314,6 +322,11 @@ export const MediaGenerationWorkspace: React.FC<MediaGenerationWorkspaceProps> =
 	const rightPaneRef = useRef<HTMLDivElement>(null);
 	const [previewingVoiceId, setPreviewingVoiceId] = useState<string | null>(null);
 	const [playingVoiceId, setPlayingVoiceId] = useState<string | null>(null);
+	const [autoDLWorkflowProfileId, setAutoDLWorkflowProfileId] = useState("");
+	const [autoDLInstanceProfileId, setAutoDLInstanceProfileId] = useState("");
+	const [autoDLWorkflowParameters, setAutoDLWorkflowParameters] = useState<
+		Record<string, string | number | boolean>
+	>({});
 	const inlineReferenceAssets = useMemo(
 		() =>
 			mergeReferencePreviewAssets(
@@ -424,6 +437,94 @@ export const MediaGenerationWorkspace: React.FC<MediaGenerationWorkspaceProps> =
 	});
 	const resolvedMediaAssetProjectId =
 		mediaAssetProjectId === undefined ? (projectId?.trim() ?? "") : (mediaAssetProjectId ?? "");
+	const autoDLWorkflowOptions = useAutoDLWorkflowOptions(
+		ws.selectedRoute.id,
+		ws.referenceCount,
+		autoDLWorkflowProfileId,
+	);
+	const autoDLSelectionValid = useMemo(() => {
+		if (!isAutoDLGenerationRoute(ws.selectedRoute.id)) return true;
+		if (autoDLWorkflowOptions.isLoading || autoDLWorkflowOptions.error) return false;
+		if (autoDLWorkflowProfileId) {
+			if (
+				!autoDLWorkflowOptions.compatibleProfiles.some(
+					(profile) => profile.id === autoDLWorkflowProfileId,
+				)
+			)
+				return false;
+		} else if (autoDLWorkflowOptions.automaticError) {
+			return false;
+		}
+		const parameterNames = new Set(autoDLWorkflowOptions.parameterNames);
+		if (
+			Object.keys(autoDLWorkflowParameters).some(
+				(name) => !autoDLWorkflowProfileId || !parameterNames.has(name),
+			)
+		)
+			return false;
+		return (
+			!autoDLInstanceProfileId ||
+			(Boolean(autoDLWorkflowProfileId) &&
+				autoDLWorkflowOptions.readyInstances.some(
+					(instance) => instance.id === autoDLInstanceProfileId,
+				))
+		);
+	}, [
+		autoDLInstanceProfileId,
+		autoDLWorkflowOptions,
+		autoDLWorkflowParameters,
+		autoDLWorkflowProfileId,
+		ws.selectedRoute.id,
+	]);
+	const updateAutoDLWorkflowProfile = useCallback((workflowProfileId: string) => {
+		setAutoDLWorkflowProfileId(workflowProfileId);
+		setAutoDLInstanceProfileId("");
+		setAutoDLWorkflowParameters({});
+	}, []);
+	const updateAutoDLWorkflowParameter = useCallback(
+		(name: string, value: string | number | boolean | undefined) => {
+			setAutoDLWorkflowParameters((current) => {
+				const next = { ...current };
+				if (value === undefined || value === "") delete next[name];
+				else next[name] = value;
+				return next;
+			});
+		},
+		[],
+	);
+	const submitGenerationWithAutoDLSelection = useCallback(
+		async (overrides: GenerationSubmitOverrides = {}) => {
+			if (!autoDLSelectionValid) {
+				toast.warning("请先完成 MediaLink 工作流配置");
+				return;
+			}
+			await ws.submitGeneration({
+				...overrides,
+				...(isAutoDLGenerationRoute(ws.selectedRoute.id)
+					? {
+							instanceProfileId: autoDLInstanceProfileId || undefined,
+							workflowParameters: autoDLWorkflowParameters,
+							workflowProfileId: autoDLWorkflowProfileId || undefined,
+						}
+					: {}),
+			});
+		},
+		[
+			autoDLInstanceProfileId,
+			autoDLSelectionValid,
+			autoDLWorkflowParameters,
+			autoDLWorkflowProfileId,
+			toast,
+			ws,
+		],
+	);
+	const submitWorkspace = useCallback(
+		async (event: React.FormEvent<HTMLFormElement>) => {
+			event.preventDefault();
+			await submitGenerationWithAutoDLSelection();
+		},
+		[submitGenerationWithAutoDLSelection],
+	);
 	const defaultDownloadTitle = selectedAssetTitle?.trim() || assetTitle?.trim() || undefined;
 	const selectedPromptOptimizeRouteId = useGenerationWorkspacePreferenceStore(
 		(state) => state.promptOptimizeRouteId,
@@ -511,10 +612,18 @@ export const MediaGenerationWorkspace: React.FC<MediaGenerationWorkspaceProps> =
 		conversationId: promptOptimizeConversationId,
 		conversationScopeId: promptOptimizeConversationScopeId,
 		conversationTitle: promptOptimizeConversationTitle,
+		documentContext,
+		kind: ws.kind,
 		onSuccess: refreshPromptOptimizeHistory,
 		preferCodex: codexAvailable && !selectedPromptOptimizeModel,
 		projectId: resolvedMediaAssetProjectId || projectId,
+		referenceAssetIds: ws.effectiveReferenceAssetIds,
+		referenceBindings: ws.effectiveReferenceBindings,
+		referenceUrls: ws.effectiveReferenceUrls,
 		route: selectedPromptOptimizeModel?.route,
+		targetParams: ws.selectedParams,
+		targetRoute: ws.selectedRoute,
+		targetWorkflowProfileId: autoDLWorkflowProfileId,
 		onOptimized: ws.setPrompt,
 	});
 	useEffect(() => {
@@ -525,7 +634,8 @@ export const MediaGenerationWorkspace: React.FC<MediaGenerationWorkspaceProps> =
 		ws.hasConfiguredRoutesForKind &&
 		!ws.needsConversation &&
 		ws.selectedRoute.status === "available" &&
-		ws.selectedRoute.configured;
+		ws.selectedRoute.configured &&
+		autoDLSelectionValid;
 	const canSubmitWithPromptOptimization =
 		canSubmitPromptOverride &&
 		(Boolean(selectedPromptOptimizeModel?.route) || codexPromptOptimizeAvailable);
@@ -592,7 +702,7 @@ export const MediaGenerationWorkspace: React.FC<MediaGenerationWorkspaceProps> =
 					return;
 				}
 				ws.setPrompt(referencePrompt);
-				await ws.submitGeneration({ prompt: referencePrompt, sourceRefs });
+				await submitGenerationWithAutoDLSelection({ prompt: referencePrompt, sourceRefs });
 				return;
 			}
 
@@ -603,7 +713,7 @@ export const MediaGenerationWorkspace: React.FC<MediaGenerationWorkspaceProps> =
 				});
 				return;
 			}
-			await ws.submitGeneration({
+			await submitGenerationWithAutoDLSelection({
 				prompt: ws.prompt,
 				sourceRefs,
 				promptOptimization: {
@@ -630,9 +740,13 @@ export const MediaGenerationWorkspace: React.FC<MediaGenerationWorkspaceProps> =
 			promptOptimizeConversationTitle,
 			resolvedMediaAssetProjectId,
 			selectedPromptOptimizeModel?.route,
+			submitGenerationWithAutoDLSelection,
 			taskType,
 			toast,
-			ws,
+			ws.addPromptSource,
+			ws.prompt,
+			ws.promptSourceRefs,
+			ws.setPrompt,
 		],
 	);
 	const resultActions = useGeneratedResultActions({
@@ -1673,7 +1787,7 @@ export const MediaGenerationWorkspace: React.FC<MediaGenerationWorkspaceProps> =
 			<MediaGenerationInputPanel
 				canSelectReferenceImages={canSelectReferenceImages}
 				canCopyPrompt={Boolean(ws.fullPrompt.trim())}
-				canSubmit={ws.canSubmit}
+				canSubmit={ws.canSubmit && autoDLSelectionValid}
 				error={ws.error}
 				generationCountControl={generationCountControl}
 				imageSpecControl={
@@ -1687,13 +1801,14 @@ export const MediaGenerationWorkspace: React.FC<MediaGenerationWorkspaceProps> =
 					) : null
 				}
 				isSubmitting={ws.isSubmitting}
+				isImportingReferences={ws.isUploadingAsset}
 				modelControls={modelControls}
 				modelSummary={modelSummary}
 				previewReferenceAssets={previewReferenceAssets}
 				primaryParamControls={primaryParamControls}
 				promptOptimizeControl={
 					<PromptOptimizeControl
-						canOptimize={canOptimizePrompt}
+						canOptimize={canOptimizePrompt && autoDLSelectionValid}
 						codexAvailable={codexPromptOptimizeAvailable}
 						canGenerate={canSubmitWithPromptOptimization}
 						disabled={ws.isSubmitting}
@@ -1707,8 +1822,26 @@ export const MediaGenerationWorkspace: React.FC<MediaGenerationWorkspaceProps> =
 					/>
 				}
 				referenceButtonLabel={referenceButtonLabel}
+				referenceImportProgress={ws.referenceImportProgress}
 				promptEditor={promptEditor}
-				promptExtras={renderedPromptExtras}
+				promptExtras={
+					<>
+						{renderedPromptExtras}
+						<AutoDLWorkflowControlsView
+							disabled={ws.isSubmitting}
+							onInstanceProfileChange={setAutoDLInstanceProfileId}
+							onWorkflowParameterChange={updateAutoDLWorkflowParameter}
+							onWorkflowProfileChange={updateAutoDLWorkflowProfile}
+							options={autoDLWorkflowOptions}
+							value={{
+								instanceProfileId: autoDLInstanceProfileId,
+								routeId: ws.selectedRoute.id,
+								workflowParameters: autoDLWorkflowParameters,
+								workflowProfileId: autoDLWorkflowProfileId,
+							}}
+						/>
+					</>
+				}
 				referenceBadges={resolvedReferenceBadges}
 				requiresReference={false}
 				secondaryParamControls={secondaryParamControls}
@@ -1716,6 +1849,7 @@ export const MediaGenerationWorkspace: React.FC<MediaGenerationWorkspaceProps> =
 				submitLabel={resolvedSubmitLabel}
 				submitTone={kind === "video" ? "video" : "image"}
 				onCopyPrompt={() => void resultActions.copyText(ws.fullPrompt, "没有可复制的完整提示词")}
+				onImportReferenceFiles={ws.importReferenceFiles}
 				onOpenReferenceDialog={() => setReferenceDialogOpen(true)}
 				onRemoveReferencePreview={removePreviewReferenceAsset}
 			/>
@@ -1725,7 +1859,7 @@ export const MediaGenerationWorkspace: React.FC<MediaGenerationWorkspaceProps> =
 	return (
 		<form
 			ref={workspaceRef}
-			onSubmit={ws.submit}
+			onSubmit={submitWorkspace}
 			className={cn(
 				showTabbedHistory
 					? "relative grid h-full min-h-0 grid-rows-[minmax(0,1fr)_auto] bg-card text-card-foreground"

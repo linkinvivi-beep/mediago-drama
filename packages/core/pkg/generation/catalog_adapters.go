@@ -13,6 +13,8 @@ const (
 	ProviderJimeng     = "jimeng"
 	ProviderLibTV      = "libtv"
 	ProviderXiaoyunque = "xiaoyunque"
+	ProviderCodex      = "codex"
+	ProviderAutoDL     = "autodl"
 
 	AdapterOfficialPlanned               = "official.planned"
 	AdapterOfficialOpenAIImage           = "official.openai.image"
@@ -44,4 +46,7 @@ const (
 	AdapterLibTVCLIImage                 = "libtv.cli.image"
 	AdapterLibTVCLIVideo                 = "libtv.cli.video"
 	AdapterPippitCLIVideo                = "pippit.cli.video"
+	AdapterCodexImage                    = "codex.imagegen"
+	AdapterAutoDLComfyImage              = "autodl.comfyui.image"
+	AdapterAutoDLComfyH3Video            = "autodl.comfyui.minimax-h3"
 )

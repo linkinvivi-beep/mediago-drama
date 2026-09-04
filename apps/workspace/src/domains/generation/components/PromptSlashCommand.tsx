@@ -15,6 +15,7 @@ export interface PromptInsertItem {
 	prompt: string;
 	sourceRef?: GenerationContentSourceRef;
 	sourceLabel?: string;
+	type?: "image" | "video";
 }
 
 export interface PromptSlashMenuPosition {

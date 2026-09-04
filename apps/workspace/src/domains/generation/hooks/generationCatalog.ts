@@ -16,7 +16,7 @@ export { fallbackCatalog } from "./generationFallbackCatalog";
 export const defaultFamilyIds: Record<GenerationKind, string> = {
 	image: "gpt-image",
 	text: "gpt-text",
-	video: "seedance",
+	video: "minimax-h3",
 	audio: "minimax-speech",
 };
 

@@ -1,9 +1,15 @@
-import type React from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyedMutator } from "swr";
 import type { MediaAsset, MediaAssetsResponse } from "@/domains/workspace/api/media";
-import { uploadMediaAsset } from "@/domains/workspace/api/media";
 import type { GenerationRoute } from "@/domains/generation/api/generation";
+import {
+	importReferenceFiles as runReferenceFileImport,
+	mediaAssetsInIDOrder,
+	mergeMediaAssetsByID,
+	referenceImportIssueMessage,
+	type ReferenceImportBatchResult,
+	type ReferenceImportProgress,
+} from "@/domains/generation/lib/reference-file-import";
 import {
 	canUseAssetAsReference,
 	maxReferenceUrlsForRoute,
@@ -36,13 +42,19 @@ export const useGenerationReferences = ({
 }: UseGenerationReferencesOptions) => {
 	const [selectedReferenceAssetIds, setSelectedReferenceAssetIds] = useState<string[]>([]);
 	const [isUploadingAsset, setIsUploadingAsset] = useState(false);
+	const [referenceImportProgress, setReferenceImportProgress] =
+		useState<ReferenceImportProgress | null>(null);
+	const importInFlightRef = useRef(false);
+	const isMountedRef = useRef(true);
+	const selectedRouteIDRef = useRef(selectedRoute.id);
+	selectedRouteIDRef.current = selectedRoute.id;
 	const selectableReferenceKinds = useMemo(
 		() => referenceKindsForRoute(selectedRoute),
 		[selectedRoute],
 	);
 	const maxReferenceUrls = maxReferenceUrlsForRoute(selectedRoute);
 	const selectedReferenceAssets = useMemo(
-		() => mediaAssets.filter((asset) => selectedReferenceAssetIds.includes(asset.id)),
+		() => mediaAssetsInIDOrder(selectedReferenceAssetIds, mediaAssets),
 		[mediaAssets, selectedReferenceAssetIds],
 	);
 	const resolvedExtraReferenceAssetIds = useMemo(
@@ -101,6 +113,13 @@ export const useGenerationReferences = ({
 	);
 
 	useEffect(() => {
+		isMountedRef.current = true;
+		return () => {
+			isMountedRef.current = false;
+		};
+	}, []);
+
+	useEffect(() => {
 		if (mediaAssets.length === 0) {
 			setSelectedReferenceAssetIds((current) => (current.length === 0 ? current : []));
 			return;
@@ -142,36 +161,77 @@ export const useGenerationReferences = ({
 		[addReferenceAssetIdWithinLimit, selectableReferenceKinds, selectedRoute],
 	);
 
-	const uploadReferenceAsset = useCallback(
-		async (event: React.ChangeEvent<HTMLInputElement>) => {
-			const file = event.target.files?.[0];
-			event.target.value = "";
-			if (!file) return;
-
+	const importReferenceFiles = useCallback(
+		async (files: readonly File[]): Promise<ReferenceImportBatchResult | null> => {
+			if (importInFlightRef.current || files.length === 0) return null;
+			importInFlightRef.current = true;
+			const routeID = selectedRoute.id;
+			const availableSlots = maxReferenceUrls
+				? Math.max(0, maxReferenceUrls - referenceCount)
+				: undefined;
 			setIsUploadingAsset(true);
+			setReferenceImportProgress({ processed: 0, total: files.length });
 			setError(null);
+
 			try {
-				const asset = await uploadMediaAsset(file, mediaAssetProjectId);
-				await mutateMediaAssets();
-				if (canUseAssetAsReference(asset, selectedRoute, selectableReferenceKinds)) {
+				const batch = await runReferenceFileImport({
+					availableSlots,
+					files,
+					isUploadedAssetCompatible: (asset) =>
+						canUseAssetAsReference(asset, selectedRoute, selectableReferenceKinds),
+					onProgress: (progress) => {
+						if (isMountedRef.current) setReferenceImportProgress(progress);
+					},
+					projectId: mediaAssetProjectId,
+					selectableKinds: selectableReferenceKinds,
+				});
+
+				if (batch.storedAssets.length > 0) {
+					await mutateMediaAssets(
+						(current) => ({
+							assets: mergeMediaAssetsByID(current?.assets ?? mediaAssets, batch.storedAssets),
+						}),
+						{ revalidate: false },
+					);
+					void Promise.resolve(mutateMediaAssets()).catch(() => {
+						if (isMountedRef.current) {
+							setError("素材已入库，但素材列表刷新失败，请稍后重试。");
+						}
+					});
+				}
+
+				if (!isMountedRef.current) return batch;
+				if (selectedRouteIDRef.current !== routeID) {
+					setError("模型已切换，素材已入库，请按当前模型重新选择。");
+					return batch;
+				}
+
+				const importedIDs = batch.selectableAssets.map((asset) => asset.id);
+				if (importedIDs.length > 0) {
 					setSelectedReferenceAssetIds((current) =>
-						addReferenceAssetIdWithinLimit(current, asset.id),
+						trimReferenceAssetIdsToLimit(uniqueStrings([...current, ...importedIDs])),
 					);
 				}
-			} catch (err) {
-				const message = err instanceof Error ? err.message : "素材上传失败。";
-				setError(message);
+				setError(referenceImportIssueMessage(batch));
+				return batch;
 			} finally {
-				setIsUploadingAsset(false);
+				importInFlightRef.current = false;
+				if (isMountedRef.current) {
+					setIsUploadingAsset(false);
+					setReferenceImportProgress(null);
+				}
 			}
 		},
 		[
-			addReferenceAssetIdWithinLimit,
+			maxReferenceUrls,
 			mediaAssetProjectId,
+			mediaAssets,
 			mutateMediaAssets,
+			referenceCount,
 			selectableReferenceKinds,
 			selectedRoute,
 			setError,
+			trimReferenceAssetIdsToLimit,
 		],
 	);
 
@@ -179,14 +239,15 @@ export const useGenerationReferences = ({
 		effectiveReferenceAssetIds,
 		effectiveReferenceUrls,
 		isUploadingAsset,
+		importReferenceFiles,
 		referenceCount,
+		referenceImportProgress,
 		removeReferenceAsset,
 		selectReferenceAsset,
 		selectableReferenceKinds,
 		selectedReferenceAssetIds,
 		selectedReferenceAssets,
 		toggleReferenceAsset,
-		uploadReferenceAsset,
 	};
 };
 

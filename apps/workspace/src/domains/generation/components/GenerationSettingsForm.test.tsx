@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -33,13 +33,14 @@ vi.mock("./GenerationModelRoutePicker", () => ({
 
 const onValueChange = vi.fn();
 
-const Harness: React.FC<{ defaultValue?: unknown; disabled?: boolean }> = ({
-	defaultValue,
-	disabled,
-}) => {
+const Harness: React.FC<{
+	defaultValue?: unknown;
+	disabled?: boolean;
+	kind?: "image" | "video";
+}> = ({ defaultValue, disabled, kind = "image" }) => {
 	const controller = useGenerationSettingsForm({
 		defaultValue,
-		kind: "image",
+		kind,
 		onValueChange,
 		persist: false,
 		projectId: "project-a",
@@ -163,6 +164,20 @@ describe("GenerationSettingsForm", () => {
 		expect(screen.getByRole("combobox", { name: "优化模型" })).toBeDisabled();
 	});
 
+	it("shows the automatic H3 prompt adapter only for the H3 video route", async () => {
+		const { rerender } = render(<Harness kind="video" />);
+
+		const optimizationSection = await screen.findByLabelText("优化提示词设置");
+		expect(within(optimizationSection).getByText("MiniMax H3 官方提示词规则（自动）")).toBeTruthy();
+		expect(
+			within(optimizationSection).getByText("开启优化后，会将 H3 模型规则与所选摄影风格同时应用。"),
+		).toBeTruthy();
+
+		rerender(<Harness kind="image" />);
+		await screen.findByRole("combobox", { name: "模型名称" });
+		expect(screen.queryByText("MiniMax H3 官方提示词规则（自动）")).toBeNull();
+	});
+
 	it("shows_references_only_for_capable_image_routes", async () => {
 		const { rerender } = render(<Harness />);
 		await screen.findByRole("button", { name: "选择参考图" });
@@ -246,6 +261,7 @@ const workspaceValue = () => ({
 const catalog: GenerationModelsResponse = {
 	families: [
 		{ id: "family-image", kind: "image", label: "图片模型" },
+		{ id: "family-h3", kind: "video", label: "MiniMax H3" },
 		{ id: "family-text", kind: "text", label: "文本模型" },
 	],
 	versions: [
@@ -256,6 +272,14 @@ const catalog: GenerationModelsResponse = {
 			id: "version-image",
 			kind: "image",
 			label: "图片 V1",
+		},
+		{
+			canonicalModel: "MiniMax-H3",
+			capabilities: { async: true, supportsReferenceUrls: true },
+			familyId: "family-h3",
+			id: "version-h3",
+			kind: "video",
+			label: "MiniMax H3",
 		},
 		{
 			canonicalModel: "text-model",
@@ -269,6 +293,33 @@ const catalog: GenerationModelsResponse = {
 	routes: [
 		imageRoute("route-reference", true),
 		imageRoute("route-no-reference", false),
+		{
+			adapter: "autodl.comfy.h3.video",
+			async: true,
+			configured: true,
+			docUrl: "",
+			familyId: "family-h3",
+			id: "autodl.minimax-h3",
+			kind: "video",
+			label: "AutoDL · MiniMax H3",
+			model: "MiniMax-H3",
+			params: [
+				{
+					default: "1080p",
+					label: "分辨率",
+					name: "resolution",
+					options: [
+						{ label: "768p（1344×768）", value: "768p" },
+						{ label: "1080p（1920×1080）", value: "1080p" },
+					],
+					type: "select",
+				},
+			],
+			provider: "autodl",
+			status: "available",
+			supportsReferenceUrls: true,
+			versionId: "version-h3",
+		},
 		{
 			adapter: "test.text",
 			async: false,
@@ -287,7 +338,10 @@ const catalog: GenerationModelsResponse = {
 		},
 	],
 	models: [],
-	providers: [{ id: "openai", label: "OpenAI", providerType: "official" }],
+	providers: [
+		{ id: "openai", label: "OpenAI", providerType: "official" },
+		{ id: "autodl", label: "AutoDL", providerType: "custom" },
+	],
 };
 
 function imageRoute(id: string, supportsReferenceUrls: boolean): GenerationRoute {

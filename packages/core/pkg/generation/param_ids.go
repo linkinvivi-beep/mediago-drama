@@ -27,6 +27,7 @@ const (
 	ParamPitch                 ParamID = "pitch"
 	ParamSampleRate            ParamID = "sampleRate"
 	ParamBitrate               ParamID = "bitrate"
+	ParamProfileKind           ParamID = "profileKind"
 )
 
 type ParamGroupID string

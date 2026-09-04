@@ -17,9 +17,16 @@ const workspaceMock = vi.hoisted(() => ({
 	current: {} as Record<string, unknown>,
 	useGenerationWorkspace: vi.fn(),
 }));
+const mediaApiMock = vi.hoisted(() => ({
+	uploadMediaAsset: vi.fn(),
+}));
 
 vi.mock("@/domains/generation/hooks/useGenerationWorkspace", () => ({
 	useGenerationWorkspace: workspaceMock.useGenerationWorkspace,
+}));
+vi.mock("@/domains/workspace/api/media", async (importOriginal) => ({
+	...(await importOriginal<typeof import("@/domains/workspace/api/media")>()),
+	uploadMediaAsset: mediaApiMock.uploadMediaAsset,
 }));
 
 const promptItems: PromptInsertItem[] = [
@@ -41,6 +48,20 @@ const promptItems: PromptInsertItem[] = [
 		name: "电影感优化",
 		prompt: "增强镜头语言与光影层次",
 	},
+	{
+		categoryLabel: "其他",
+		id: "pack-image-only",
+		name: "图片专用",
+		prompt: "图片专用提示词",
+		type: "image",
+	},
+	{
+		categoryLabel: "视频摄影风格",
+		id: "pack-video-only",
+		name: "视频专用",
+		prompt: "视频专用摄影风格",
+		type: "video",
+	},
 ];
 
 const imageAsset: MediaAsset = {
@@ -54,6 +75,13 @@ const imageAsset: MediaAsset = {
 	url: "/api/v1/media-assets/asset-image/content",
 };
 
+const importedImage = (id: string, filename: string): MediaAsset => ({
+	...imageAsset,
+	filename,
+	id,
+	url: `/api/v1/media-assets/${id}/content`,
+});
+
 describe("useGenerationSettingsForm", () => {
 	afterEach(cleanup);
 
@@ -63,6 +91,7 @@ describe("useGenerationSettingsForm", () => {
 		workspaceMock.current = workspaceValue();
 		workspaceMock.useGenerationWorkspace.mockImplementation(() => workspaceMock.current);
 		workspaceMock.useGenerationWorkspace.mockClear();
+		mediaApiMock.uploadMediaAsset.mockReset();
 	});
 
 	it("restores_last_settings_for_kind", async () => {
@@ -94,6 +123,27 @@ describe("useGenerationSettingsForm", () => {
 			"pack-style",
 			"pack-camera",
 		]);
+	});
+
+	it("filters prompt presets by media kind while preserving shared styles", async () => {
+		const image = renderHook(() => useGenerationSettingsForm({ kind: "image", persist: false }));
+		await waitFor(() => expect(image.result.current.isReady).toBe(true));
+		expect(image.result.current.promptInsertItems.map((item) => item.id)).toEqual(
+			expect.arrayContaining(["pack-style", "pack-image-only"]),
+		);
+		expect(image.result.current.promptInsertItems.map((item) => item.id)).not.toContain(
+			"pack-video-only",
+		);
+		image.unmount();
+
+		const video = renderHook(() => useGenerationSettingsForm({ kind: "video", persist: false }));
+		await waitFor(() => expect(video.result.current.isReady).toBe(true));
+		expect(video.result.current.promptInsertItems.map((item) => item.id)).toEqual(
+			expect.arrayContaining(["pack-style", "pack-video-only"]),
+		);
+		expect(video.result.current.promptInsertItems.map((item) => item.id)).not.toContain(
+			"pack-image-only",
+		);
 	});
 
 	it("explicit_task_defaults_win_over_saved_preferences", async () => {
@@ -212,6 +262,101 @@ describe("useGenerationSettingsForm", () => {
 				(option) => option.value === "4k",
 			)?.disabled,
 		).toBe(true);
+	});
+
+	it("imports multiple references once and preserves their selected order", async () => {
+		const first = importedImage("asset-a", "a.png");
+		const second = importedImage("asset-b", "b.png");
+		mediaApiMock.uploadMediaAsset.mockImplementation(async (file: File) =>
+			file.name === "a.png" ? first : second,
+		);
+		workspaceMock.current = {
+			...workspaceValue(),
+			mediaAssets: [second, first],
+		};
+
+		const { result } = renderHook(() => useGenerationSettingsForm({ kind: "image" }));
+		await waitFor(() => expect(result.current.isReady).toBe(true));
+
+		await act(async () => {
+			await result.current.importReferenceFiles([
+				new File(["a"], "a.png", { type: "image/png" }),
+				new File(["b"], "b.png", { type: "image/png" }),
+			]);
+		});
+
+		expect(result.current.value.referenceAssetIds).toEqual(["asset-a", "asset-b"]);
+		expect(result.current.selectedReferenceAssets.map((asset) => asset.id)).toEqual([
+			"asset-a",
+			"asset-b",
+		]);
+		expect(workspaceMock.current.mutateMediaAssets).toHaveBeenCalledWith(expect.any(Function), {
+			revalidate: false,
+		});
+	});
+
+	it("preflights the remaining reference limit before upload", async () => {
+		const second = importedImage("asset-b", "b.png");
+		mediaApiMock.uploadMediaAsset.mockResolvedValue(second);
+		const { result } = renderHook(() =>
+			useGenerationSettingsForm({
+				defaultValue: {
+					referenceAssetIds: ["asset-image"],
+					routeId: "route-reference",
+				},
+				kind: "image",
+			}),
+		);
+		await waitFor(() => expect(result.current.isReady).toBe(true));
+
+		await act(async () => {
+			await result.current.importReferenceFiles([
+				new File(["b"], "b.png", { type: "image/png" }),
+				new File(["c"], "c.png", { type: "image/png" }),
+			]);
+		});
+
+		expect(mediaApiMock.uploadMediaAsset).toHaveBeenCalledTimes(1);
+		expect(result.current.value.referenceAssetIds).toEqual(["asset-image", "asset-b"]);
+		expect(result.current.error).toContain("c.png");
+	});
+
+	it("does not upload when the selected route has no reference support", async () => {
+		const { result } = renderHook(() =>
+			useGenerationSettingsForm({
+				defaultValue: { routeId: "route-no-reference" },
+				kind: "image",
+			}),
+		);
+		await waitFor(() => expect(result.current.isReady).toBe(true));
+
+		await act(async () => {
+			await result.current.importReferenceFiles([new File(["a"], "a.png", { type: "image/png" })]);
+		});
+
+		expect(mediaApiMock.uploadMediaAsset).not.toHaveBeenCalled();
+		expect(result.current.value.referenceAssetIds).toEqual([]);
+		expect(result.current.error).toContain("当前模型不支持图片参考素材");
+	});
+
+	it("keeps successful references when another upload fails", async () => {
+		const first = importedImage("asset-a", "a.png");
+		mediaApiMock.uploadMediaAsset.mockImplementation(async (file: File) => {
+			if (file.name === "b.png") throw new Error("上传中断");
+			return first;
+		});
+		const { result } = renderHook(() => useGenerationSettingsForm({ kind: "image" }));
+		await waitFor(() => expect(result.current.isReady).toBe(true));
+
+		await act(async () => {
+			await result.current.importReferenceFiles([
+				new File(["a"], "a.png", { type: "image/png" }),
+				new File(["b"], "b.png", { type: "image/png" }),
+			]);
+		});
+
+		expect(result.current.value.referenceAssetIds).toEqual(["asset-a"]);
+		expect(result.current.error).toContain("b.png：上传中断");
 	});
 
 	it("reports_invalid_until_enabled_prompt_features_are_complete", async () => {
@@ -500,6 +645,7 @@ const workspaceValue = () => ({
 const catalog: GenerationModelsResponse = {
 	families: [
 		{ id: "family-image", kind: "image", label: "图片模型" },
+		{ id: "family-h3", kind: "video", label: "MiniMax H3" },
 		{ id: "family-text", kind: "text", label: "文本模型" },
 	],
 	versions: [
@@ -510,6 +656,14 @@ const catalog: GenerationModelsResponse = {
 			id: "version-image",
 			kind: "image",
 			label: "图片 V1",
+		},
+		{
+			canonicalModel: "MiniMax-H3",
+			capabilities: { async: true, supportsReferenceUrls: true },
+			familyId: "family-h3",
+			id: "version-h3",
+			kind: "video",
+			label: "MiniMax H3",
 		},
 		{
 			canonicalModel: "text-model",
@@ -524,6 +678,22 @@ const catalog: GenerationModelsResponse = {
 		imageRoute("route-reference", "参考图路由", true),
 		imageRoute("route-second", "任务默认路由", true),
 		imageRoute("route-no-reference", "无参考图路由", false),
+		{
+			adapter: "autodl.comfy.h3.video",
+			async: true,
+			configured: true,
+			docUrl: "",
+			familyId: "family-h3",
+			id: "autodl.minimax-h3",
+			kind: "video",
+			label: "AutoDL · MiniMax H3",
+			model: "MiniMax-H3",
+			params: [],
+			provider: "autodl",
+			status: "available",
+			supportsReferenceUrls: true,
+			versionId: "version-h3",
+		},
 		{
 			adapter: "test.text",
 			async: false,
@@ -542,7 +712,10 @@ const catalog: GenerationModelsResponse = {
 		},
 	],
 	models: [],
-	providers: [{ id: "openai", label: "OpenAI", providerType: "official" }],
+	providers: [
+		{ id: "openai", label: "OpenAI", providerType: "official" },
+		{ id: "autodl", label: "AutoDL", providerType: "custom" },
+	],
 };
 
 function imageRoute(id: string, label: string, supportsReferenceUrls: boolean): GenerationRoute {

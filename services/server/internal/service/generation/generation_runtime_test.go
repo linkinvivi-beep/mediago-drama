@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -14,8 +16,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,6 +27,7 @@ import (
 	"github.com/mediago-dev/mediago-drama/packages/core/pkg/generation/runtime"
 	"github.com/mediago-dev/mediago-drama/packages/core/pkg/multimodal"
 	mediamcp "github.com/mediago-dev/mediago-drama/packages/mcp/pkg/mcp"
+	"github.com/mediago-dev/mediago-drama/services/server/internal/platform/codexapp"
 	"github.com/mediago-dev/mediago-drama/services/server/internal/repository"
 	"github.com/mediago-dev/mediago-drama/services/server/internal/service/media"
 	"github.com/mediago-dev/mediago-drama/services/server/internal/service/settings"
@@ -42,6 +47,7 @@ func TestCacheGenerationResponseAssetsSavesBase64Locally(t *testing.T) {
 				Kind:     coregeneration.KindImage,
 				Base64:   base64.StdEncoding.EncodeToString([]byte("image-bytes")),
 				MIMEType: "image/png",
+				Metadata: map[string]any{"saved_path": "/private/codex/output.png"},
 			},
 		},
 	})
@@ -54,6 +60,9 @@ func TestCacheGenerationResponseAssetsSavesBase64Locally(t *testing.T) {
 	}
 	if response.Assets[0].Base64 != "" {
 		t.Fatalf("asset base64 should be cleared after local cache")
+	}
+	if _, exists := response.Assets[0].Metadata["saved_path"]; exists {
+		t.Fatalf("asset metadata = %+v, want internal saved path cleared", response.Assets[0].Metadata)
 	}
 
 	files, err := os.ReadDir(mediaDir)
@@ -91,6 +100,161 @@ func TestCacheGenerationResponseAssetsRecordsWarnings(t *testing.T) {
 	warnings := StringSliceFromMetadata(response.Metadata, "asset_cache_warnings")
 	if len(warnings) != 1 || !strings.Contains(warnings[0], "unsupported generated asset url") {
 		t.Fatalf("warnings = %#v, want unsupported url warning", warnings)
+	}
+}
+
+func TestCacheGenerationResponseAssetsDoesNotGrantProvidersLocalFileAccess(t *testing.T) {
+	secretPath := filepath.Join(t.TempDir(), "secret.png")
+	if err := os.WriteFile(secretPath, testPNGBytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mediaAssets := media.NewMediaAssets(filepath.Join(t.TempDir(), "settings.db"), t.TempDir())
+	workflow := NewGenerationService(nil, nil, mediaAssets)
+	asset := coregeneration.Asset{Kind: coregeneration.KindImage, MIMEType: "image/png"}
+	// This catches any generic server-only path capability accidentally exposed
+	// on core assets without coupling the test to a permanent field.
+	if field := reflect.ValueOf(&asset).Elem().FieldByName("LocalPath"); field.IsValid() && field.CanSet() {
+		field.SetString(secretPath)
+	}
+	response := workflow.CacheGenerationResponseAssets(context.Background(), coregeneration.Response{Assets: []coregeneration.Asset{asset}})
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 0 || len(response.Assets) != 1 || response.Assets[0].URL != "" {
+		t.Fatalf("provider local path imported: response=%+v assets=%+v", response, assets)
+	}
+	for _, value := range []string{secretPath, "file://" + secretPath} {
+		result := workflow.CacheGenerationResponseAssets(context.Background(), coregeneration.Response{Assets: []coregeneration.Asset{{Kind: coregeneration.KindImage, URL: value, MIMEType: "image/png", Metadata: map[string]any{"saved_path": secretPath}}}})
+		if warnings := StringSliceFromMetadata(result.Metadata, "asset_cache_warnings"); len(warnings) != 1 {
+			t.Fatalf("path %q warnings = %v, want rejected", value, warnings)
+		}
+		if _, exists := result.Assets[0].Metadata["saved_path"]; exists {
+			t.Fatalf("failed cache retained internal metadata: %+v", result.Assets[0].Metadata)
+		}
+		publicJSON, err := json.Marshal(GenerationResponseFromCore(result, string(coregeneration.KindImage)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(publicJSON, []byte(secretPath)) || bytes.Contains(publicJSON, []byte("file://")) {
+			t.Fatalf("provider local path leaked through public response: %s", publicJSON)
+		}
+	}
+}
+
+func TestCodexImagePayloadIsScrubbedWhenMediaStoreIsUnavailable(t *testing.T) {
+	encoded := base64.StdEncoding.EncodeToString(testPNGBytes())
+	response := NewGenerationService(nil, nil, nil).CacheGenerationResponseAssets(context.Background(), coregeneration.Response{
+		Status: "completed",
+		Assets: []coregeneration.Asset{{
+			Kind:     coregeneration.KindImage,
+			Base64:   encoded,
+			MIMEType: "image/png",
+			Metadata: map[string]any{"_medialink_internal_codex_image_payload": true},
+		}},
+	})
+	assertCodexPayloadScrubbedAfterCacheFailure(t, response, encoded)
+
+	// Unmarked inline results belong to existing providers and retain the
+	// previous no-store behavior.
+	legacy := NewGenerationService(nil, nil, nil).CacheGenerationResponseAssets(context.Background(), coregeneration.Response{
+		Status: "completed",
+		Assets: []coregeneration.Asset{{Kind: coregeneration.KindImage, Base64: encoded, MIMEType: "image/png"}},
+	})
+	if len(legacy.Assets) != 1 || legacy.Assets[0].Base64 != encoded || legacy.Status != "completed" {
+		t.Fatalf("unmarked provider response changed: %+v", legacy)
+	}
+}
+
+func TestCodexImagePayloadIsScrubbedWhenMediaSaveFails(t *testing.T) {
+	encoded := base64.StdEncoding.EncodeToString(testPNGBytes())
+	mediaAssets := media.NewMediaAssetsFromRepository(nil, t.TempDir(), "", nil, errors.New("forced media save failure"))
+	response := NewGenerationService(nil, nil, mediaAssets).CacheGenerationResponseAssets(context.Background(), coregeneration.Response{
+		Status: "completed",
+		Assets: []coregeneration.Asset{{
+			Kind:     coregeneration.KindImage,
+			Base64:   encoded,
+			MIMEType: "image/png",
+			Metadata: map[string]any{"_medialink_internal_codex_image_payload": true},
+		}},
+	})
+	assertCodexPayloadScrubbedAfterCacheFailure(t, response, encoded)
+}
+
+func TestCodexImagePayloadIsScrubbedWhenCacheContextIsCanceled(t *testing.T) {
+	encoded := base64.StdEncoding.EncodeToString(testPNGBytes())
+	mediaAssets := media.NewMediaAssets(filepath.Join(t.TempDir(), "settings.db"), t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	response := NewGenerationService(nil, nil, mediaAssets).CacheGenerationResponseAssets(ctx, coregeneration.Response{
+		Status: "completed",
+		Assets: []coregeneration.Asset{{
+			Kind:     coregeneration.KindImage,
+			Base64:   encoded,
+			MIMEType: "image/png",
+			Metadata: map[string]any{"_medialink_internal_codex_image_payload": true},
+		}},
+	})
+	assertCodexPayloadScrubbedAfterCacheFailure(t, response, encoded)
+	assets, err := mediaAssets.List("")
+	if err != nil || len(assets) != 0 {
+		t.Fatalf("canceled cache stored assets = %+v, err %v", assets, err)
+	}
+}
+
+func TestCodexProgressCacheFailurePersistsNoPayload(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	task := testCodexGenerationTask("task-codex-cache-failure", "running")
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	encoded := base64.StdEncoding.EncodeToString(testPNGBytes())
+	mediaAssets := media.NewMediaAssetsFromRepository(nil, t.TempDir(), "", nil, errors.New("forced progress cache failure"))
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	workflow.persistGenerationProgress(context.Background(), task, coregeneration.ProgressEvent{Response: coregeneration.Response{
+		Status: "importing",
+		Assets: []coregeneration.Asset{{
+			Kind:     coregeneration.KindImage,
+			Base64:   encoded,
+			MIMEType: "image/png",
+			Metadata: map[string]any{"_medialink_internal_codex_image_payload": true},
+		}},
+	}}, "", "", "")
+	stored, found, err := store.Get(task.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() = found %v, err %v", found, err)
+	}
+	if stored.Status != "failed" || len(stored.Assets) != 0 || stored.Error == "" || !strings.Contains(stored.Message, "导入 MediaLink 素材库失败") {
+		t.Fatalf("stored task = %+v, want explicit payload-free cache failure", stored)
+	}
+	publicJSON, err := json.Marshal(GenerationTaskForClient(stored))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{encoded, "_medialink_internal_codex_image_payload"} {
+		if bytes.Contains(publicJSON, []byte(forbidden)) {
+			t.Fatalf("stored public task leaked %q: %s", forbidden, publicJSON)
+		}
+	}
+}
+
+func assertCodexPayloadScrubbedAfterCacheFailure(t *testing.T, response coregeneration.Response, encoded string) {
+	t.Helper()
+	if response.Status != "failed" || len(response.Assets) != 1 || response.Assets[0].Base64 != "" {
+		t.Fatalf("cache response = %+v, want explicit failure with scrubbed payload", response)
+	}
+	if _, exists := response.Assets[0].Metadata["_medialink_internal_codex_image_payload"]; exists {
+		t.Fatalf("cache response retained internal marker: %+v", response.Assets[0].Metadata)
+	}
+	publicJSON, err := json.Marshal(GenerationResponseFromCore(response, string(coregeneration.KindImage)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{encoded, "_medialink_internal_codex_image_payload"} {
+		if bytes.Contains(publicJSON, []byte(forbidden)) {
+			t.Fatalf("public response leaked %q: %s", forbidden, publicJSON)
+		}
 	}
 }
 
@@ -770,7 +934,7 @@ func TestCreateVideoGenerationSubmitsProviderTaskInBackground(t *testing.T) {
 		response: coregeneration.Response{ID: "dmx.seedance-2.0-fast:cgt-background", Status: "submitted"},
 	}
 	workflow := NewGenerationService(settingsSvc, store, nil)
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		if route.ID != coregeneration.RouteDMXSeedance20Fast {
 			t.Fatalf("route = %q, want seedance video route", route.ID)
 		}
@@ -850,7 +1014,7 @@ func TestCreateJimengSeedanceQueuesWhenActiveTaskExists(t *testing.T) {
 		response: coregeneration.Response{ID: coregeneration.RouteJimengSeedance20 + ":video-next", Status: "submitted"},
 	}
 	workflow := NewGenerationService(settingsSvc, store, nil)
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		if route.ID != coregeneration.RouteJimengSeedance20 {
 			t.Fatalf("route = %q, want jimeng seedance 2.0 route", route.ID)
 		}
@@ -918,7 +1082,7 @@ func TestCreateJimengSeedanceMiniAndVIPRoutesBypassQueue(t *testing.T) {
 				response: coregeneration.Response{ID: routeID + ":video-direct", Status: "submitted"},
 			}
 			workflow := NewGenerationService(settingsSvc, store, nil)
-			workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+			workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 				if route.ID != routeID {
 					t.Fatalf("route = %q, want %q", route.ID, routeID)
 				}
@@ -971,7 +1135,7 @@ func TestCreateImageGenerationRejectsReferenceURLsBeyondRouteLimitBeforeTask(t *
 	})
 	workflow := NewGenerationService(settingsSvc, store, nil)
 	providerFactoryCalled := false
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		providerFactoryCalled = true
 		return &blockingMultiAssetImageGenerateProvider{
 			started: make(chan coregeneration.Request, 1),
@@ -1043,7 +1207,7 @@ func TestPollQueuedJimengSeedanceSubmitsOldestWhenUnblocked(t *testing.T) {
 		response: coregeneration.Response{ID: coregeneration.RouteJimengSeedance20Fast + ":video-queued-1", Status: "submitted"},
 	}
 	workflow := NewGenerationService(settingsSvc, store, nil)
-	workflow.generationProviderFactory = func(coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		return provider, nil
 	}
 
@@ -1114,7 +1278,7 @@ func TestCreateJimengImageGenerationPersistsOneTaskForRequestedCount(t *testing.
 	}
 	mediaAssets := media.NewMediaAssets(dbPath, t.TempDir())
 	workflow := NewGenerationService(settingsSvc, store, mediaAssets)
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		if route.ID != coregeneration.RouteJimengSeedream50 {
 			t.Fatalf("route = %q, want jimeng seedream route", route.ID)
 		}
@@ -1181,6 +1345,1784 @@ func TestCreateJimengImageGenerationPersistsOneTaskForRequestedCount(t *testing.
 	}
 }
 
+func TestGenerationProgressRuntimeStatePersistsBeforeProviderDisconnects(t *testing.T) {
+	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	task := testCodexGenerationTask("task-progress-runtime", "submitted")
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	provider := &metadataProgressDisconnectProvider{
+		progressPersisted: make(chan struct{}),
+		disconnect:        make(chan struct{}),
+	}
+	workflow := NewGenerationService(nil, store, nil)
+	workflow.launchSubmittedGeneration(task, provider, codexImageRequest(task.ID), "create", "", "")
+
+	select {
+	case <-provider.progressPersisted:
+	case <-time.After(time.Second):
+		t.Fatal("metadata-only progress callback was not emitted")
+	}
+	stored, found, err := store.Get(task.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() = found %v, err %v", found, err)
+	}
+	if stored.Status != "importing" {
+		t.Fatalf("status = %q, want importing", stored.Status)
+	}
+	if stored.ProviderTaskID != codexImageResponseIDPrefix+"thread-progress" {
+		t.Fatalf("ProviderTaskID = %q, want persisted Codex thread id", stored.ProviderTaskID)
+	}
+	wantState := GenerationTaskRuntimeState{
+		CodexThreadID: "thread-progress",
+		CodexTurnID:   "turn-progress",
+		CodexItemID:   "item-progress",
+	}
+	if stored.RuntimeState != wantState {
+		t.Fatalf("RuntimeState = %+v, want %+v", stored.RuntimeState, wantState)
+	}
+
+	close(provider.disconnect)
+	failed := waitForGenerationTask(t, store, task.ID, func(task GenerationTaskRecord) bool { return task.Status == "failed" })
+	if failed.ProviderTaskID != codexImageResponseIDPrefix+"thread-progress" || failed.RuntimeState != wantState {
+		t.Fatalf("failed task recovery identity = %q/%+v, want latest checkpoint", failed.ProviderTaskID, failed.RuntimeState)
+	}
+}
+
+func TestGenerationProgressCheckpointRejectsConflictingAutoDLAttemptIdentity(t *testing.T) {
+	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	current := GenerationTaskRuntimeState{
+		InstanceProfileID:      "instance-a",
+		WorkflowProfileID:      "zimage-t2i",
+		WorkflowProfileVersion: "v1",
+		WorkflowDigest:         "sha256:one",
+		ComfyPromptID:          "prompt-1",
+		SubmittedAt:            "2026-08-30T12:00:00Z",
+	}
+	task := GenerationTaskRecord{
+		ID: "task-autodl-conflict", Kind: "image", RouteID: coregeneration.RouteAutoDLImage,
+		Status: "running", RuntimeState: current,
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	workflow := NewGenerationService(nil, store, nil)
+	conflicting := current
+	conflicting.WorkflowProfileID = "zimage-i2i"
+	workflow.persistGenerationProgress(context.Background(), task, coregeneration.ProgressEvent{
+		Response: coregeneration.Response{
+			Status:   "running",
+			Metadata: map[string]any{"runtime_state": conflicting},
+		},
+	}, "", "", "")
+
+	got, found, err := store.Get(task.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() = found %v, err %v", found, err)
+	}
+	if got.Status != "failed" || got.ErrorCode != generationRuntimeStateConflictCode {
+		t.Fatalf("checkpoint task status/error = %q/%q, want explicit conflict failure", got.Status, got.ErrorCode)
+	}
+	if got.RuntimeState != current {
+		t.Fatalf("checkpoint runtime = %+v, want unchanged %+v", got.RuntimeState, current)
+	}
+}
+
+func TestAutoDLRuntimeConflictCannotBeRevivedByEmptyProgress(t *testing.T) {
+	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	current := completeAutoDLRuntimeIdentity("zimage-t2i")
+	task := GenerationTaskRecord{
+		ID: "task-conflict-empty-progress", Kind: "image", RouteID: coregeneration.RouteAutoDLImage,
+		Status: "running", RuntimeState: current,
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	workflow := NewGenerationService(nil, store, nil)
+	conflicting := current
+	conflicting.WorkflowDigest = "sha256:conflict"
+	workflow.persistGenerationProgress(context.Background(), task, coregeneration.ProgressEvent{
+		Response: coregeneration.Response{Status: "running", Metadata: map[string]any{"runtime_state": conflicting}},
+	}, "", "", "")
+	workflow.persistGenerationProgress(context.Background(), task, coregeneration.ProgressEvent{
+		Response: coregeneration.Response{Status: "running"},
+	}, "", "", "")
+
+	got, found, err := store.Get(task.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() = found %v, err %v", found, err)
+	}
+	if got.Status != "failed" || got.ErrorCode != generationRuntimeStateConflictCode || got.RuntimeState != current {
+		t.Fatalf("task revived after empty progress: status %q error %q state %+v", got.Status, got.ErrorCode, got.RuntimeState)
+	}
+}
+
+func TestAutoDLRuntimeConflictCancelsOwnerAndCannotBeRevivedByCompletedFinal(t *testing.T) {
+	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	current := completeAutoDLRuntimeIdentity("zimage-t2i")
+	task := GenerationTaskRecord{
+		ID: "task-conflict-completed-final", Kind: "image", RouteID: coregeneration.RouteAutoDLImage,
+		Status: "submitted", RuntimeState: current,
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	workflow := NewGenerationService(nil, store, nil)
+	provider := &conflictThenCompletedAutoDLProvider{conflicting: current}
+	provider.conflicting.WorkflowProfileID = "zimage-i2i"
+	ownerCtx, release := workflow.generationTaskContext(task.ID)
+	defer release()
+	workflow.completeSubmittedGeneration(ownerCtx, task, provider, coregeneration.Request{Kind: coregeneration.KindImage}, "create", "", "")
+
+	got, found, err := store.Get(task.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() = found %v, err %v", found, err)
+	}
+	if !provider.ownerCancelled {
+		t.Fatal("runtime conflict did not cancel the registered local owner")
+	}
+	if got.Status != "failed" || got.ErrorCode != generationRuntimeStateConflictCode || got.RuntimeState != current {
+		t.Fatalf("task revived by completed final: status %q error %q state %+v", got.Status, got.ErrorCode, got.RuntimeState)
+	}
+}
+
+func TestCompletedAutoDLTaskIgnoresLateConflictingProgress(t *testing.T) {
+	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	current := completeAutoDLRuntimeIdentity("zimage-t2i")
+	completed := GenerationTaskRecord{
+		ID: "task-completed-late-conflict", Kind: "image", RouteID: coregeneration.RouteAutoDLImage,
+		Status: "completed", RuntimeState: current,
+	}
+	if err := store.Upsert(completed); err != nil {
+		t.Fatal(err)
+	}
+	workflow := NewGenerationService(nil, store, nil)
+	staleRunning := completed
+	staleRunning.Status = "running"
+	conflicting := current
+	conflicting.InstanceProfileID = "instance-b"
+	workflow.persistGenerationProgress(context.Background(), staleRunning, coregeneration.ProgressEvent{
+		Response: coregeneration.Response{Status: "running", Metadata: map[string]any{"runtime_state": conflicting}},
+	}, "", "", "")
+
+	got, found, err := store.Get(completed.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() = found %v, err %v", found, err)
+	}
+	if got.Status != "completed" || got.ErrorCode != "" || got.RuntimeState != current {
+		t.Fatalf("completed task overwritten by late conflict: status %q error %q state %+v", got.Status, got.ErrorCode, got.RuntimeState)
+	}
+}
+
+func TestAutoDLAssetProgressConflictDoesNotImportAsset(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	current := completeAutoDLRuntimeIdentity("zimage-t2i")
+	task := GenerationTaskRecord{
+		ID: "task-asset-conflict", Kind: "image", RouteID: coregeneration.RouteAutoDLImage,
+		Status: "running", RuntimeState: current,
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	conflicting := current
+	conflicting.WorkflowDigest = "sha256:conflict"
+	workflow.persistGenerationProgress(context.Background(), task, coregeneration.ProgressEvent{
+		Response: coregeneration.Response{
+			Status: "running",
+			Assets: []coregeneration.Asset{{
+				Kind: coregeneration.KindImage, MIMEType: "image/png",
+				Base64: base64.StdEncoding.EncodeToString(testPNGBytes()),
+			}},
+			Metadata: map[string]any{"runtime_state": conflicting},
+		},
+	}, "", "", "")
+
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("imported assets = %+v, want none for rejected runtime checkpoint", assets)
+	}
+	got, found, err := store.Get(task.ID)
+	if err != nil || !found || got.Status != "failed" || got.ErrorCode != generationRuntimeStateConflictCode {
+		t.Fatalf("task = found %v err %v status %q error %q", found, err, got.Status, got.ErrorCode)
+	}
+}
+
+func TestAutoDLAssetFinalConflictDoesNotImportAsset(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	current := completeAutoDLRuntimeIdentity("zimage-t2i")
+	task := GenerationTaskRecord{
+		ID: "task-final-asset-conflict", Kind: "image", RouteID: coregeneration.RouteAutoDLImage,
+		Status: "submitted", RuntimeState: current,
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	conflicting := current
+	conflicting.WorkflowDigest = "sha256:conflict"
+	provider := &stubImageProvider{generateResponse: coregeneration.Response{
+		Status: "completed",
+		Assets: []coregeneration.Asset{{
+			Kind: coregeneration.KindImage, MIMEType: "image/png",
+			Base64: base64.StdEncoding.EncodeToString(testPNGBytes()),
+		}},
+		Metadata: map[string]any{"runtime_state": conflicting},
+	}}
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	workflow.completeSubmittedGeneration(context.Background(), task, provider, coregeneration.Request{Kind: coregeneration.KindImage}, "create", "", "")
+
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("final conflict imported assets = %+v", assets)
+	}
+	got, found, err := store.Get(task.ID)
+	if err != nil || !found || got.Status != "failed" || got.ErrorCode != generationRuntimeStateConflictCode {
+		t.Fatalf("task = found %v err %v status %q error %q", found, err, got.Status, got.ErrorCode)
+	}
+}
+
+func TestAutoDLAssetFinalDeleteRaceCompensatesNewAsset(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	current := completeAutoDLRuntimeIdentity("zimage-t2i")
+	task := GenerationTaskRecord{
+		ID: "task-final-asset-delete-race", Kind: "image", RouteID: coregeneration.RouteAutoDLImage,
+		Status: "submitted", RuntimeState: current,
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	provider := &stubImageProvider{generateResponse: coregeneration.Response{
+		Status: "completed",
+		Assets: []coregeneration.Asset{{
+			Kind: coregeneration.KindImage, MIMEType: "image/png",
+			Base64: base64.StdEncoding.EncodeToString(testPNGBytes()),
+		}},
+		Metadata: map[string]any{"runtime_state": current},
+	}}
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	assetCached := make(chan struct{})
+	releaseCAS := make(chan struct{})
+	workflow.generationAssetsCachedHook = func(taskID string) {
+		if taskID == task.ID {
+			close(assetCached)
+			<-releaseCAS
+		}
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		workflow.completeSubmittedGeneration(context.Background(), task, provider, coregeneration.Request{Kind: coregeneration.KindImage}, "create", "", "")
+	}()
+	<-assetCached
+	if deleted, err := store.Delete(task.ID); err != nil || !deleted {
+		t.Fatalf("Delete() = %v, %v", deleted, err)
+	}
+	close(releaseCAS)
+	<-done
+
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("orphan final assets after delete race = %+v", assets)
+	}
+	if _, found, err := store.Get(task.ID); err != nil || found {
+		t.Fatalf("deleted task revived = found %v err %v", found, err)
+	}
+}
+
+func TestAutoDLAssetProgressDeleteRaceCompensatesNewAsset(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	current := completeAutoDLRuntimeIdentity("zimage-t2i")
+	task := GenerationTaskRecord{
+		ID: "task-asset-delete-race", Kind: "image", RouteID: coregeneration.RouteAutoDLImage,
+		Status: "running", RuntimeState: current,
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	assetCached := make(chan struct{})
+	releaseCAS := make(chan struct{})
+	workflow.generationAssetsCachedHook = func(taskID string) {
+		if taskID != task.ID {
+			return
+		}
+		close(assetCached)
+		<-releaseCAS
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		workflow.persistGenerationProgress(context.Background(), task, coregeneration.ProgressEvent{
+			Response: coregeneration.Response{
+				Status: "running",
+				Assets: []coregeneration.Asset{{
+					Kind: coregeneration.KindImage, MIMEType: "image/png",
+					Base64: base64.StdEncoding.EncodeToString(testPNGBytes()),
+				}},
+				Metadata: map[string]any{"runtime_state": current},
+			},
+		}, "", "", "")
+	}()
+	<-assetCached
+	deleted, err := store.Delete(task.ID)
+	if err != nil || !deleted {
+		t.Fatalf("Delete() = %v, %v", deleted, err)
+	}
+	close(releaseCAS)
+	<-done
+
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("orphan assets after delete race = %+v", assets)
+	}
+	if _, found, err := store.Get(task.ID); err != nil || found {
+		t.Fatalf("deleted task revived = found %v err %v", found, err)
+	}
+}
+
+func TestAutoDLAssetProgressTerminalRaceCompensatesNewAsset(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	current := completeAutoDLRuntimeIdentity("zimage-t2i")
+	task := GenerationTaskRecord{
+		ID: "task-asset-terminal-race", Kind: "image", RouteID: coregeneration.RouteAutoDLImage,
+		Status: "running", RuntimeState: current,
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	assetCached := make(chan struct{})
+	releaseCAS := make(chan struct{})
+	workflow.generationAssetsCachedHook = func(taskID string) {
+		if taskID == task.ID {
+			close(assetCached)
+			<-releaseCAS
+		}
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		workflow.persistGenerationProgress(context.Background(), task, coregeneration.ProgressEvent{
+			Response: coregeneration.Response{
+				Status: "running",
+				Assets: []coregeneration.Asset{{
+					Kind: coregeneration.KindImage, MIMEType: "image/png",
+					Base64: base64.StdEncoding.EncodeToString(testPNGBytes()),
+				}},
+				Metadata: map[string]any{"runtime_state": current},
+			},
+		}, "", "", "")
+	}()
+	<-assetCached
+	terminal := task
+	terminal.Status = "completed"
+	if err := store.Upsert(terminal); err != nil {
+		t.Fatal(err)
+	}
+	close(releaseCAS)
+	<-done
+
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("orphan assets after terminal race = %+v", assets)
+	}
+	got, found, err := store.Get(task.ID)
+	if err != nil || !found || got.Status != "completed" {
+		t.Fatalf("terminal task changed = found %v err %v status %q", found, err, got.Status)
+	}
+}
+
+func TestAutoDLAssetProgressDeleteRacePreservesReusedAsset(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	payload := base64.StdEncoding.EncodeToString(testPNGBytes())
+	existing, err := mediaAssets.SaveBase64WithOptions(
+		"image", "image/png", payload, "", generationMediaSaveOptions("", "", ""),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := completeAutoDLRuntimeIdentity("zimage-t2i")
+	task := GenerationTaskRecord{
+		ID: "task-reused-asset-delete-race", Kind: "image", RouteID: coregeneration.RouteAutoDLImage,
+		Status: "running", RuntimeState: current,
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	assetCached := make(chan struct{})
+	releaseCAS := make(chan struct{})
+	workflow.generationAssetsCachedHook = func(taskID string) {
+		if taskID == task.ID {
+			close(assetCached)
+			<-releaseCAS
+		}
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		workflow.persistGenerationProgress(context.Background(), task, coregeneration.ProgressEvent{
+			Response: coregeneration.Response{
+				Status:   "running",
+				Assets:   []coregeneration.Asset{{Kind: coregeneration.KindImage, MIMEType: "image/png", Base64: payload}},
+				Metadata: map[string]any{"runtime_state": current},
+			},
+		}, "", "", "")
+	}()
+	<-assetCached
+	if deleted, err := store.Delete(task.ID); err != nil || !deleted {
+		t.Fatalf("Delete() = %v, %v", deleted, err)
+	}
+	close(releaseCAS)
+	<-done
+
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 1 || assets[0].ID != existing.ID {
+		t.Fatalf("reused asset was removed: got %+v, want %q", assets, existing.ID)
+	}
+}
+
+func TestAutoDLActiveHandoffPersistsFirstCompleteCheckpoint(t *testing.T) {
+	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	task := GenerationTaskRecord{
+		ID: "task-handoff-first-checkpoint", Kind: "image", RouteID: coregeneration.RouteAutoDLImage,
+		Status: "running",
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	want := completeAutoDLRuntimeIdentity("zimage-t2i")
+	workflow := NewGenerationService(nil, store, nil)
+	handedOff := workflow.handOffPendingGeneration(task, task, coregeneration.Response{
+		ID:     mustAutoDLImageProviderTaskID(t, "instance-a", "prompt-1"),
+		Status: "running",
+		Metadata: map[string]any{
+			"runtime_state": want,
+		},
+	}, "create")
+	if !handedOff {
+		t.Fatal("handOffPendingGeneration() = false, want persisted handoff")
+	}
+	got, found, err := store.Get(task.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() = found %v err %v", found, err)
+	}
+	if got.RuntimeState != want || got.ProviderTaskID != mustAutoDLImageProviderTaskID(t, "instance-a", "prompt-1") {
+		t.Fatalf("handoff identity/provider = %+v/%q, want %+v", got.RuntimeState, got.ProviderTaskID, want)
+	}
+}
+
+func TestAutoDLH3ActiveHandoffPersistsFirstCompleteCheckpoint(t *testing.T) {
+	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	task := GenerationTaskRecord{
+		ID: "task-h3-handoff-first-checkpoint", Kind: "video", RouteID: coregeneration.RouteAutoDLH3,
+		Status: "running",
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	want := completeAutoDLRuntimeIdentity("h3-ref2v")
+	workflow := NewGenerationService(nil, store, nil)
+	if !workflow.handOffPendingGeneration(task, task, coregeneration.Response{
+		ID:       coregeneration.RouteAutoDLH3 + ":prompt-1",
+		Status:   "running",
+		Metadata: map[string]any{"runtime_state": want},
+	}, "create") {
+		t.Fatal("handOffPendingGeneration() = false, want persisted H3 handoff")
+	}
+	got, found, err := store.Get(task.ID)
+	if err != nil || !found || got.RuntimeState != want || got.ProviderTaskID != coregeneration.RouteAutoDLH3+":prompt-1" {
+		t.Fatalf("H3 handoff = found %v err %v state %+v provider %q", found, err, got.RuntimeState, got.ProviderTaskID)
+	}
+}
+
+func TestAutoDLActiveHandoffRejectsConflictingCheckpoint(t *testing.T) {
+	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	current := completeAutoDLRuntimeIdentity("zimage-t2i")
+	task := GenerationTaskRecord{
+		ID: "task-handoff-conflict", Kind: "image", RouteID: coregeneration.RouteAutoDLImage,
+		Status: "running", RuntimeState: current,
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	conflicting := current
+	conflicting.WorkflowProfileID = "zimage-i2i"
+	workflow := NewGenerationService(nil, store, nil)
+	if !workflow.handOffPendingGeneration(task, task, coregeneration.Response{
+		ID:       mustAutoDLImageProviderTaskID(t, "instance-a", "prompt-2"),
+		Status:   "running",
+		Metadata: map[string]any{"runtime_state": conflicting},
+	}, "create") {
+		t.Fatal("conflicting handoff was not persisted as terminal failure")
+	}
+	got, found, err := store.Get(task.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() = found %v err %v", found, err)
+	}
+	if got.Status != "failed" || got.ErrorCode != generationRuntimeStateConflictCode || got.RuntimeState != current || got.ProviderTaskID != "" {
+		t.Fatalf("conflicting handoff = status %q error %q state %+v provider %q", got.Status, got.ErrorCode, got.RuntimeState, got.ProviderTaskID)
+	}
+}
+
+func TestAutoDLActiveHandoffCompletesAnchorAfterMissedProgressCheckpoint(t *testing.T) {
+	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	anchor := GenerationTaskRuntimeState{
+		InstanceProfileID:      "instance-a",
+		WorkflowProfileID:      "zimage-t2i",
+		WorkflowProfileVersion: "v1",
+		WorkflowDigest:         "sha256:one",
+	}
+	task := GenerationTaskRecord{
+		ID: "task-handoff-progress-compensation", Kind: "image", RouteID: coregeneration.RouteAutoDLImage,
+		Status: "running", RuntimeState: anchor,
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	want := completeAutoDLRuntimeIdentity("zimage-t2i")
+	workflow := NewGenerationService(nil, store, nil)
+	if !workflow.handOffPendingGeneration(task, task, coregeneration.Response{
+		ID:       mustAutoDLImageProviderTaskID(t, "instance-a", "prompt-1"),
+		Status:   "running",
+		Metadata: map[string]any{"runtime_state": want},
+	}, "create") {
+		t.Fatal("compensating handoff failed")
+	}
+	got, found, err := store.Get(task.ID)
+	if err != nil || !found || got.RuntimeState != want {
+		t.Fatalf("compensated runtime = found %v err %v state %+v, want %+v", found, err, got.RuntimeState, want)
+	}
+}
+
+func TestAutoDLActiveHandoffRejectsMissingPromptIdentity(t *testing.T) {
+	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	task := GenerationTaskRecord{
+		ID: "task-handoff-missing-prompt", Kind: "image", RouteID: coregeneration.RouteAutoDLImage,
+		Status: "running", ProviderTaskID: mustAutoDLImageProviderTaskID(t, "instance-a", "stale-prompt"),
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	workflow := NewGenerationService(nil, store, nil)
+	if !workflow.handOffPendingGeneration(task, task, coregeneration.Response{
+		ID:     mustAutoDLImageProviderTaskID(t, "instance-a", "prompt-missing-runtime"),
+		Status: "running",
+	}, "create") {
+		t.Fatal("missing runtime handoff was not persisted as terminal failure")
+	}
+	got, found, err := store.Get(task.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() = found %v err %v", found, err)
+	}
+	if got.Status != "failed" || got.ErrorCode != generationRuntimeStateConflictCode || got.ProviderTaskID != "" {
+		t.Fatalf("missing runtime handoff = status %q error %q provider %q", got.Status, got.ErrorCode, got.ProviderTaskID)
+	}
+}
+
+func TestAutoDLActiveHandoffRejectsProviderPromptMismatch(t *testing.T) {
+	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	checkpoint := completeAutoDLRuntimeIdentity("zimage-t2i")
+	task := GenerationTaskRecord{
+		ID: "task-handoff-provider-mismatch", Kind: "image", RouteID: coregeneration.RouteAutoDLImage,
+		Status: "running", RuntimeState: checkpoint,
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	workflow := NewGenerationService(nil, store, nil)
+	if !workflow.handOffPendingGeneration(task, task, coregeneration.Response{
+		ID:       mustAutoDLImageProviderTaskID(t, "instance-a", "stale-prompt"),
+		Status:   "running",
+		Metadata: map[string]any{"runtime_state": checkpoint},
+	}, "create") {
+		t.Fatal("mismatched handoff was not persisted as terminal failure")
+	}
+	got, found, err := store.Get(task.ID)
+	if err != nil || !found || got.Status != "failed" || got.ErrorCode != generationRuntimeStateConflictCode || got.ProviderTaskID != "" {
+		t.Fatalf("provider mismatch = found %v err %v task %+v", found, err, got)
+	}
+}
+
+func TestAutoDLImagePollConflictDoesNotImportAsset(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	current := completeAutoDLRuntimeIdentity("zimage-t2i")
+	task := GenerationTaskRecord{
+		ID: "task-z-poll-conflict", Kind: "image", RouteID: coregeneration.RouteAutoDLImage,
+		Status: "submitted", ProviderTaskID: mustAutoDLImageProviderTaskID(t, "instance-a", "prompt-1"), RuntimeState: current,
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	conflicting := current
+	conflicting.WorkflowDigest = "sha256:conflict"
+	provider := &stubImageProvider{getResponse: coregeneration.Response{
+		ID: mustAutoDLImageProviderTaskID(t, "instance-a", "prompt-1"), Status: "completed",
+		Assets: []coregeneration.Asset{{
+			Kind: coregeneration.KindImage, MIMEType: "image/png",
+			Base64: base64.StdEncoding.EncodeToString(testPNGBytes()),
+		}},
+		Metadata: map[string]any{"runtime_state": conflicting},
+	}}
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+		if route.ID != coregeneration.RouteAutoDLImage {
+			t.Fatalf("route = %q", route.ID)
+		}
+		return provider, nil
+	}
+	workflow.mediaLinkReadiness = func(context.Context, string) (bool, string) { return true, "" }
+	workflow.PollGenerationTask(context.Background(), task)
+
+	got, found, err := store.Get(task.ID)
+	if err != nil || !found || got.Status != "failed" || got.ErrorCode != generationRuntimeStateConflictCode || got.RuntimeState != current {
+		t.Fatalf("poll conflict = found %v err %v status %q code %q state %+v", found, err, got.Status, got.ErrorCode, got.RuntimeState)
+	}
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("poll conflict imported assets = %+v", assets)
+	}
+}
+
+func TestAutoDLImagePollRejectsStoredProviderTaskIDBeforeProviderCall(t *testing.T) {
+	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	checkpoint := completeAutoDLRuntimeIdentity("zimage-t2i")
+	task := GenerationTaskRecord{
+		ID: "task-z-poll-invalid-provider-id", Kind: "image", RouteID: coregeneration.RouteAutoDLImage,
+		Status:         "submitted",
+		ProviderTaskID: "autodl.image:aW5zdGFuY2UtYg:cHJvbXB0LTE",
+		RuntimeState:   checkpoint,
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	provider := &stubImageProvider{getResponse: coregeneration.Response{
+		Status: "running", Metadata: map[string]any{"runtime_state": checkpoint},
+	}}
+	workflow := NewGenerationService(nil, store, nil)
+	workflow.generationProviderFactory = func(coregeneration.ModelRoute) (coregeneration.Provider, error) { return provider, nil }
+	workflow.mediaLinkReadiness = func(context.Context, string) (bool, string) { return true, "" }
+	workflow.PollGenerationTask(context.Background(), task)
+
+	if provider.getCalls.Load() != 0 {
+		t.Fatalf("provider.Get calls = %d, want 0 for mismatched stored identity", provider.getCalls.Load())
+	}
+	got, found, err := store.Get(task.ID)
+	if err != nil || !found || got.Status != "failed" || got.ErrorCode != generationRuntimeStateConflictCode {
+		t.Fatalf("stored task = found %v err %v task %+v", found, err, got)
+	}
+}
+
+func TestAutoDLImagePollDeleteRaceCompensatesAsset(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	current := completeAutoDLRuntimeIdentity("zimage-t2i")
+	task := GenerationTaskRecord{
+		ID: "task-z-poll-delete", Kind: "image", RouteID: coregeneration.RouteAutoDLImage,
+		Status: "submitted", ProviderTaskID: mustAutoDLImageProviderTaskID(t, "instance-a", "prompt-1"), RuntimeState: current,
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	provider := &stubImageProvider{getResponse: coregeneration.Response{
+		ID: mustAutoDLImageProviderTaskID(t, "instance-a", "prompt-1"), Status: "completed",
+		Assets: []coregeneration.Asset{{
+			Kind: coregeneration.KindImage, MIMEType: "image/png",
+			Base64: base64.StdEncoding.EncodeToString(testPNGBytes()),
+		}},
+		Metadata: map[string]any{"runtime_state": current},
+	}}
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	workflow.generationProviderFactory = func(coregeneration.ModelRoute) (coregeneration.Provider, error) { return provider, nil }
+	workflow.mediaLinkReadiness = func(context.Context, string) (bool, string) { return true, "" }
+	assetCached := make(chan struct{})
+	releaseCAS := make(chan struct{})
+	workflow.generationAssetsCachedHook = func(taskID string) {
+		if taskID == task.ID {
+			close(assetCached)
+			<-releaseCAS
+		}
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		workflow.PollGenerationTask(context.Background(), task)
+	}()
+	<-assetCached
+	if deleted, err := store.Delete(task.ID); err != nil || !deleted {
+		t.Fatalf("Delete() = %v, %v", deleted, err)
+	}
+	close(releaseCAS)
+	<-done
+
+	if _, found, err := store.Get(task.ID); err != nil || found {
+		t.Fatalf("deleted poll task revived = found %v err %v", found, err)
+	}
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("poll delete race orphan assets = %+v", assets)
+	}
+}
+
+func TestAutoDLImageManualPollConflictDoesNotImportAsset(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	current := completeAutoDLRuntimeIdentity("zimage-t2i")
+	task := GenerationTaskRecord{
+		ID: "task-z-manual-poll-conflict", Kind: "image", RouteID: coregeneration.RouteAutoDLImage,
+		Status: "submitted", ProviderTaskID: mustAutoDLImageProviderTaskID(t, "instance-a", "prompt-1"), RuntimeState: current,
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	conflicting := current
+	conflicting.WorkflowDigest = "sha256:conflict"
+	provider := &stubImageProvider{getResponse: coregeneration.Response{
+		ID: mustAutoDLImageProviderTaskID(t, "instance-a", "prompt-1"), Status: "completed",
+		Assets: []coregeneration.Asset{{
+			Kind: coregeneration.KindImage, MIMEType: "image/png",
+			Base64: base64.StdEncoding.EncodeToString(testPNGBytes()),
+		}},
+		Metadata: map[string]any{"runtime_state": conflicting},
+	}}
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	workflow.generationProviderFactory = func(coregeneration.ModelRoute) (coregeneration.Provider, error) { return provider, nil }
+	workflow.mediaLinkReadiness = func(context.Context, string) (bool, string) { return true, "" }
+
+	response, status, err := workflow.GetGenerationVideo(context.Background(), task.ID)
+	if err != nil || status != http.StatusOK || response.Status != "failed" || response.ErrorCode != generationRuntimeStateConflictCode {
+		t.Fatalf("GetGenerationVideo() = status %d err %v response %+v", status, err, response)
+	}
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("manual poll conflict imported assets = %+v", assets)
+	}
+}
+
+func TestAutoDLImageManualPollDeleteRaceCompensatesAsset(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	checkpoint := completeAutoDLRuntimeIdentity("zimage-t2i")
+	task := GenerationTaskRecord{
+		ID: "task-z-manual-poll-delete", Kind: "image", RouteID: coregeneration.RouteAutoDLImage,
+		Status: "submitted", ProviderTaskID: mustAutoDLImageProviderTaskID(t, "instance-a", "prompt-1"), RuntimeState: checkpoint,
+	}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	provider := &stubImageProvider{getResponse: coregeneration.Response{
+		ID: mustAutoDLImageProviderTaskID(t, "instance-a", "prompt-1"), Status: "completed",
+		Assets: []coregeneration.Asset{{
+			Kind: coregeneration.KindImage, MIMEType: "image/png",
+			Base64: base64.StdEncoding.EncodeToString(testPNGBytes()),
+		}},
+		Metadata: map[string]any{"runtime_state": checkpoint},
+	}}
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	workflow.generationProviderFactory = func(coregeneration.ModelRoute) (coregeneration.Provider, error) { return provider, nil }
+	workflow.mediaLinkReadiness = func(context.Context, string) (bool, string) { return true, "" }
+	assetCached := make(chan struct{})
+	releaseCAS := make(chan struct{})
+	workflow.generationAssetsCachedHook = func(taskID string) {
+		if taskID == task.ID {
+			close(assetCached)
+			<-releaseCAS
+		}
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _, _ = workflow.GetGenerationVideo(context.Background(), task.ID)
+	}()
+	<-assetCached
+	if deleted, err := store.Delete(task.ID); err != nil || !deleted {
+		t.Fatalf("Delete() = %v, %v", deleted, err)
+	}
+	close(releaseCAS)
+	<-done
+
+	if _, found, err := store.Get(task.ID); err != nil || found {
+		t.Fatalf("deleted manual poll task revived = found %v err %v", found, err)
+	}
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("manual poll delete race orphan assets = %+v", assets)
+	}
+}
+
+func TestAutoDLH3AsyncDispatchPersistsCheckpointAndAsset(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	want := completeAutoDLRuntimeIdentity("h3-ref2va")
+	provider := &blockingVideoGenerateProvider{
+		started: make(chan struct{}), release: make(chan struct{}),
+		response: autoDLH3SubmittedResponse(want, true),
+	}
+	workflow := newAutoDLH3DispatchWorkflow(store, mediaAssets, provider)
+	finished := make(chan struct{})
+	workflow.generationSubmitFinishedHook = func(string) { close(finished) }
+	response, status, err := workflow.CreateGenerationMessage(context.Background(), autoDLH3GenerationRequest())
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("CreateGenerationMessage() = status %d err %v", status, err)
+	}
+	<-provider.started
+	close(provider.release)
+	<-finished
+
+	got, found, err := store.Get(response.ID)
+	if err != nil || !found || got.Status != "submitted" || got.ProviderTaskID != coregeneration.RouteAutoDLH3+":prompt-1" || got.RuntimeState != want || len(got.Assets) != 1 {
+		t.Fatalf("H3 dispatch = found %v err %v task %+v", found, err, got)
+	}
+}
+
+func TestAutoDLH3AsyncDispatchConflictDoesNotImportAsset(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	conflicting := completeAutoDLRuntimeIdentity("h3-ref2va")
+	conflicting.InstanceProfileID = "instance-b"
+	provider := &blockingVideoGenerateProvider{
+		started: make(chan struct{}), release: make(chan struct{}),
+		response: autoDLH3SubmittedResponse(conflicting, true),
+	}
+	workflow := newAutoDLH3DispatchWorkflow(store, mediaAssets, provider)
+	finished := make(chan struct{})
+	workflow.generationSubmitFinishedHook = func(string) { close(finished) }
+	request := autoDLH3GenerationRequest()
+	request.InstanceProfileID = "instance-a"
+	response, status, err := workflow.CreateGenerationMessage(context.Background(), request)
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("CreateGenerationMessage() = status %d err %v", status, err)
+	}
+	<-provider.started
+	close(provider.release)
+	<-finished
+
+	got, found, err := store.Get(response.ID)
+	if err != nil || !found || got.Status != "failed" || got.ErrorCode != generationRuntimeStateConflictCode || got.ProviderTaskID != "" {
+		t.Fatalf("H3 conflict = found %v err %v task %+v", found, err, got)
+	}
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("H3 conflict imported assets = %+v", assets)
+	}
+}
+
+func TestAutoDLH3AsyncDispatchRejectsProviderPromptMismatch(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	checkpoint := completeAutoDLRuntimeIdentity("h3-ref2va")
+	providerResponse := autoDLH3SubmittedResponse(checkpoint, true)
+	providerResponse.ID = coregeneration.RouteAutoDLH3 + ":stale-prompt"
+	provider := &blockingVideoGenerateProvider{
+		started: make(chan struct{}), release: make(chan struct{}), response: providerResponse,
+	}
+	workflow := newAutoDLH3DispatchWorkflow(store, mediaAssets, provider)
+	finished := make(chan struct{})
+	workflow.generationSubmitFinishedHook = func(string) { close(finished) }
+	response, status, err := workflow.CreateGenerationMessage(context.Background(), autoDLH3GenerationRequest())
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("CreateGenerationMessage() = status %d err %v", status, err)
+	}
+	<-provider.started
+	close(provider.release)
+	<-finished
+
+	got, found, err := store.Get(response.ID)
+	if err != nil || !found || got.Status != "failed" || got.ErrorCode != generationRuntimeStateConflictCode || got.ProviderTaskID != "" {
+		t.Fatalf("H3 provider mismatch = found %v err %v task %+v", found, err, got)
+	}
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("H3 provider mismatch imported assets = %+v", assets)
+	}
+}
+
+func TestAutoDLH3AsyncDispatchDeleteRaceDoesNotReviveOrOrphan(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	checkpoint := completeAutoDLRuntimeIdentity("h3-ref2va")
+	provider := &blockingVideoGenerateProvider{
+		started: make(chan struct{}), release: make(chan struct{}),
+		response: autoDLH3SubmittedResponse(checkpoint, true),
+	}
+	workflow := newAutoDLH3DispatchWorkflow(store, mediaAssets, provider)
+	finished := make(chan struct{})
+	workflow.generationSubmitFinishedHook = func(string) { close(finished) }
+	assetCached := make(chan struct{})
+	releaseCAS := make(chan struct{})
+	workflow.generationAssetsCachedHook = func(string) {
+		close(assetCached)
+		<-releaseCAS
+	}
+	response, status, err := workflow.CreateGenerationMessage(context.Background(), autoDLH3GenerationRequest())
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("CreateGenerationMessage() = status %d err %v", status, err)
+	}
+	<-provider.started
+	close(provider.release)
+	<-assetCached
+	if deleted, err := store.Delete(response.ID); err != nil || !deleted {
+		t.Fatalf("Delete() = %v, %v", deleted, err)
+	}
+	close(releaseCAS)
+	<-finished
+
+	if _, found, err := store.Get(response.ID); err != nil || found {
+		t.Fatalf("deleted H3 task revived = found %v err %v", found, err)
+	}
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("H3 delete race orphan assets = %+v", assets)
+	}
+}
+
+func TestAutoDLH3AsyncDispatchDoesNotOverwriteTerminalTask(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	checkpoint := completeAutoDLRuntimeIdentity("h3-ref2va")
+	provider := &blockingVideoGenerateProvider{
+		started: make(chan struct{}), release: make(chan struct{}),
+		response: autoDLH3SubmittedResponse(checkpoint, true),
+	}
+	workflow := newAutoDLH3DispatchWorkflow(store, mediaAssets, provider)
+	finished := make(chan struct{})
+	workflow.generationSubmitFinishedHook = func(string) { close(finished) }
+	assetCached := make(chan struct{})
+	releaseCAS := make(chan struct{})
+	workflow.generationAssetsCachedHook = func(string) {
+		close(assetCached)
+		<-releaseCAS
+	}
+	response, status, err := workflow.CreateGenerationMessage(context.Background(), autoDLH3GenerationRequest())
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("CreateGenerationMessage() = status %d err %v", status, err)
+	}
+	<-provider.started
+	close(provider.release)
+	<-assetCached
+	current, found, err := store.Get(response.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() = found %v err %v", found, err)
+	}
+	current.Status = "completed"
+	if err := store.Upsert(current); err != nil {
+		t.Fatal(err)
+	}
+	close(releaseCAS)
+	<-finished
+
+	got, found, err := store.Get(response.ID)
+	if err != nil || !found || got.Status != "completed" || len(got.Assets) != 0 {
+		t.Fatalf("terminal H3 task overwritten = found %v err %v task %+v", found, err, got)
+	}
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("terminal H3 race orphan assets = %+v", assets)
+	}
+}
+
+func TestAutoDLAssetCompensationPreservesConcurrentDeduplicatedTaskAsset(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	checkpoint := completeAutoDLRuntimeIdentity("zimage-t2i")
+	taskA := GenerationTaskRecord{ID: "task-dedupe-a", Kind: "image", RouteID: coregeneration.RouteAutoDLImage, Status: "running", RuntimeState: checkpoint}
+	taskB := GenerationTaskRecord{ID: "task-dedupe-b", Kind: "image", RouteID: coregeneration.RouteAutoDLImage, Status: "running", RuntimeState: checkpoint}
+	if err := store.Upsert(taskA); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Upsert(taskB); err != nil {
+		t.Fatal(err)
+	}
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	payload := base64.StdEncoding.EncodeToString(testPNGBytes())
+	event := coregeneration.ProgressEvent{Response: coregeneration.Response{
+		Status:   "running",
+		Assets:   []coregeneration.Asset{{Kind: coregeneration.KindImage, MIMEType: "image/png", Base64: payload}},
+		Metadata: map[string]any{"runtime_state": checkpoint},
+	}}
+	assetCached := make(chan struct{})
+	releaseA := make(chan struct{})
+	workflow.generationAssetsCachedHook = func(taskID string) {
+		if taskID == taskA.ID {
+			close(assetCached)
+			<-releaseA
+		}
+	}
+	doneA := make(chan struct{})
+	go func() {
+		defer close(doneA)
+		workflow.persistGenerationProgress(context.Background(), taskA, event, "", "", "")
+	}()
+	<-assetCached
+	workflow.persistGenerationProgress(context.Background(), taskB, event, "", "", "")
+	storedB, found, err := store.Get(taskB.ID)
+	if err != nil || !found || len(storedB.Assets) != 1 || storedB.Assets[0].AssetID == "" {
+		t.Fatalf("task B did not associate deduplicated asset: found %v err %v task %+v", found, err, storedB)
+	}
+	assetID := storedB.Assets[0].AssetID
+	asset, found, err := mediaAssets.Get(assetID)
+	if err != nil || !found {
+		t.Fatalf("Get(asset) = found %v err %v", found, err)
+	}
+	if deleted, err := store.Delete(taskA.ID); err != nil || !deleted {
+		t.Fatalf("Delete(task A) = %v, %v", deleted, err)
+	}
+	close(releaseA)
+	<-doneA
+
+	storedB, found, err = store.Get(taskB.ID)
+	if err != nil || !found || len(storedB.Assets) != 1 || storedB.Assets[0].AssetID != assetID {
+		t.Fatalf("task B association lost: found %v err %v task %+v", found, err, storedB)
+	}
+	if _, found, err := mediaAssets.Get(assetID); err != nil || !found {
+		t.Fatalf("deduplicated asset deleted: found %v err %v", found, err)
+	}
+	if _, err := os.Stat(asset.FilePath); err != nil {
+		t.Fatalf("deduplicated asset file missing: %v", err)
+	}
+}
+
+func TestGenerationAssetClaimsProtectCrossProviderDedupeBeforeAssociation(t *testing.T) {
+	tests := []struct {
+		name   string
+		routeA string
+		routeB string
+	}{
+		{name: "non AutoDL creator and AutoDL reuser", routeA: coregeneration.RouteDMXGPTImage2, routeB: coregeneration.RouteAutoDLImage},
+		{name: "AutoDL creator and non AutoDL reuser", routeA: coregeneration.RouteAutoDLImage, routeB: coregeneration.RouteDMXGPTImage2},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			dbPath := filepath.Join(root, "settings.db")
+			store := NewGenerationTaskService(dbPath, nil)
+			mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+			checkpoint := completeAutoDLRuntimeIdentity("zimage-t2i")
+			taskA := GenerationTaskRecord{ID: "task-cross-provider-a", Kind: "image", RouteID: test.routeA, Status: "running"}
+			taskB := GenerationTaskRecord{ID: "task-cross-provider-b", Kind: "image", RouteID: test.routeB, Status: "running"}
+			if isAutoDLGenerationRouteID(taskA.RouteID) {
+				taskA.RuntimeState = checkpoint
+			}
+			if isAutoDLGenerationRouteID(taskB.RouteID) {
+				taskB.RuntimeState = checkpoint
+			}
+			if err := store.Upsert(taskA); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Upsert(taskB); err != nil {
+				t.Fatal(err)
+			}
+			workflow := NewGenerationService(nil, store, mediaAssets)
+			payload := base64.StdEncoding.EncodeToString(testPNGBytes())
+			eventFor := func(task GenerationTaskRecord) coregeneration.ProgressEvent {
+				response := coregeneration.Response{
+					Status: "running",
+					Assets: []coregeneration.Asset{{Kind: coregeneration.KindImage, MIMEType: "image/png", Base64: payload}},
+				}
+				if isAutoDLGenerationRouteID(task.RouteID) {
+					response.Metadata = map[string]any{"runtime_state": checkpoint}
+				}
+				return coregeneration.ProgressEvent{Response: response}
+			}
+			aCached := make(chan struct{})
+			bCached := make(chan struct{})
+			releaseA := make(chan struct{})
+			releaseB := make(chan struct{})
+			workflow.generationAssetsCachedHook = func(taskID string) {
+				switch taskID {
+				case taskA.ID:
+					close(aCached)
+					<-releaseA
+				case taskB.ID:
+					close(bCached)
+					<-releaseB
+				}
+			}
+			doneA := make(chan struct{})
+			go func() {
+				defer close(doneA)
+				workflow.persistGenerationProgress(context.Background(), taskA, eventFor(taskA), "", "", "")
+			}()
+			<-aCached
+			doneB := make(chan struct{})
+			go func() {
+				defer close(doneB)
+				workflow.persistGenerationProgress(context.Background(), taskB, eventFor(taskB), "", "", "")
+			}()
+			<-bCached
+			if deleted, err := store.Delete(taskA.ID); err != nil || !deleted {
+				t.Fatalf("Delete(task A) = %v, %v", deleted, err)
+			}
+			close(releaseA)
+			<-doneA
+			close(releaseB)
+			<-doneB
+
+			storedB, found, err := store.Get(taskB.ID)
+			if err != nil || !found || len(storedB.Assets) != 1 || storedB.Assets[0].AssetID == "" {
+				t.Fatalf("task B association = found %v err %v task %+v", found, err, storedB)
+			}
+			assetID := storedB.Assets[0].AssetID
+			asset, found, err := mediaAssets.Get(assetID)
+			if err != nil || !found {
+				t.Fatalf("asset = found %v err %v", found, err)
+			}
+			if _, err := os.Stat(asset.FilePath); err != nil {
+				t.Fatalf("asset file missing: %v", err)
+			}
+		})
+	}
+}
+
+func newAutoDLH3DispatchWorkflow(store *GenerationTaskService, mediaAssets *media.MediaAssets, provider coregeneration.Provider) *GenerationService {
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	workflow.autoDLWorkflowResolver = fixedAutoDLWorkflowResolver{resolved: settings.ResolvedAutoDLWorkflow{
+		ProfileID: "h3-ref2va", VersionID: "v1", MediaKind: string(coregeneration.KindVideo),
+		RouteID: coregeneration.RouteAutoDLH3, WorkflowDigest: "sha256:one",
+	}}
+	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+		if route.ID != coregeneration.RouteAutoDLH3 {
+			return nil, fmt.Errorf("unexpected route %q", route.ID)
+		}
+		return provider, nil
+	}
+	workflow.mediaLinkReadiness = func(context.Context, string) (bool, string) { return true, "" }
+	return workflow
+}
+
+type fixedAutoDLWorkflowResolver struct {
+	resolved settings.ResolvedAutoDLWorkflow
+}
+
+func (resolver fixedAutoDLWorkflowResolver) Resolve(context.Context, coregeneration.Request) (settings.ResolvedAutoDLWorkflow, error) {
+	return resolver.resolved, nil
+}
+
+func (resolver fixedAutoDLWorkflowResolver) ResolveVersion(context.Context, string, string) (settings.ResolvedAutoDLWorkflow, error) {
+	return resolver.resolved, nil
+}
+
+func autoDLH3GenerationRequest() GenerationMessageRequest {
+	return GenerationMessageRequest{
+		Kind: string(coregeneration.KindVideo), RouteID: coregeneration.RouteAutoDLH3,
+		Prompt: "a short cinematic clip",
+		Params: map[string]any{"duration": "4", "aspectRatio": "16:9", "resolution": "1080p", "profileKind": "ref2va"},
+	}
+}
+
+func autoDLH3SubmittedResponse(checkpoint GenerationTaskRuntimeState, withAsset bool) coregeneration.Response {
+	response := coregeneration.Response{
+		ID: coregeneration.RouteAutoDLH3 + ":prompt-1", Status: "submitted",
+		Metadata: map[string]any{"runtime_state": checkpoint},
+	}
+	if withAsset {
+		response.Assets = []coregeneration.Asset{{
+			Kind: coregeneration.KindVideo, MIMEType: "video/mp4",
+			Base64: base64.StdEncoding.EncodeToString([]byte("generated-video")),
+		}}
+	}
+	return response
+}
+
+func mustAutoDLImageProviderTaskID(t *testing.T, instanceProfileID string, promptID string) string {
+	t.Helper()
+	value, err := encodeAutoDLImageProviderTaskID(instanceProfileID, promptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return value
+}
+
+func completeAutoDLRuntimeIdentity(workflowProfileID string) GenerationTaskRuntimeState {
+	return GenerationTaskRuntimeState{
+		InstanceProfileID:      "instance-a",
+		WorkflowProfileID:      workflowProfileID,
+		WorkflowProfileVersion: "v1",
+		WorkflowDigest:         "sha256:one",
+		ComfyPromptID:          "prompt-1",
+		SubmittedAt:            "2026-08-30T12:00:00Z",
+	}
+}
+
+type conflictThenCompletedAutoDLProvider struct {
+	conflicting    GenerationTaskRuntimeState
+	ownerCancelled bool
+}
+
+func (*conflictThenCompletedAutoDLProvider) Name() string { return "autodl-conflict-final" }
+
+func (provider *conflictThenCompletedAutoDLProvider) Generate(ctx context.Context, request coregeneration.Request) (coregeneration.Response, error) {
+	callback, ok := coregeneration.ProgressCallbackFromOptions(request.Options)
+	if !ok {
+		return coregeneration.Response{}, fmt.Errorf("missing progress callback")
+	}
+	callback(ctx, coregeneration.ProgressEvent{
+		Response: coregeneration.Response{Status: "running", Metadata: map[string]any{"runtime_state": provider.conflicting}},
+	})
+	select {
+	case <-ctx.Done():
+		provider.ownerCancelled = true
+	default:
+	}
+	return coregeneration.Response{
+		Status: "completed",
+		Assets: []coregeneration.Asset{{
+			Kind: coregeneration.KindImage, MIMEType: "image/png",
+			Base64: base64.StdEncoding.EncodeToString(testPNGBytes()),
+		}},
+	}, nil
+}
+
+func (*conflictThenCompletedAutoDLProvider) Get(context.Context, string) (coregeneration.Response, error) {
+	return coregeneration.Response{}, nil
+}
+
+func TestGenerationProgressRuntimeStateSurvivesReconnectHandoff(t *testing.T) {
+	store := NewGenerationTaskService(filepath.Join(t.TempDir(), "settings.db"), nil)
+	task := testCodexGenerationTask("task-progress-handoff", "submitted")
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	state := GenerationTaskRuntimeState{CodexThreadID: "thread-handoff", CodexTurnID: "turn-handoff"}
+	provider := &reconnectingMetadataProgressProvider{state: state}
+	workflow := NewGenerationService(nil, store, nil)
+	workflow.launchSubmittedGeneration(task, provider, codexImageRequest(task.ID), "create", "", "")
+
+	stored := waitForGenerationTask(t, store, task.ID, func(task GenerationTaskRecord) bool {
+		return task.Status != "submitted" && task.Status != "running"
+	})
+	if stored.Status != "waiting_reconnect" {
+		t.Fatalf("status = %q, want waiting_reconnect", stored.Status)
+	}
+	if stored.ProviderTaskID != codexImageResponseIDPrefix+"thread-handoff" {
+		t.Fatalf("ProviderTaskID = %q, want persisted Codex thread id", stored.ProviderTaskID)
+	}
+	if stored.RuntimeState != state {
+		t.Fatalf("RuntimeState = %+v, want %+v", stored.RuntimeState, state)
+	}
+}
+
+func TestCodexCheckpointSurvivesShutdownAndRestartsWithGet(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	task := testCodexGenerationTask("task-shutdown-recovery", "submitted")
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	provider := &metadataProgressDisconnectProvider{
+		progressPersisted: make(chan struct{}),
+		disconnect:        make(chan struct{}),
+	}
+	parent, shutdown := context.WithCancel(context.Background())
+	workflow := NewGenerationService(nil, store, nil)
+	workflow.SetGenerationRuntimeContext(parent)
+	workflow.launchSubmittedGeneration(task, provider, codexImageRequest(task.ID), "create", "", "")
+	select {
+	case <-provider.progressPersisted:
+	case <-time.After(time.Second):
+		t.Fatal("metadata checkpoint was not emitted")
+	}
+	shutdown()
+	waitForGenerationCancelRegistry(t, workflow, task.ID, false)
+
+	checkpointed, found, err := store.Get(task.ID)
+	if err != nil || !found {
+		t.Fatalf("checkpointed Get() = found %v, err %v", found, err)
+	}
+	wantState := GenerationTaskRuntimeState{
+		CodexThreadID: "thread-progress",
+		CodexTurnID:   "turn-progress",
+		CodexItemID:   "item-progress",
+	}
+	if checkpointed.Status != "importing" || checkpointed.ProviderTaskID != codexImageResponseIDPrefix+"thread-progress" || checkpointed.RuntimeState != wantState {
+		t.Fatalf("checkpointed task = status %q, provider id %q, state %+v", checkpointed.Status, checkpointed.ProviderTaskID, checkpointed.RuntimeState)
+	}
+
+	restartedStore := NewGenerationTaskService(dbPath, nil)
+	recoveryProvider := &quotaSafeCodexProvider{getResponse: completedCoreCodexResponseForThread("thread-progress", "shutdown recovered")}
+	restarted := NewGenerationService(nil, restartedStore, media.NewMediaAssets(dbPath, filepath.Join(root, "media")))
+	restarted.SetMediaLinkProviders(recoveryProvider, &mediaLinkTestProvider{name: "h3"}, func(context.Context, string) (bool, string) { return true, "" })
+	restarted.PollPendingGenerationTasks(context.Background(), 10)
+	recovered, found, err := restartedStore.Get(task.ID)
+	if err != nil || !found || recovered.Status != "completed" || len(recovered.Assets) != 1 {
+		t.Fatalf("recovered task = found %v, err %v, status %q, assets %d", found, err, recovered.Status, len(recovered.Assets))
+	}
+	generateCalls, getCalls := recoveryProvider.counts()
+	if generateCalls != 0 || getCalls != 1 {
+		t.Fatalf("restart provider Generate/Get = %d/%d, want 0/1", generateCalls, getCalls)
+	}
+}
+
+func TestPollPendingCodexImageSkipsLiveLocalOwnerAfterWorkerInterval(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	task := testCodexGenerationTask("task-live-owner", "submitted")
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	provider := &liveOwnedCodexProvider{
+		checkpoint: make(chan struct{}),
+		release:    make(chan struct{}),
+		response:   completedCoreCodexResponseForThread("thread-live", "live completed"),
+	}
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	workflow.SetMediaLinkProviders(provider, &mediaLinkTestProvider{name: "h3"}, func(context.Context, string) (bool, string) { return true, "" })
+	workflow.launchSubmittedGeneration(task, provider, codexImageRequest(task.ID), "create", "", "")
+	select {
+	case <-provider.checkpoint:
+	case <-time.After(time.Second):
+		t.Fatal("live Generate did not emit a checkpoint")
+	}
+
+	time.Sleep(2100 * time.Millisecond)
+	workflow.PollPendingGenerationTasks(context.Background(), 10)
+	if got := provider.getCalls.Load(); got != 0 {
+		t.Fatalf("Get calls while local Generate owns task = %d, want 0", got)
+	}
+	close(provider.release)
+	waitForGenerationTask(t, store, task.ID, func(task GenerationTaskRecord) bool { return task.Status == "completed" })
+	waitForGenerationCancelRegistry(t, workflow, task.ID, false)
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 1 {
+		t.Fatalf("imported media assets = %d, want one", len(assets))
+	}
+	if provider.generateCalls.Load() != 1 || provider.getCalls.Load() != 0 {
+		t.Fatalf("provider Generate/Get = %d/%d, want 1/0", provider.generateCalls.Load(), provider.getCalls.Load())
+	}
+}
+
+func TestCodexPollCompletionAfterDeleteDoesNotImportOrResurrect(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	task := testCodexGenerationTask("task-delete-poll", "waiting_reconnect")
+	task.ProviderTaskID = codexImageResponseIDPrefix + "thread-delete"
+	task.RuntimeState = GenerationTaskRuntimeState{CodexThreadID: "thread-delete"}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	provider := &blockingCodexPollProvider{
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+		response: completedCoreCodexResponseForThread("thread-delete", "deleted result"),
+	}
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	workflow.SetMediaLinkProviders(provider, &mediaLinkTestProvider{name: "h3"}, func(context.Context, string) (bool, string) { return true, "" })
+	done := make(chan struct{})
+	go func() {
+		workflow.PollGenerationTask(context.Background(), task)
+		close(done)
+	}()
+	select {
+	case <-provider.started:
+	case <-time.After(time.Second):
+		t.Fatal("provider Get did not start")
+	}
+	if _, deleted, err := workflow.DeleteGenerationTask(task.ID); err != nil || !deleted {
+		t.Fatalf("DeleteGenerationTask() = deleted %v, err %v", deleted, err)
+	}
+	close(provider.release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("poll did not finish")
+	}
+	if _, found, err := store.Get(task.ID); err != nil || found {
+		t.Fatalf("deleted task found = %v, err %v", found, err)
+	}
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("media assets imported after delete = %d, want zero", len(assets))
+	}
+}
+
+func TestManualCodexStatusAndActiveRetrySkipLiveLocalOwner(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	task := testCodexGenerationTask("task-manual-owner", "submitted")
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	provider := &liveOwnedCodexProvider{
+		checkpoint: make(chan struct{}),
+		release:    make(chan struct{}),
+		response:   completedCoreCodexResponseForThread("thread-live", "live completed"),
+	}
+	released := false
+	defer func() {
+		if !released {
+			close(provider.release)
+		}
+	}()
+	workflow := NewGenerationService(nil, store, media.NewMediaAssets(dbPath, filepath.Join(root, "media")))
+	workflow.SetMediaLinkProviders(provider, &mediaLinkTestProvider{name: "h3"}, func(context.Context, string) (bool, string) { return true, "" })
+	workflow.launchSubmittedGeneration(task, provider, codexImageRequest(task.ID), "create", "", "")
+	select {
+	case <-provider.checkpoint:
+	case <-time.After(time.Second):
+		t.Fatal("live Generate did not emit a checkpoint")
+	}
+	statusResponse, status, err := workflow.GetGenerationVideo(context.Background(), task.ID)
+	if err != nil || status != http.StatusOK || !IsActiveGenerationStatus(statusResponse.Status) {
+		t.Fatalf("GetGenerationVideo() = status %d, response %+v, err %v", status, statusResponse, err)
+	}
+	retryResponse, status, err := workflow.RetryGenerationTask(context.Background(), task.ID)
+	if err != nil || status != http.StatusOK || !IsActiveGenerationStatus(retryResponse.Status) {
+		t.Fatalf("RetryGenerationTask() = status %d, response %+v, err %v", status, retryResponse, err)
+	}
+	if got := provider.getCalls.Load(); got != 0 {
+		t.Fatalf("Get calls while local Generate owns manual status/retry = %d, want 0", got)
+	}
+	close(provider.release)
+	released = true
+	waitForGenerationTask(t, store, task.ID, func(task GenerationTaskRecord) bool { return task.Status == "completed" })
+	waitForGenerationCancelRegistry(t, workflow, task.ID, false)
+}
+
+func TestManualCodexGetCompletionAfterDeleteDoesNotCacheOrResurrect(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	task := testCodexGenerationTask("task-manual-delete", "waiting_reconnect")
+	task.ProviderTaskID = codexImageResponseIDPrefix + "thread-manual-delete"
+	task.RuntimeState = GenerationTaskRuntimeState{CodexThreadID: "thread-manual-delete"}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	provider := &blockingCodexPollProvider{
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+		response: completedCoreCodexResponseForThread("thread-manual-delete", "deleted result"),
+	}
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	workflow.SetMediaLinkProviders(provider, &mediaLinkTestProvider{name: "h3"}, func(context.Context, string) (bool, string) { return true, "" })
+	done := make(chan struct{})
+	go func() {
+		_, _, _ = workflow.GetGenerationVideo(context.Background(), task.ID)
+		close(done)
+	}()
+	select {
+	case <-provider.started:
+	case <-time.After(time.Second):
+		t.Fatal("manual provider Get did not start")
+	}
+	if _, deleted, err := workflow.DeleteGenerationTask(task.ID); err != nil || !deleted {
+		t.Fatalf("DeleteGenerationTask() = deleted %v, err %v", deleted, err)
+	}
+	close(provider.release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("manual Get did not finish")
+	}
+	if _, found, err := store.Get(task.ID); err != nil || found {
+		t.Fatalf("deleted task found = %v, err %v", found, err)
+	}
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("media assets cached after delete = %d, want zero", len(assets))
+	}
+}
+
+func TestManualCodexGetDoesNotOverwriteConcurrentTerminalTask(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaAssets := media.NewMediaAssets(dbPath, filepath.Join(root, "media"))
+	task := testCodexGenerationTask("task-manual-terminal", "waiting_reconnect")
+	task.ProviderTaskID = codexImageResponseIDPrefix + "thread-manual-terminal"
+	task.RuntimeState = GenerationTaskRuntimeState{CodexThreadID: "thread-manual-terminal"}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	provider := &blockingCodexPollProvider{
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+		response: completedCoreCodexResponseForThread("thread-manual-terminal", "provider result"),
+	}
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	workflow.SetMediaLinkProviders(provider, &mediaLinkTestProvider{name: "h3"}, func(context.Context, string) (bool, string) { return true, "" })
+	done := make(chan struct{})
+	go func() {
+		_, _, _ = workflow.GetGenerationVideo(context.Background(), task.ID)
+		close(done)
+	}()
+	select {
+	case <-provider.started:
+	case <-time.After(time.Second):
+		t.Fatal("manual provider Get did not start")
+	}
+	terminal := task
+	terminal.Status = "completed"
+	terminal.Message = "already completed elsewhere"
+	terminal.ProviderTaskID = ""
+	terminal.RuntimeState = GenerationTaskRuntimeState{RevisedPrompt: "existing terminal"}
+	if err := store.Upsert(terminal); err != nil {
+		t.Fatal(err)
+	}
+	close(provider.release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("manual Get did not finish")
+	}
+	stored, found, err := store.Get(task.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() = found %v, err %v", found, err)
+	}
+	if stored.Status != "completed" || stored.Message != "already completed elsewhere" || stored.RuntimeState.RevisedPrompt != "existing terminal" {
+		t.Fatalf("terminal task was overwritten: %+v", stored)
+	}
+	assets, err := mediaAssets.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("provider result cached after concurrent terminal transition = %d, want zero", len(assets))
+	}
+}
+
+func TestRecoverCodexImageAfterRestartUsesExistingThread(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	initialStore := NewGenerationTaskService(dbPath, nil)
+	task := testCodexGenerationTask("task-restart", "waiting_reconnect")
+	task.ProviderTaskID = codexImageResponseIDPrefix + "thread-restart"
+	task.RuntimeState = GenerationTaskRuntimeState{CodexThreadID: "thread-restart", CodexTurnID: "turn-started"}
+	if err := initialStore.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+
+	jobDir := filepath.Join(root, "generation", "codex-image", task.ID, "attempt-0123456789abcdef0123456789abcdef")
+	savedPath := writeTestPNG(t, jobDir, "recovered.png")
+	session := &codexImageSessionStub{read: func(_ context.Context, threadID string) (codexapp.ImageGenerationResult, error) {
+		return completedCodexImageResult(threadID, "turn-restart", "item-restart", savedPath), nil
+	}}
+
+	restartedStore := NewGenerationTaskService(dbPath, nil)
+	workflow := NewGenerationService(nil, restartedStore, media.NewMediaAssets(dbPath, filepath.Join(root, "media")))
+	workflow.SetMediaLinkProviders(
+		NewCodexImageProvider(session, root),
+		&mediaLinkTestProvider{name: "h3"},
+		func(context.Context, string) (bool, string) { return true, "" },
+	)
+	workflow.PollPendingGenerationTasks(context.Background(), 10)
+
+	recovered, found, err := restartedStore.Get(task.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() = found %v, err %v", found, err)
+	}
+	if recovered.Status != "completed" || len(recovered.Assets) != 1 {
+		t.Fatalf("recovered task = status %q, assets %d; want completed with one asset", recovered.Status, len(recovered.Assets))
+	}
+	session.mu.Lock()
+	generateCalls := len(session.requests)
+	readThreadIDs := append([]string(nil), session.readThreadIDs...)
+	session.mu.Unlock()
+	if generateCalls != 0 {
+		t.Fatalf("GenerateImage calls = %d, want zero new turns", generateCalls)
+	}
+	if len(readThreadIDs) != 1 || readThreadIDs[0] != "thread-restart" {
+		t.Fatalf("ReadImageResult thread ids = %v, want [thread-restart]", readThreadIDs)
+	}
+}
+
+func TestCodexImageImportCachesValidatedFileWithoutLeakingItsPath(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "settings.db")
+	seedGenerationTaskProject(t, dbPath, "project-import")
+	store := NewGenerationTaskService(dbPath, nil)
+	mediaRepo, err := repository.NewMediaAssetRepository(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mediaAssets := media.NewMediaAssetsFromRepository(mediaRepo, filepath.Join(root, "media"), root, nil, nil)
+	task := testCodexGenerationTask("task-codex-import", "waiting_reconnect")
+	task.ProviderTaskID = codexImageResponseIDPrefix + "thread-import"
+	task.RuntimeState = GenerationTaskRuntimeState{CodexThreadID: "thread-import"}
+	task.Prompt = "the user's original prompt"
+	task.ProjectID = "project-import"
+	task.ConversationID = "conversation-import"
+	task.SectionID = "storyboard-section-import"
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+
+	jobDir := filepath.Join(root, "generation", "codex-image", task.ID, "attempt-0123456789abcdef0123456789abcdef")
+	savedPath := writeTestPNG(t, jobDir, "generated.png")
+	session := &codexImageSessionStub{read: func(_ context.Context, threadID string) (codexapp.ImageGenerationResult, error) {
+		return completedCodexImageResult(threadID, "turn-import", "item-import", savedPath), nil
+	}}
+	workflow := NewGenerationService(nil, store, mediaAssets)
+	workflow.SetMediaLinkProviders(
+		NewCodexImageProvider(session, root),
+		&mediaLinkTestProvider{name: "h3"},
+		func(context.Context, string) (bool, string) { return true, "" },
+	)
+
+	response, status, err := workflow.GetGenerationVideo(context.Background(), task.ID)
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("GetGenerationVideo() = status %d, err %v", status, err)
+	}
+	if response.Status != "completed" || len(response.Assets) != 1 {
+		t.Fatalf("response = status %q, assets %+v; want one completed asset", response.Status, response.Assets)
+	}
+	if !strings.HasPrefix(response.Assets[0].URL, "/api/v1/media-assets/") || response.Assets[0].Base64 != "" {
+		t.Fatalf("public asset = %+v, want cached MediaLink URL without inline bytes", response.Assets[0])
+	}
+	publicJSON, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(publicJSON, []byte("file://")) || bytes.Contains(publicJSON, []byte(savedPath)) || bytes.Contains(publicJSON, []byte(`"savedPath"`)) {
+		t.Fatalf("public response leaked Codex output path: %s", publicJSON)
+	}
+
+	stored, found, err := store.Get(task.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() = found %v, err %v", found, err)
+	}
+	if stored.Prompt != "the user's original prompt" || stored.RuntimeState.RevisedPrompt != "revised prompt" {
+		t.Fatalf("stored prompt/state = %q/%+v", stored.Prompt, stored.RuntimeState)
+	}
+	if stored.ProjectID != task.ProjectID || stored.ConversationID != task.ConversationID || stored.SectionID != task.SectionID {
+		t.Fatalf("stored task scope = %q/%q/%q, want original project/conversation/section", stored.ProjectID, stored.ConversationID, stored.SectionID)
+	}
+	if len(stored.Assets) != 1 || stored.Assets[0].AssetID == "" || stored.Assets[0].URL != response.Assets[0].URL {
+		t.Fatalf("stored assets = %+v, want one cached MediaLink asset", stored.Assets)
+	}
+	assets, err := mediaAssets.List(task.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 1 || assets[0].ID != stored.Assets[0].AssetID || assets[0].ProjectID != task.ProjectID {
+		t.Fatalf("media assets = %+v, want existing project association", assets)
+	}
+	if _, err := os.Stat(savedPath); err != nil {
+		t.Fatalf("Codex output was removed: %v", err)
+	}
+	if info, err := os.Stat(jobDir); err != nil || !info.IsDir() {
+		t.Fatalf("Codex job directory was removed: info=%v err=%v", info, err)
+	}
+}
+
+func TestCodexImageImportReusesProgressAssetWithoutInternalSource(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "settings.db")
+	seedGenerationTaskAsset(t, dbPath, "asset-progress", "image", "")
+	store := NewGenerationTaskService(dbPath, nil)
+	task := testCodexGenerationTask("task-codex-progress-import", "running")
+	task.Assets = []GenerationAsset{{Kind: "image", URL: "/api/v1/media-assets/asset-progress/content", MIMEType: "image/png"}}
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+	workflow := NewGenerationService(nil, store, nil)
+	response := workflow.responseWithCachedProgressAssets(task.ID, coregeneration.Response{Assets: []coregeneration.Asset{{
+		Kind:     coregeneration.KindImage,
+		MIMEType: "image/png",
+		Base64:   base64.StdEncoding.EncodeToString(testPNGBytes()),
+		Metadata: map[string]any{"saved_path": "/validated/codex/output.png"},
+	}}})
+	if len(response.Assets) != 1 || response.Assets[0].URL != task.Assets[0].URL || response.Assets[0].Base64 != "" || len(response.Assets[0].Metadata) != 0 {
+		t.Fatalf("response assets = %+v, want cached URL with consumed local handoff", response.Assets)
+	}
+}
+
 func TestCreatePromptOptimizedGenerationMessageRecordsOptimizationAndImageTasks(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "settings.db")
 	repo, err := repository.NewGenerationTaskRepository(dbPath)
@@ -1199,7 +3141,7 @@ func TestCreatePromptOptimizedGenerationMessageRecordsOptimizationAndImageTasks(
 	}
 	workflow := NewGenerationService(settingsSvc, store, media.NewMediaAssets(dbPath, t.TempDir()))
 	var textRequest coregeneration.Request
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		switch route.ID {
 		case coregeneration.RouteDMXGPT41MiniText:
 			return fakeTextStreamProvider{
@@ -1260,14 +3202,7 @@ func TestCreatePromptOptimizedGenerationMessageRecordsOptimizationAndImageTasks(
 	if imageRequest.Prompt != "optimized prompt" {
 		t.Fatalf("image prompt = %q, want optimized prompt", imageRequest.Prompt)
 	}
-	if !strings.Contains(textRequest.Prompt, "优化 prompt：\ncinematic lighting, detailed composition") ||
-		!strings.Contains(textRequest.Prompt, "用户的输入：\n原始角色提示词") ||
-		!strings.Contains(textRequest.Prompt, "请按“优化 prompt”的风格和质量要求改写“用户的输入”") ||
-		!strings.Contains(textRequest.Prompt, "只输出优化后的提示词正文") ||
-		strings.Contains(textRequest.Prompt, "输出要求") ||
-		strings.Contains(textRequest.Prompt, "赛璐珞") {
-		t.Fatalf("text prompt = %q, want concise style-agnostic optimization prompt", textRequest.Prompt)
-	}
+	assertPromptOptimizationDataEnvelope(t, textRequest.Prompt, "cinematic lighting, detailed composition", "原始角色提示词", nil)
 
 	optimizationTask, ok, err := store.Get(response.Optimization.ID)
 	if err != nil {
@@ -1329,7 +3264,7 @@ func TestCreatePromptOptimizedGenerationMessageUsesCodexWithoutTextRoute(t *test
 		release: make(chan struct{}),
 	}
 	workflow := NewGenerationService(settingsSvc, store, media.NewMediaAssets(dbPath, t.TempDir()))
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		if route.ID != coregeneration.RouteDMXGPTImage2 {
 			t.Fatalf("route = %q, want image route only", route.ID)
 		}
@@ -1372,7 +3307,7 @@ func TestCreatePromptOptimizedGenerationMessageUsesCodexWithoutTextRoute(t *test
 		t.Fatalf("response = %+v, want completed Codex optimization", response)
 	}
 	if codexRequest.Executor != textcompletion.ExecutorCodex ||
-		codexRequest.SystemInstruction != promptOptimizationSystemInstructionText ||
+		codexRequest.SystemInstruction != imagePromptOptimizationSystemInstructionText ||
 		!strings.Contains(codexRequest.Prompt, "原始角色提示词") {
 		t.Fatalf("codex request = %#v", codexRequest)
 	}
@@ -1493,7 +3428,7 @@ func TestCreateJimengImageDocumentContextDoesNotUseCurrentSectionImagesAsReferen
 			},
 		},
 	})
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		if route.ID != coregeneration.RouteJimengSeedream50 {
 			t.Fatalf("route = %q, want jimeng seedream route", route.ID)
 		}
@@ -1553,7 +3488,7 @@ func TestCreateJimengImageGenerationPreservesPartialAssetsOnFailure(t *testing.T
 	}
 	mediaAssets := media.NewMediaAssets(dbPath, t.TempDir())
 	workflow := NewGenerationService(settingsSvc, store, mediaAssets)
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		return provider, nil
 	}
 
@@ -1609,7 +3544,7 @@ func TestGetGenerationVideoPollsProviderTaskID(t *testing.T) {
 		},
 	}
 	workflow := NewGenerationService(settingsSvc, store, nil)
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		if route.ID != coregeneration.RouteDMXSeedance20Fast {
 			t.Fatalf("route = %q, want seedance video route", route.ID)
 		}
@@ -1668,7 +3603,7 @@ func TestGetGenerationVideoUsesStoredImageKind(t *testing.T) {
 		},
 	}
 	workflow := NewGenerationService(settingsSvc, store, nil)
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		if route.ID != coregeneration.RouteLibTVGPTImage2 {
 			t.Fatalf("route = %q, want LibTV GPT Image 2", route.ID)
 		}
@@ -1750,7 +3685,7 @@ func TestGetGenerationVideoCachesRemoteAssetWithTaskAssetTitle(t *testing.T) {
 		},
 	}
 	workflow := NewGenerationService(settingsSvc, store, mediaAssets)
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		return provider, nil
 	}
 
@@ -1890,7 +3825,7 @@ func TestStreamGenerationTextPersistsFinalText(t *testing.T) {
 		},
 	})
 	workflow := NewGenerationService(settingsSvc, store, nil)
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		if route.ID != coregeneration.RouteDMXGPT41MiniText {
 			t.Fatalf("route = %q, want text route", route.ID)
 		}
@@ -2017,7 +3952,7 @@ func TestStreamGenerationTextFallsBackToNonStreamingProvider(t *testing.T) {
 		},
 	})
 	workflow := NewGenerationService(settingsSvc, store, nil)
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		if route.ID != coregeneration.RouteDMXGPT41MiniText {
 			t.Fatalf("route = %q, want text route", route.ID)
 		}
@@ -2134,7 +4069,7 @@ func TestCompleteTextUsesConfiguredTextRoute(t *testing.T) {
 	})
 	workflow := NewGenerationService(settingsSvc, nil, nil)
 	var captured coregeneration.Request
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		if route.ID != coregeneration.RouteOfficialGPT55Text {
 			t.Fatalf("route = %q, want official text route", route.ID)
 		}
@@ -2172,7 +4107,7 @@ func TestCompleteTextFallsBackToNonStreamingProvider(t *testing.T) {
 		},
 	})
 	workflow := NewGenerationService(settingsSvc, nil, nil)
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		if route.ID != coregeneration.RouteOfficialGPT55Text {
 			t.Fatalf("route = %q, want official text route", route.ID)
 		}
@@ -2225,7 +4160,7 @@ func TestCompleteTextFallsBackToCodexWhenNoRouteIsConfigured(t *testing.T) {
 func TestCompleteTextDoesNotRetryConfiguredRouteFailureThroughCodex(t *testing.T) {
 	settingsSvc := settings.NewSettings(&generationTestAPIKeyStore{values: map[string]string{"openai": "sk-openai"}})
 	workflow := NewGenerationService(settingsSvc, nil, nil)
-	workflow.generationProviderFactory = func(coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		return nil, fmt.Errorf("route failed")
 	}
 	codexCalls := 0
@@ -2365,6 +4300,135 @@ type blockingMultiAssetImageGenerateProvider struct {
 	err     error
 }
 
+type metadataProgressDisconnectProvider struct {
+	progressPersisted chan struct{}
+	disconnect        chan struct{}
+}
+
+type reconnectingMetadataProgressProvider struct {
+	state GenerationTaskRuntimeState
+}
+
+type liveOwnedCodexProvider struct {
+	checkpoint    chan struct{}
+	release       chan struct{}
+	response      coregeneration.Response
+	generateCalls atomic.Int32
+	getCalls      atomic.Int32
+}
+
+type blockingCodexPollProvider struct {
+	started  chan struct{}
+	release  chan struct{}
+	response coregeneration.Response
+}
+
+func (*blockingCodexPollProvider) Name() string { return "blocking-codex-poll" }
+
+func (*blockingCodexPollProvider) Generate(context.Context, coregeneration.Request) (coregeneration.Response, error) {
+	return coregeneration.Response{}, fmt.Errorf("unexpected Generate call")
+}
+
+func (provider *blockingCodexPollProvider) Get(ctx context.Context, _ string) (coregeneration.Response, error) {
+	close(provider.started)
+	select {
+	case <-provider.release:
+		return provider.response, nil
+	case <-ctx.Done():
+		return coregeneration.Response{}, ctx.Err()
+	}
+}
+
+func (*liveOwnedCodexProvider) Name() string { return "live-owned-codex" }
+
+func (provider *liveOwnedCodexProvider) Generate(ctx context.Context, request coregeneration.Request) (coregeneration.Response, error) {
+	provider.generateCalls.Add(1)
+	callback, ok := coregeneration.ProgressCallbackFromOptions(request.Options)
+	if !ok {
+		return coregeneration.Response{}, fmt.Errorf("progress callback is missing")
+	}
+	callback(ctx, coregeneration.ProgressEvent{Response: coregeneration.Response{
+		ID:     codexImageResponseIDPrefix + "thread-live",
+		Status: "running",
+		Metadata: map[string]any{"runtime_state": GenerationTaskRuntimeState{
+			CodexThreadID: "thread-live",
+			CodexTurnID:   "turn-live",
+		}},
+	}})
+	close(provider.checkpoint)
+	select {
+	case <-provider.release:
+		return provider.response, nil
+	case <-ctx.Done():
+		return coregeneration.Response{}, ctx.Err()
+	}
+}
+
+func (provider *liveOwnedCodexProvider) Get(context.Context, string) (coregeneration.Response, error) {
+	provider.getCalls.Add(1)
+	return provider.response, nil
+}
+
+func completedCoreCodexResponseForThread(threadID string, revised string) coregeneration.Response {
+	response := completedCoreCodexResponse(revised)
+	response.ID = codexImageResponseIDPrefix + threadID
+	state := response.Metadata["runtime_state"].(GenerationTaskRuntimeState)
+	state.CodexThreadID = threadID
+	response.Metadata["runtime_state"] = state
+	return response
+}
+
+func (*reconnectingMetadataProgressProvider) Name() string { return "metadata-progress-reconnect" }
+
+func (provider *reconnectingMetadataProgressProvider) Generate(ctx context.Context, request coregeneration.Request) (coregeneration.Response, error) {
+	response := coregeneration.Response{
+		ID:       codexImageResponseIDPrefix + provider.state.CodexThreadID,
+		Status:   "waiting_reconnect",
+		Metadata: map[string]any{"runtime_state": provider.state},
+	}
+	callback, ok := coregeneration.ProgressCallbackFromOptions(request.Options)
+	if !ok {
+		return coregeneration.Response{}, fmt.Errorf("progress callback is missing")
+	}
+	callback(ctx, coregeneration.ProgressEvent{Response: response})
+	return response, nil
+}
+
+func (*reconnectingMetadataProgressProvider) Get(context.Context, string) (coregeneration.Response, error) {
+	return coregeneration.Response{}, fmt.Errorf("unexpected Get call")
+}
+
+func (*metadataProgressDisconnectProvider) Name() string { return "metadata-progress-disconnect" }
+
+func (provider *metadataProgressDisconnectProvider) Generate(ctx context.Context, request coregeneration.Request) (coregeneration.Response, error) {
+	callback, ok := coregeneration.ProgressCallbackFromOptions(request.Options)
+	if !ok {
+		return coregeneration.Response{}, fmt.Errorf("progress callback is missing")
+	}
+	callback(ctx, coregeneration.ProgressEvent{Response: coregeneration.Response{
+		ID:     codexImageResponseIDPrefix + "thread-progress",
+		Status: "importing",
+		Metadata: map[string]any{
+			"runtime_state": GenerationTaskRuntimeState{
+				CodexThreadID: "thread-progress",
+				CodexTurnID:   "turn-progress",
+				CodexItemID:   "item-progress",
+			},
+		},
+	}})
+	close(provider.progressPersisted)
+	select {
+	case <-provider.disconnect:
+		return coregeneration.Response{}, fmt.Errorf("app-server disconnected")
+	case <-ctx.Done():
+		return coregeneration.Response{}, ctx.Err()
+	}
+}
+
+func (*metadataProgressDisconnectProvider) Get(context.Context, string) (coregeneration.Response, error) {
+	return coregeneration.Response{}, fmt.Errorf("unexpected Get call")
+}
+
 func (provider *blockingMultiAssetImageGenerateProvider) Name() string {
 	return "blocking-image"
 }
@@ -2468,15 +4532,23 @@ type stubImageProvider struct {
 	getResponse      coregeneration.Response
 	getErr           error
 	getID            string
+	generateCalls    atomic.Int32
+	getCalls         atomic.Int32
 }
 
 func (provider *stubImageProvider) Name() string { return "stub-image" }
 
+func (provider *stubImageProvider) ForRuntimeState(GenerationTaskRuntimeState) coregeneration.Provider {
+	return provider
+}
+
 func (provider *stubImageProvider) Generate(context.Context, coregeneration.Request) (coregeneration.Response, error) {
+	provider.generateCalls.Add(1)
 	return provider.generateResponse, provider.generateErr
 }
 
 func (provider *stubImageProvider) Get(_ context.Context, id string) (coregeneration.Response, error) {
+	provider.getCalls.Add(1)
 	provider.getID = id
 	return provider.getResponse, provider.getErr
 }
@@ -2580,6 +4652,183 @@ func TestCompleteSubmittedGenerationHandsOffPendingImage(t *testing.T) {
 	}
 }
 
+func TestCompleteSubmittedGenerationHandsOffRecoveryStatusesWithoutAssets(t *testing.T) {
+	for _, status := range []string{"preparing", "importing", "waiting_reconnect"} {
+		t.Run(status, func(t *testing.T) {
+			repo, err := repository.NewGenerationTaskRepository(filepath.Join(t.TempDir(), "settings.db"))
+			if err != nil {
+				t.Fatalf("NewGenerationTaskRepository() error = %v", err)
+			}
+			store := NewGenerationTaskServiceFromRepository(repo, nil, nil)
+			workflow := NewGenerationService(nil, store, nil)
+			providerID := "provider:" + status
+			provider := &stubImageProvider{generateResponse: coregeneration.Response{
+				ID:       providerID,
+				Status:   status,
+				Metadata: map[string]any{"checkpoint": status},
+			}}
+			task := jimengImageTaskRecord("generation-" + status)
+			if err := store.Upsert(task); err != nil {
+				t.Fatalf("Upsert() error = %v", err)
+			}
+
+			workflow.completeSubmittedGeneration(
+				context.Background(),
+				task,
+				provider,
+				coregeneration.Request{Kind: coregeneration.KindImage, Prompt: "a cat"},
+				"create",
+				"",
+				"",
+			)
+
+			stored, ok, err := store.Get(task.ID)
+			if err != nil || !ok {
+				t.Fatalf("Get() ok=%v error=%v", ok, err)
+			}
+			if stored.ProviderTaskID != providerID || stored.Status != "submitted" {
+				t.Fatalf("stored task = %+v, want no-asset %s response handed off", stored, status)
+			}
+		})
+	}
+}
+
+func TestPollPendingGenerationTasksSkipsImageRecoveryWithoutProviderID(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "settings.db")
+	repo, err := repository.NewGenerationTaskRepository(dbPath)
+	if err != nil {
+		t.Fatalf("NewGenerationTaskRepository() error = %v", err)
+	}
+	store := NewGenerationTaskServiceFromRepository(repo, nil, nil)
+	settingsSvc := settings.NewSettings(&generationTestAPIKeyStore{
+		values: map[string]string{coregeneration.ProviderLibTV: "oauth:configured"},
+	})
+	provider := &stubImageProvider{generateResponse: coregeneration.Response{Status: "submitted"}}
+	workflow := NewGenerationService(settingsSvc, store, nil)
+	workflow.legacyProviderFactory = func(coregeneration.ModelRoute) (coregeneration.Provider, error) {
+		return provider, nil
+	}
+
+	statuses := []string{"preparing", "queued", "submitting", "running", "importing", "waiting_reconnect"}
+	for _, status := range statuses {
+		task := libTVImageTaskRecord("generation-no-id-" + status)
+		task.Status = status
+		if err := store.Upsert(task); err != nil {
+			t.Fatalf("Upsert(%s) error = %v", status, err)
+		}
+	}
+
+	workflow.PollPendingGenerationTasks(context.Background(), 20)
+	if provider.generateCalls.Load() != 0 || provider.getCalls.Load() != 0 {
+		t.Fatalf("provider calls generate=%d get=%d, want none for image recovery without provider ID", provider.generateCalls.Load(), provider.getCalls.Load())
+	}
+	for _, status := range statuses {
+		task, ok, err := store.Get("generation-no-id-" + status)
+		if err != nil || !ok {
+			t.Fatalf("Get(%s) ok=%v error=%v", status, ok, err)
+		}
+		if len(task.Attempts) != 0 {
+			t.Fatalf("%s attempts = %+v, want none for skipped image recovery", status, task.Attempts)
+		}
+	}
+}
+
+func TestPollPendingGenerationTasksFailsExpiredImageWithoutProviderID(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	provider := &stubImageProvider{}
+	workflow := NewGenerationService(nil, store, nil)
+	workflow.SetMediaLinkProviders(
+		provider,
+		&mediaLinkTestProvider{name: "h3"},
+		func(context.Context, string) (bool, string) { return true, "" },
+	)
+	task := testCodexGenerationTask("generation-expired-no-id", "running")
+	task.CreatedAt = time.Now().UTC().Add(-maxBackgroundImageGenerationAge - time.Minute).Format(time.RFC3339Nano)
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+
+	workflow.PollPendingGenerationTasks(context.Background(), 10)
+
+	stored, found, err := store.Get(task.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() found=%v error=%v", found, err)
+	}
+	if stored.Status != "failed" || !strings.Contains(stored.Error, "超时") {
+		t.Fatalf("expired orphan task = status %q error %q, want failed timeout", stored.Status, stored.Error)
+	}
+	if provider.generateCalls.Load() != 0 || provider.getCalls.Load() != 0 {
+		t.Fatalf("provider calls generate=%d get=%d, want none without a provider id", provider.generateCalls.Load(), provider.getCalls.Load())
+	}
+}
+
+func TestPollPendingGenerationTasksKeepsImageWithProviderIDPollable(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "settings.db")
+	repo, err := repository.NewGenerationTaskRepository(dbPath)
+	if err != nil {
+		t.Fatalf("NewGenerationTaskRepository() error = %v", err)
+	}
+	store := NewGenerationTaskServiceFromRepository(repo, nil, nil)
+	settingsSvc := settings.NewSettings(&generationTestAPIKeyStore{
+		values: map[string]string{coregeneration.ProviderLibTV: "oauth:configured"},
+	})
+	providerID := coregeneration.RouteLibTVGPTImage2 + ":project:node"
+	provider := &stubImageProvider{getResponse: coregeneration.Response{ID: providerID, Status: "submitted"}}
+	workflow := NewGenerationService(settingsSvc, store, nil)
+	workflow.legacyProviderFactory = func(coregeneration.ModelRoute) (coregeneration.Provider, error) {
+		return provider, nil
+	}
+
+	task := libTVImageTaskRecord("generation-with-provider-id")
+	task.ProviderTaskID = providerID
+	if err := store.Upsert(task); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	pending, err := store.ListPending(10)
+	if err != nil {
+		t.Fatalf("ListPending() error = %v", err)
+	}
+	if !slicesContainsTaskID(pending, task.ID) {
+		t.Fatalf("ListPending() = %+v, want image task with provider ID", pending)
+	}
+
+	workflow.PollPendingGenerationTasks(context.Background(), 10)
+	if provider.generateCalls.Load() != 0 || provider.getCalls.Load() != 1 || provider.getID != providerID {
+		t.Fatalf("provider calls generate=%d get=%d id=%q, want one poll of %q", provider.generateCalls.Load(), provider.getCalls.Load(), provider.getID, providerID)
+	}
+}
+
+func TestPollPendingGenerationTasksPollsIdentifiedSubmittingImageWithoutGenerate(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "settings.db")
+	repo, err := repository.NewGenerationTaskRepository(dbPath)
+	if err != nil {
+		t.Fatalf("NewGenerationTaskRepository() error = %v", err)
+	}
+	store := NewGenerationTaskServiceFromRepository(repo, nil, nil)
+	settingsSvc := settings.NewSettings(&generationTestAPIKeyStore{
+		values: map[string]string{coregeneration.ProviderLibTV: "oauth:configured"},
+	})
+	providerID := "codex.imagegen:thread-1"
+	provider := &stubImageProvider{getResponse: coregeneration.Response{ID: providerID, Status: "running"}}
+	workflow := NewGenerationService(settingsSvc, store, nil)
+	workflow.legacyProviderFactory = func(coregeneration.ModelRoute) (coregeneration.Provider, error) {
+		return provider, nil
+	}
+
+	task := libTVImageTaskRecord("generation-submitting-with-provider-id")
+	task.Status = "submitting"
+	task.ProviderTaskID = providerID
+	if err := store.Upsert(task); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+
+	workflow.PollPendingGenerationTasks(context.Background(), 10)
+	if provider.generateCalls.Load() != 0 || provider.getCalls.Load() != 1 || provider.getID != providerID {
+		t.Fatalf("provider calls generate=%d get=%d id=%q, want one poll and no resubmit for identified image", provider.generateCalls.Load(), provider.getCalls.Load(), provider.getID)
+	}
+}
+
 func TestLibTVImageGenerationHandoffAndPoll(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "settings.db")
 	repo, err := repository.NewGenerationTaskRepository(dbPath)
@@ -2607,7 +4856,7 @@ func TestLibTVImageGenerationHandoffAndPoll(t *testing.T) {
 		},
 	}
 	workflow := NewGenerationService(settingsSvc, store, mediaAssets)
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		if route.ID != coregeneration.RouteLibTVGPTImage2 {
 			t.Fatalf("route = %q, want LibTV GPT Image 2", route.ID)
 		}
@@ -2677,7 +4926,7 @@ func TestPollGenerationTaskCompletesHandedOffImage(t *testing.T) {
 		},
 	}
 	workflow := NewGenerationService(settingsSvc, store, nil)
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		if route.ID != coregeneration.RouteJimengSeedream50 {
 			t.Fatalf("route = %q, want jimeng seedream image route", route.ID)
 		}
@@ -2725,7 +4974,7 @@ func TestPollGenerationTaskTimesOutExpiredHandedOffImage(t *testing.T) {
 		},
 	}
 	workflow := NewGenerationService(settingsSvc, store, nil)
-	workflow.generationProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	workflow.legacyProviderFactory = func(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 		return provider, nil
 	}
 
@@ -2783,7 +5032,7 @@ func TestLibTVImagePollErrorTimesOutOnlyExpiredTask(t *testing.T) {
 			})
 			provider := &stubImageProvider{getErr: fmt.Errorf("libtv status unavailable")}
 			workflow := NewGenerationService(settingsSvc, store, nil)
-			workflow.generationProviderFactory = func(coregeneration.ModelRoute) (coregeneration.Provider, error) {
+			workflow.legacyProviderFactory = func(coregeneration.ModelRoute) (coregeneration.Provider, error) {
 				return provider, nil
 			}
 

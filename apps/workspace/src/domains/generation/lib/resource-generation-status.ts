@@ -60,26 +60,21 @@ export const resourceGenerationStatusTime = (status: ResourceGenerationStatus) =
 	return Number.isFinite(time) ? time : 0;
 };
 
-const latestGenerationTask = (tasks: GenerationTask[]) => {
-	let latest: GenerationTask | undefined;
-	let latestTime = Number.NEGATIVE_INFINITY;
-	for (const task of tasks) {
-		const time = generationTaskTime(task);
-		if (!latest || time >= latestTime) {
-			latest = task;
-			latestTime = time;
-		}
-	}
-	return latest;
+const generationTaskCreatedTime = (task: GenerationTask) => {
+	const time = Date.parse(task.createdAt || "");
+	return Number.isFinite(time) ? time : 0;
 };
 
-const latestActiveOrRecentGenerationTask = (tasks: GenerationTask[]) =>
-	latestGenerationTask(tasks.filter((task) => isPendingGenerationStatus(task.status))) ??
-	latestGenerationTask(tasks);
+const latestGenerationAttempt = (tasks: GenerationTask[]) =>
+	tasks.reduce<GenerationTask | undefined>((latest, task) => {
+		if (!latest) return task;
+		const createdDifference = generationTaskCreatedTime(task) - generationTaskCreatedTime(latest);
+		if (createdDifference !== 0) return createdDifference > 0 ? task : latest;
+		return generationTaskTime(task) >= generationTaskTime(latest) ? task : latest;
+	}, undefined);
 
-// 在任务列表里找出匹配 (documentId, sectionId) 的一条状态：优先展示「进行中」的生成，
-// 只有当该资源没有任何进行中的任务时，才回退到最新一条（完成/失败）。这样一条历史失败
-// 不会盖过正在进行的生成——「有在生成就显示生成中」。
+// 在任务列表里找出匹配 (documentId, sectionId) 的最新一次尝试。创建时间决定尝试顺序，
+// 更新时间只用于同一创建时间下的稳定排序，避免旧的遗留运行任务遮住更新的终态结果。
 export const generationStatusForSection = (
 	tasks: GenerationTask[],
 	documentId: string,
@@ -89,7 +84,7 @@ export const generationStatusForSection = (
 		(task) =>
 			task.documentId?.trim() === documentId.trim() && task.sectionId?.trim() === sectionId.trim(),
 	);
-	const task = latestActiveOrRecentGenerationTask(matchingTasks);
+	const task = latestGenerationAttempt(matchingTasks);
 	return task ? resourceGenerationStatusFromTask(task) : undefined;
 };
 

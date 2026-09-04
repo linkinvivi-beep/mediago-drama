@@ -9,7 +9,7 @@ import (
 	mediamcp "github.com/mediago-dev/mediago-drama/packages/mcp/pkg/mcp"
 )
 
-func TestResolveWorkspaceDirUsesAppDataWorkspaceByDefault(t *testing.T) {
+func TestMediaLinkWorkspacePathsUseAppDataWorkspaceByDefault(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(homeDir, ".config"))
@@ -21,7 +21,7 @@ func TestResolveWorkspaceDirUsesAppDataWorkspaceByDefault(t *testing.T) {
 	}
 
 	got := ResolveWorkspaceDir("")
-	want := filepath.Join(configDir, userDataDirName, "workspace")
+	want := filepath.Join(configDir, "MediaLink", "workspace")
 	if got != want {
 		t.Fatalf("ResolveWorkspaceDir(empty) = %q, want %q", got, want)
 	}
@@ -30,7 +30,7 @@ func TestResolveWorkspaceDirUsesAppDataWorkspaceByDefault(t *testing.T) {
 	}
 }
 
-func TestDefaultUserDataDirUsesUserConfigDir(t *testing.T) {
+func TestMediaLinkWorkspacePathsUseUserConfigDir(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(homeDir, ".config"))
@@ -42,7 +42,7 @@ func TestDefaultUserDataDirUsesUserConfigDir(t *testing.T) {
 	}
 
 	got := DefaultUserDataDir()
-	want := filepath.Join(configDir, userDataDirName)
+	want := filepath.Join(configDir, "MediaLink")
 	if got != want {
 		t.Fatalf("DefaultUserDataDir() = %q, want %q", got, want)
 	}

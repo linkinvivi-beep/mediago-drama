@@ -1275,8 +1275,13 @@ func TestAPIHandler(t *testing.T) {
 		}
 
 		body := readBody(t, response.Body)
-		if !strings.Contains(body, `"id":"seedream-5-lite"`) || !strings.Contains(body, `"id":"jimeng-seedance-2-fast"`) {
-			t.Fatalf("body = %s, want generation model catalog", body)
+		for _, routeID := range []string{"codex.imagegen", "autodl.image", "autodl.minimax-h3"} {
+			if !strings.Contains(body, `"id":"`+routeID+`"`) {
+				t.Fatalf("body = %s, want MediaLink route %q", body, routeID)
+			}
+		}
+		if strings.Contains(body, `"id":"dmx.seedream-5-lite"`) || strings.Contains(body, `"id":"jimeng.seedance-2.0-fast"`) {
+			t.Fatalf("body = %s, legacy generation routes must remain hidden from MediaLink", body)
 		}
 	})
 
@@ -1808,7 +1813,7 @@ func TestAPIHandler(t *testing.T) {
 		}
 	})
 
-	t.Run("api key settings configure generation routes", func(t *testing.T) {
+	t.Run("api key settings do not expose legacy generation routes", func(t *testing.T) {
 		save := requestJSON(t, handler, http.MethodPut, "/api/v1/settings/api-keys/dmx", `{"apiKey":"sk-settings"}`)
 		defer save.Body.Close()
 
@@ -1824,8 +1829,13 @@ func TestAPIHandler(t *testing.T) {
 		defer models.Body.Close()
 
 		modelsBody := readBody(t, models.Body)
-		if !strings.Contains(modelsBody, `"id":"dmx.seedream-5-lite"`) || !strings.Contains(modelsBody, `"configured":true`) {
-			t.Fatalf("body = %s, want configured dmx generation route", modelsBody)
+		for _, routeID := range []string{"codex.imagegen", "autodl.image", "autodl.minimax-h3"} {
+			if !strings.Contains(modelsBody, `"id":"`+routeID+`"`) {
+				t.Fatalf("body = %s, want MediaLink route %q", modelsBody, routeID)
+			}
+		}
+		if strings.Contains(modelsBody, `"id":"dmx.seedream-5-lite"`) {
+			t.Fatalf("body = %s, legacy DMX route must remain hidden from MediaLink", modelsBody)
 		}
 	})
 

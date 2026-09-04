@@ -1,4 +1,3 @@
-import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
 	GenerationFamily,
@@ -18,6 +17,14 @@ import { resolveGenerationRouteParamControls } from "@/domains/generation/compon
 import type { PromptInsertItem } from "@/domains/generation/components/PromptSlashCommand";
 import { useGenerationCountControl } from "@/domains/generation/components/useGenerationCountControl";
 import {
+	importReferenceFiles as runReferenceFileImport,
+	mediaAssetsInIDOrder,
+	mergeMediaAssetsByID,
+	referenceImportIssueMessage,
+	type ReferenceImportBatchResult,
+	type ReferenceImportProgress,
+} from "@/domains/generation/lib/reference-file-import";
+import {
 	isConfiguredRoute,
 	maxReferenceUrlsForRoute,
 	preferredRoute,
@@ -29,11 +36,14 @@ import {
 import { useGenerationWorkspace } from "@/domains/generation/hooks/useGenerationWorkspace";
 import { useCodexTextAvailability } from "@/domains/generation/hooks/useCodexTextAvailability";
 import {
+	type AutoDLWorkflowOptionState,
+	useAutoDLWorkflowOptions,
+} from "@/domains/generation/hooks/useAutoDLWorkflowOptions";
+import {
 	batchGenerationPromptSupplementEnabled,
 	useBatchGenerationSettingsPreferenceStore,
 } from "@/domains/generation/stores/batch-generation-settings";
-import type { MediaAsset } from "@/domains/workspace/api/media";
-import { uploadMediaAsset } from "@/domains/workspace/api/media";
+import type { MediaAsset, MediaAssetKind } from "@/domains/workspace/api/media";
 
 export interface UseGenerationSettingsFormOptions {
 	defaultValue?: unknown;
@@ -44,7 +54,11 @@ export interface UseGenerationSettingsFormOptions {
 	uploadIdPrefix?: string;
 }
 
+const imageReferenceKinds = new Set<MediaAssetKind>(["image"]);
+const emptyReferenceKinds = new Set<MediaAssetKind>();
+
 export interface GenerationSettingsFormController {
+	autoDLWorkflowOptions: AutoDLWorkflowOptionState;
 	catalog: GenerationModelsResponse;
 	codexAvailable: boolean;
 	error: string | null;
@@ -56,6 +70,7 @@ export interface GenerationSettingsFormController {
 	isBusy: boolean;
 	isReady: boolean;
 	isUploadingReference: boolean;
+	importReferenceFiles: (files: readonly File[]) => Promise<ReferenceImportBatchResult | null>;
 	isValid: boolean;
 	maxReferenceImages?: number;
 	mutateMediaAssets: () => void | Promise<unknown>;
@@ -63,6 +78,7 @@ export interface GenerationSettingsFormController {
 	promptOptimizationModelOptions: PromptOptimizeModelOption[];
 	promptSupplementEnabled: boolean;
 	referenceDialogOpen: boolean;
+	referenceImportProgress: ReferenceImportProgress | null;
 	referenceInputId: string;
 	routeParamControls: ReturnType<typeof resolveGenerationRouteParamControls>;
 	selectedFamily: GenerationFamily;
@@ -85,9 +101,11 @@ export interface GenerationSettingsFormController {
 	togglePromptSupplementItem: (id: string) => void;
 	toggleReferenceAsset: (asset: MediaAsset) => void;
 	updateFamily: (familyId: string) => void;
+	updateInstanceProfile: (instanceProfileId: string) => void;
 	updateModelRoute: (versionId: string, routeId: string) => void;
 	updateParam: (name: string, value: unknown) => void;
-	uploadReferenceAsset: (event: React.ChangeEvent<HTMLInputElement>) => Promise<void>;
+	updateWorkflowParameter: (name: string, value: string | number | boolean | undefined) => void;
+	updateWorkflowProfile: (workflowProfileId: string) => void;
 }
 
 export const useGenerationSettingsForm = ({
@@ -113,10 +131,12 @@ export const useGenerationSettingsForm = ({
 		uploadIdPrefix,
 		useRawPrompt: true,
 	});
+	const promptReferenceItems = useMemo(
+		() => workspace.promptReferenceItems.filter((item) => !item.type || item.type === kind),
+		[kind, workspace.promptReferenceItems],
+	);
 	const promptItemsLoaded = workspace.hasLoadedPromptInsertItems;
-	const promptItemsForNormalization = promptItemsLoaded
-		? workspace.promptReferenceItems
-		: undefined;
+	const promptItemsForNormalization = promptItemsLoaded ? promptReferenceItems : undefined;
 	const [value, setValue] = useState<GenerationSettingsValue>(() =>
 		emptyGenerationSettingsValue(kind),
 	);
@@ -139,13 +159,29 @@ export const useGenerationSettingsForm = ({
 	const promptOptimizationDraftRouteClearedRef = useRef(false);
 	const [referenceDialogOpen, setReferenceDialogOpen] = useState(false);
 	const [isUploadingReference, setIsUploadingReference] = useState(false);
+	const [referenceImportProgress, setReferenceImportProgress] =
+		useState<ReferenceImportProgress | null>(null);
+	const referenceImportInFlightRef = useRef(false);
+	const isMountedRef = useRef(true);
 	const [error, setError] = useState<string | null>(null);
 	const defaultValueKey = stableValueKey(defaultValue);
 	const initializationKey = `${kind}:${defaultValueKey}`;
+	const autoDLWorkflowOptions = useAutoDLWorkflowOptions(
+		value.routeId,
+		value.referenceAssetIds.length,
+		value.workflowProfileId,
+	);
 
 	useEffect(() => {
 		onValueChangeRef.current = onValueChange;
 	}, [onValueChange]);
+
+	useEffect(() => {
+		isMountedRef.current = true;
+		return () => {
+			isMountedRef.current = false;
+		};
+	}, []);
 
 	const commitValue = useCallback((next: GenerationSettingsValue, notify = true) => {
 		const changed = !sameGenerationSettingsValue(valueRef.current, next);
@@ -190,14 +226,14 @@ export const useGenerationSettingsForm = ({
 				usesContextValue
 					? promptSupplementDraftItemIdsFromValue(defaultValue)
 					: (storedSettings?.promptSupplementItemIds ?? []),
-				workspace.promptReferenceItems,
+				promptReferenceItems,
 				promptItemsLoaded,
 			);
 			const optimizationDraftItemId = resolvePromptOptimizationDraftItemId(
 				usesContextValue
 					? recordNestedString(defaultValue, "promptOptimization", "referenceId")
 					: (storedSettings?.promptOptimizeItemId ?? ""),
-				workspace.promptReferenceItems,
+				promptReferenceItems,
 				promptItemsLoaded,
 			);
 			const optimizationDraftRouteId = resolvePromptOptimizationDraftRouteId(
@@ -210,7 +246,7 @@ export const useGenerationSettingsForm = ({
 			const optimizationEnabled = usesContextValue
 				? recordNestedBoolean(defaultValue, "promptOptimization", "enabled")
 				: storedSettings?.usePromptOptimization === true;
-			const optimizationDraftItem = workspace.promptReferenceItems.find(
+			const optimizationDraftItem = promptReferenceItems.find(
 				(item) => item.id === optimizationDraftItemId,
 			);
 			const optimizationDraftModel = optimizationOptions.find(
@@ -233,7 +269,7 @@ export const useGenerationSettingsForm = ({
 					? promptOptimizationValue(optimizationDraftItem, optimizationDraftModel, codexAvailable)
 					: { enabled: false },
 				promptSupplements: supplementEnabled
-					? promptSupplementValues(supplementDraftItemIds, workspace.promptReferenceItems)
+					? promptSupplementValues(supplementDraftItemIds, promptReferenceItems)
 					: [],
 			};
 			initializedKeyRef.current = initializationKey;
@@ -245,14 +281,14 @@ export const useGenerationSettingsForm = ({
 		const current = valueRef.current;
 		const supplementDraftItemIds = normalizePromptSupplementDraftItemIds(
 			promptSupplementDraftItemIdsRef.current,
-			workspace.promptReferenceItems,
+			promptReferenceItems,
 			promptItemsLoaded,
 		);
 		const optimizationDraftItemId = promptOptimizationDraftItemClearedRef.current
 			? null
 			: resolvePromptOptimizationDraftItemId(
 					promptOptimizationDraftItemIdRef.current ?? "",
-					workspace.promptReferenceItems,
+					promptReferenceItems,
 					promptItemsLoaded,
 				);
 		const optimizationDraftRouteId = promptOptimizationDraftRouteClearedRef.current
@@ -274,7 +310,7 @@ export const useGenerationSettingsForm = ({
 			promptOptimizationDraftRouteIdRef.current = optimizationDraftRouteId;
 			setPromptOptimizationDraftRouteId(optimizationDraftRouteId);
 		}
-		const optimizationDraftItem = workspace.promptReferenceItems.find(
+		const optimizationDraftItem = promptReferenceItems.find(
 			(item) => item.id === optimizationDraftItemId,
 		);
 		const optimizationDraftModel = optimizationOptions.find(
@@ -292,7 +328,7 @@ export const useGenerationSettingsForm = ({
 				? promptOptimizationValue(optimizationDraftItem, optimizationDraftModel, codexAvailable)
 				: { enabled: false },
 			promptSupplements: promptSupplementEnabledRef.current
-				? promptSupplementValues(supplementDraftItemIds, workspace.promptReferenceItems)
+				? promptSupplementValues(supplementDraftItemIds, promptReferenceItems)
 				: [],
 		};
 		commitValue(next);
@@ -310,7 +346,7 @@ export const useGenerationSettingsForm = ({
 		workspace.hasLiveCatalog,
 		workspace.hasSettledGenerationPreferences,
 		workspace.hasSettledPromptInsertItems,
-		workspace.promptReferenceItems,
+		promptReferenceItems,
 	]);
 
 	const selectedRoute = useMemo(
@@ -319,6 +355,8 @@ export const useGenerationSettingsForm = ({
 			workspace.selectedRoute,
 		[value.routeId, workspace.catalog.routes, workspace.selectedRoute],
 	);
+	const selectedRouteIDRef = useRef(selectedRoute.id);
+	selectedRouteIDRef.current = selectedRoute.id;
 	const selectedFamily = useMemo(
 		() =>
 			workspace.catalog.families.find((family) => family.id === selectedRoute.familyId) ??
@@ -426,6 +464,50 @@ export const useGenerationSettingsForm = ({
 		},
 		[commitValue, kind, promptItemsForNormalization, workspace.catalog],
 	);
+	const updateWorkflowProfile = useCallback(
+		(workflowProfileId: string) => {
+			const next = normalizeGenerationSettingsValue(
+				workspace.catalog,
+				kind,
+				{
+					...valueRef.current,
+					instanceProfileId: "",
+					workflowParameters: {},
+					workflowProfileId,
+				},
+				promptItemsForNormalization,
+			);
+			commitValue(next);
+		},
+		[commitValue, kind, promptItemsForNormalization, workspace.catalog],
+	);
+	const updateInstanceProfile = useCallback(
+		(instanceProfileId: string) => {
+			const next = normalizeGenerationSettingsValue(
+				workspace.catalog,
+				kind,
+				{ ...valueRef.current, instanceProfileId },
+				promptItemsForNormalization,
+			);
+			commitValue(next);
+		},
+		[commitValue, kind, promptItemsForNormalization, workspace.catalog],
+	);
+	const updateWorkflowParameter = useCallback(
+		(name: string, paramValue: string | number | boolean | undefined) => {
+			const workflowParameters = { ...valueRef.current.workflowParameters };
+			if (paramValue === undefined || paramValue === "") delete workflowParameters[name];
+			else workflowParameters[name] = paramValue;
+			const next = normalizeGenerationSettingsValue(
+				workspace.catalog,
+				kind,
+				{ ...valueRef.current, workflowParameters },
+				promptItemsForNormalization,
+			);
+			commitValue(next);
+		},
+		[commitValue, kind, promptItemsForNormalization, workspace.catalog],
+	);
 	const { generationCountControl } = useGenerationCountControl({
 		hasConfiguredRoutesForKind,
 		onParamChange: updateParam,
@@ -485,14 +567,13 @@ export const useGenerationSettingsForm = ({
 		promptOptimizationModelOptions.find((option) => option.id === promptOptimizationDraftRouteId) ??
 		null;
 	const selectedPromptOptimizationItem =
-		workspace.promptReferenceItems.find((item) => item.id === promptOptimizationDraftItemId) ??
-		null;
+		promptReferenceItems.find((item) => item.id === promptOptimizationDraftItemId) ?? null;
 	const selectedPromptSupplementItems = useMemo(
 		() =>
 			promptSupplementDraftItemIds
-				.map((id) => workspace.promptReferenceItems.find((item) => item.id === id))
+				.map((id) => promptReferenceItems.find((item) => item.id === id))
 				.filter((item): item is PromptInsertItem => Boolean(item)),
-		[promptSupplementDraftItemIds, workspace.promptReferenceItems],
+		[promptReferenceItems, promptSupplementDraftItemIds],
 	);
 
 	const setPromptSupplementEnabled = useCallback(
@@ -502,18 +583,15 @@ export const useGenerationSettingsForm = ({
 			commitValue({
 				...valueRef.current,
 				promptSupplements: enabled
-					? promptSupplementValues(
-							promptSupplementDraftItemIdsRef.current,
-							workspace.promptReferenceItems,
-						)
+					? promptSupplementValues(promptSupplementDraftItemIdsRef.current, promptReferenceItems)
 					: [],
 			});
 		},
-		[commitValue, workspace.promptReferenceItems],
+		[commitValue, promptReferenceItems],
 	);
 	const togglePromptSupplementItem = useCallback(
 		(id: string) => {
-			const item = workspace.promptReferenceItems.find((candidate) => candidate.id === id);
+			const item = promptReferenceItems.find((candidate) => candidate.id === id);
 			if (!item) return;
 			const selected = promptSupplementDraftItemIdsRef.current.includes(item.id);
 			const nextDraftItemIds = selected
@@ -525,10 +603,10 @@ export const useGenerationSettingsForm = ({
 			setPromptSupplementEnabledState(true);
 			commitValue({
 				...valueRef.current,
-				promptSupplements: promptSupplementValues(nextDraftItemIds, workspace.promptReferenceItems),
+				promptSupplements: promptSupplementValues(nextDraftItemIds, promptReferenceItems),
 			});
 		},
-		[commitValue, workspace.promptReferenceItems],
+		[commitValue, promptReferenceItems],
 	);
 
 	const setPromptOptimizationEnabled = useCallback(
@@ -541,7 +619,7 @@ export const useGenerationSettingsForm = ({
 				? null
 				: resolvePromptOptimizationDraftItemId(
 						promptOptimizationDraftItemIdRef.current ?? "",
-						workspace.promptReferenceItems,
+						promptReferenceItems,
 						promptItemsLoaded,
 					);
 			const routeId = promptOptimizationDraftRouteClearedRef.current
@@ -555,7 +633,7 @@ export const useGenerationSettingsForm = ({
 			setPromptOptimizationDraftItemId(itemId);
 			promptOptimizationDraftRouteIdRef.current = routeId;
 			setPromptOptimizationDraftRouteId(routeId);
-			const item = workspace.promptReferenceItems.find((candidate) => candidate.id === itemId);
+			const item = promptReferenceItems.find((candidate) => candidate.id === itemId);
 			const model = promptOptimizationModelOptions.find((option) => option.id === routeId);
 			commitValue({
 				...valueRef.current,
@@ -568,7 +646,7 @@ export const useGenerationSettingsForm = ({
 			promptItemsLoaded,
 			preferredPromptOptimizationModel,
 			promptOptimizationModelOptions,
-			workspace.promptReferenceItems,
+			promptReferenceItems,
 		],
 	);
 	const setPromptOptimizationItemId = useCallback(
@@ -578,7 +656,7 @@ export const useGenerationSettingsForm = ({
 			setPromptOptimizationDraftItemId(id);
 			if (!valueRef.current.promptOptimization.enabled) return;
 			const item = id
-				? (workspace.promptReferenceItems.find((candidate) => candidate.id === id) ?? null)
+				? (promptReferenceItems.find((candidate) => candidate.id === id) ?? null)
 				: null;
 			const model =
 				promptOptimizationModelOptions.find(
@@ -589,7 +667,7 @@ export const useGenerationSettingsForm = ({
 				promptOptimization: promptOptimizationValue(item, model, codexAvailable),
 			});
 		},
-		[commitValue, codexAvailable, promptOptimizationModelOptions, workspace.promptReferenceItems],
+		[commitValue, codexAvailable, promptOptimizationModelOptions, promptReferenceItems],
 	);
 	const setPromptOptimizationRouteId = useCallback(
 		(id: string) => {
@@ -598,7 +676,7 @@ export const useGenerationSettingsForm = ({
 			setPromptOptimizationDraftRouteId(id);
 			if (!valueRef.current.promptOptimization.enabled) return;
 			const item =
-				workspace.promptReferenceItems.find(
+				promptReferenceItems.find(
 					(candidate) => candidate.id === promptOptimizationDraftItemIdRef.current,
 				) ?? null;
 			const model = promptOptimizationModelOptions.find((option) => option.id === id) ?? null;
@@ -607,7 +685,7 @@ export const useGenerationSettingsForm = ({
 				promptOptimization: promptOptimizationValue(item, model, codexAvailable),
 			});
 		},
-		[commitValue, codexAvailable, promptOptimizationModelOptions, workspace.promptReferenceItems],
+		[commitValue, codexAvailable, promptOptimizationModelOptions, promptReferenceItems],
 	);
 
 	const supportsReferenceImages =
@@ -617,7 +695,7 @@ export const useGenerationSettingsForm = ({
 		[workspace.mediaAssets],
 	);
 	const selectedReferenceAssets = useMemo(
-		() => imageReferenceAssets.filter((asset) => value.referenceAssetIds.includes(asset.id)),
+		() => mediaAssetsInIDOrder(value.referenceAssetIds, imageReferenceAssets),
 		[imageReferenceAssets, value.referenceAssetIds],
 	);
 	const maxReferenceImages = supportsReferenceImages
@@ -659,24 +737,96 @@ export const useGenerationSettingsForm = ({
 			workspace.catalog,
 		],
 	);
-	const uploadReferenceAsset = useCallback(
-		async (event: React.ChangeEvent<HTMLInputElement>) => {
-			const file = event.target.files?.[0];
-			event.target.value = "";
-			if (!file || !supportsReferenceImages) return;
+	const importReferenceFiles = useCallback(
+		async (files: readonly File[]): Promise<ReferenceImportBatchResult | null> => {
+			if (referenceImportInFlightRef.current || files.length === 0) return null;
+			referenceImportInFlightRef.current = true;
+			const routeID = selectedRoute.id;
+			const currentValue = valueRef.current;
+			const availableSlots = supportsReferenceImages
+				? maxReferenceImages
+					? Math.max(0, maxReferenceImages - currentValue.referenceAssetIds.length)
+					: undefined
+				: 0;
 			setIsUploadingReference(true);
+			setReferenceImportProgress({ processed: 0, total: files.length });
 			setError(null);
 			try {
-				const asset = await uploadMediaAsset(file, projectId);
-				await workspace.mutateMediaAssets();
-				if (asset.kind === "image") toggleReferenceAsset(asset);
-			} catch (caught) {
-				setError(caught instanceof Error ? caught.message : "素材上传失败。");
+				const batch = await runReferenceFileImport({
+					availableSlots,
+					files,
+					isUploadedAssetCompatible: (asset) => supportsReferenceImages && asset.kind === "image",
+					onProgress: (progress) => {
+						if (isMountedRef.current) setReferenceImportProgress(progress);
+					},
+					projectId,
+					selectableKinds: supportsReferenceImages ? imageReferenceKinds : emptyReferenceKinds,
+				});
+
+				if (batch.storedAssets.length > 0) {
+					await workspace.mutateMediaAssets(
+						(current) => ({
+							assets: mergeMediaAssetsByID(
+								current?.assets ?? workspace.mediaAssets,
+								batch.storedAssets,
+							),
+						}),
+						{ revalidate: false },
+					);
+					void Promise.resolve(workspace.mutateMediaAssets()).catch(() => {
+						if (isMountedRef.current) {
+							setError("素材已入库，但素材列表刷新失败，请稍后重试。");
+						}
+					});
+				}
+
+				if (!isMountedRef.current) return batch;
+				if (selectedRouteIDRef.current !== routeID) {
+					setError("模型已切换，素材已入库，请按当前模型重新选择。");
+					return batch;
+				}
+
+				if (batch.selectableAssets.length > 0) {
+					const latestValue = valueRef.current;
+					commitValue(
+						normalizeGenerationSettingsValue(
+							workspace.catalog,
+							kind,
+							{
+								...latestValue,
+								referenceAssetIds: Array.from(
+									new Set([
+										...latestValue.referenceAssetIds,
+										...batch.selectableAssets.map((asset) => asset.id),
+									]),
+								),
+							},
+							promptItemsForNormalization,
+						),
+					);
+				}
+				setError(referenceImportIssueMessage(batch));
+				return batch;
 			} finally {
-				setIsUploadingReference(false);
+				referenceImportInFlightRef.current = false;
+				if (isMountedRef.current) {
+					setIsUploadingReference(false);
+					setReferenceImportProgress(null);
+				}
 			}
 		},
-		[projectId, supportsReferenceImages, toggleReferenceAsset, workspace.mutateMediaAssets],
+		[
+			commitValue,
+			kind,
+			maxReferenceImages,
+			projectId,
+			promptItemsForNormalization,
+			selectedRoute.id,
+			supportsReferenceImages,
+			workspace.catalog,
+			workspace.mediaAssets,
+			workspace.mutateMediaAssets,
+		],
 	);
 
 	const isReady =
@@ -687,15 +837,40 @@ export const useGenerationSettingsForm = ({
 	const submitValue = isReady
 		? generationSettingsValueForSubmit(workspace.catalog, value, promptItemsForNormalization)
 		: null;
-	const isBusy = !isReady || isUploadingReference;
+	const isBusy =
+		!isReady ||
+		isUploadingReference ||
+		(isAutoDLRoute(value.routeId) && autoDLWorkflowOptions.isLoading);
+	const workflowParameterNames = new Set(autoDLWorkflowOptions.parameterNames);
+	const workflowParametersValid =
+		!value.workflowParameters ||
+		Object.keys(value.workflowParameters).length === 0 ||
+		(Boolean(value.workflowProfileId) &&
+			Object.keys(value.workflowParameters).every((name) => workflowParameterNames.has(name)));
+	const autoDLSelectionValid =
+		!isAutoDLRoute(value.routeId) ||
+		(!autoDLWorkflowOptions.error &&
+			(value.workflowProfileId
+				? autoDLWorkflowOptions.compatibleProfiles.some(
+						(profile) => profile.id === value.workflowProfileId,
+					)
+				: !autoDLWorkflowOptions.automaticError) &&
+			workflowParametersValid &&
+			(!value.instanceProfileId ||
+				(Boolean(value.workflowProfileId) &&
+					autoDLWorkflowOptions.readyInstances.some(
+						(instance) => instance.id === value.instanceProfileId,
+					))));
 	const isValid =
 		isReady &&
 		hasAvailableRoute &&
 		Boolean(submitValue) &&
 		Boolean(submitValue && sameGenerationSettingsValue(value, submitValue)) &&
+		autoDLSelectionValid &&
 		(!promptSupplementEnabled || Boolean(submitValue?.promptSupplements.length));
 
 	return {
+		autoDLWorkflowOptions,
 		catalog: workspace.catalog,
 		codexAvailable,
 		error,
@@ -707,13 +882,15 @@ export const useGenerationSettingsForm = ({
 		isBusy,
 		isReady,
 		isUploadingReference,
+		importReferenceFiles,
 		isValid,
 		maxReferenceImages,
 		mutateMediaAssets: workspace.mutateMediaAssets,
-		promptInsertItems: workspace.promptReferenceItems,
+		promptInsertItems: promptReferenceItems,
 		promptOptimizationModelOptions,
 		promptSupplementEnabled,
 		referenceDialogOpen,
+		referenceImportProgress,
 		referenceInputId: `${uploadIdPrefix}-reference-upload`,
 		routeParamControls,
 		selectedFamily,
@@ -736,11 +913,16 @@ export const useGenerationSettingsForm = ({
 		togglePromptSupplementItem,
 		toggleReferenceAsset,
 		updateFamily,
+		updateInstanceProfile,
 		updateModelRoute,
 		updateParam,
-		uploadReferenceAsset,
+		updateWorkflowParameter,
+		updateWorkflowProfile,
 	};
 };
+
+const isAutoDLRoute = (routeId: string) =>
+	routeId === "autodl.image" || routeId === "autodl.minimax-h3";
 
 const emptyGenerationSettingsValue = (kind: GenerationSettingsKind): GenerationSettingsValue => ({
 	kind,

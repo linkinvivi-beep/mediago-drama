@@ -11,9 +11,14 @@
       "order": 0
     },
     {
+      "id": "video-style",
+      "label": "视频摄影风格",
+      "order": 1
+    },
+    {
       "id": "extra",
       "label": "其他",
-      "order": 1
+      "order": 2
     }
   ]
 }

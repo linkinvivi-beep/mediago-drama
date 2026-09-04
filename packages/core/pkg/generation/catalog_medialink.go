@@ -1,0 +1,192 @@
+package generation
+
+const (
+	FamilyCodexImage     = "codex-image"
+	FamilyAutoDLWorkflow = "autodl-workflow"
+	FamilyMiniMaxH3      = "minimax-h3"
+
+	VersionCodexImageV1     = "codex-image-v1"
+	VersionAutoDLWorkflowV1 = "autodl-workflow-v1"
+	VersionMiniMaxH3V1      = "minimax-h3-v1"
+
+	// Deprecated aliases keep stored callers source-compatible while the
+	// public AutoDL image route becomes workflow/model neutral.
+	FamilyZImage    = FamilyAutoDLWorkflow
+	VersionZImageV1 = VersionAutoDLWorkflowV1
+)
+
+var mediaLinkFamilySpecs = []familySpec{
+	{
+		Family: ModelFamily{
+			ID:          FamilyCodexImage,
+			Label:       "Codex Image",
+			Kind:        KindImage,
+			Description: "Image generation through the bundled Codex session",
+		},
+		Versions: []ModelVersion{
+			version(VersionCodexImageV1, FamilyCodexImage, "Codex Image", KindImage, "imagegen", false, true),
+		},
+		Routes: []ModelRoute{
+			mediaLinkRoute(
+				RouteCodexImage,
+				FamilyCodexImage,
+				VersionCodexImageV1,
+				"Codex 生图",
+				KindImage,
+				ProviderCodex,
+				"imagegen",
+				AdapterCodexImage,
+				"https://developers.openai.com/codex/app-server",
+				codexImageParams(),
+				false,
+				withReferenceURLLimit(10),
+			),
+		},
+	},
+	{
+		Family: ModelFamily{
+			ID:          FamilyAutoDLWorkflow,
+			Label:       "AutoDL 云端工作流",
+			Kind:        KindImage,
+			Description: "Configurable image generation through AutoDL ComfyUI workflows",
+		},
+		Versions: []ModelVersion{
+			version(VersionAutoDLWorkflowV1, FamilyAutoDLWorkflow, "AutoDL 云端工作流", KindImage, "comfyui-workflow", false, true),
+		},
+		Routes: []ModelRoute{
+			mediaLinkRoute(
+				RouteAutoDLImage,
+				FamilyAutoDLWorkflow,
+				VersionAutoDLWorkflowV1,
+				"AutoDL · 云端生图",
+				KindImage,
+				ProviderAutoDL,
+				"comfyui-workflow",
+				AdapterAutoDLComfyImage,
+				"https://docs.comfy.org/development/core-concepts/api",
+				autoDLImageParams(),
+				false,
+				withReferenceURLLimit(8),
+			),
+		},
+	},
+	{
+		Family: ModelFamily{
+			ID:          FamilyMiniMaxH3,
+			Label:       "MiniMax H3",
+			Kind:        KindVideo,
+			Description: "MiniMax H3 video generation through AutoDL ComfyUI",
+		},
+		Versions: []ModelVersion{
+			version(VersionMiniMaxH3V1, FamilyMiniMaxH3, "MiniMax H3", KindVideo, "minimax-h3", true, true),
+		},
+		Routes: []ModelRoute{
+			mediaLinkRoute(
+				RouteAutoDLH3,
+				FamilyMiniMaxH3,
+				VersionMiniMaxH3V1,
+				"AutoDL · MiniMax H3",
+				KindVideo,
+				ProviderAutoDL,
+				"minimax-h3",
+				AdapterAutoDLComfyH3Video,
+				"https://docs.comfy.org/development/core-concepts/api",
+				autoDLH3Params(),
+				true,
+				withReferenceURLLimit(8),
+			),
+		},
+	},
+}
+
+func mediaLinkRoute(
+	id string,
+	familyID string,
+	versionID string,
+	label string,
+	kind Kind,
+	provider string,
+	model string,
+	adapter string,
+	docURL string,
+	params RouteParamConfig,
+	async bool,
+	options ...routeOption,
+) ModelRoute {
+	route := ModelRoute{
+		ID:                    id,
+		FamilyID:              familyID,
+		VersionID:             versionID,
+		Label:                 label,
+		Kind:                  kind,
+		Provider:              provider,
+		Model:                 model,
+		Adapter:               adapter,
+		DocURL:                docURL,
+		Async:                 async,
+		SupportsReferenceURLs: true,
+		Status:                RouteStatusAvailable,
+		Params:                routeParamSpecs(kind, params.CanonicalParams),
+		ParamGroups:           routeParamGroups(kind, params.CanonicalParams),
+		Combos:                cloneParamCombos(params.Combos),
+		CanonicalParams:       params.CanonicalParams,
+		Translation:           params.Translation,
+	}
+	applyRouteOptions(&route, options...)
+	return route
+}
+
+func codexImageParams() RouteParamConfig {
+	return identityRouteParamConfig([]RouteParam{
+		selectRouteParam(ParamAspectRatio, "1:1", []ParamOption{
+			{Label: "1:1", Value: "1:1"},
+			{Label: "3:2", Value: "3:2"},
+			{Label: "2:3", Value: "2:3"},
+			{Label: "16:9", Value: "16:9"},
+			{Label: "9:16", Value: "9:16"},
+		}),
+	})
+}
+
+func autoDLImageParams() RouteParamConfig {
+	return identityRouteParamConfig([]RouteParam{
+		selectRouteParam(ParamAspectRatio, "1:1", []ParamOption{
+			{Label: "1:1", Value: "1:1"},
+			{Label: "3:2", Value: "3:2"},
+			{Label: "2:3", Value: "2:3"},
+			{Label: "16:9", Value: "16:9"},
+			{Label: "9:16", Value: "9:16"},
+		}),
+		selectRouteParam(ParamResolution, "1K", []ParamOption{
+			{Label: "512px", Value: "512px"},
+			{Label: "1K", Value: "1K"},
+			{Label: "2K", Value: "2K"},
+		}),
+		optionalNumberRouteParam(ParamSeed, -1, 2147483647),
+	})
+}
+
+func autoDLH3Params() RouteParamConfig {
+	return identityRouteParamConfig([]RouteParam{
+		selectRouteParam(ParamDuration, "4", mediaLinkH3DurationOptions()),
+		selectRouteParam(ParamAspectRatio, "16:9", []ParamOption{
+			{Label: "16:9", Value: "16:9"},
+			{Label: "9:16", Value: "9:16"},
+			{Label: "1:1", Value: "1:1"},
+		}),
+		selectRouteParam(ParamResolution, "1080p", []ParamOption{
+			{Label: "768p（1344×768）", Value: "768p"},
+			{Label: "1080p（1920×1080）", Value: "1080p"},
+		}),
+		optionalNumberRouteParam(ParamSeed, -1, 2147483647),
+	})
+}
+
+func mediaLinkH3DurationOptions() []ParamOption {
+	options := make([]ParamOption, 0, 12)
+	for duration := 4; duration <= 15; duration++ {
+		value := formatNumber(float64(duration))
+		options = append(options, ParamOption{Label: value + "s", Value: value})
+	}
+	return options
+}

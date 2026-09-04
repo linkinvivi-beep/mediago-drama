@@ -19,6 +19,7 @@ export const promptInsertItemsFromPresets = (
 			categoryLabel: promptCategoryLabel(preset.category, categories),
 			name: preset.name,
 			prompt: "prompt" in preset ? preset.prompt : "",
+			type: preset.type,
 			sourceRef:
 				"sourcePackageId" in preset && preset.sourcePackageId && preset.sourceReleaseId
 					? { packageId: preset.sourcePackageId, releaseId: preset.sourceReleaseId }

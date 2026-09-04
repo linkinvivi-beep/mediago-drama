@@ -207,6 +207,7 @@ func EnsureWorkspaceSchema(db *gorm.DB) error {
 		&domain.AgentWorkflowHandoffModel{},
 		&domain.AgentQueuedInputModel{},
 		&domain.AssetModel{},
+		&domain.MediaAssetCleanupIntentModel{},
 		&domain.GenerationConversationModel{},
 		&domain.GenerationTaskModel{},
 		&domain.GenerationTaskAttemptModel{},

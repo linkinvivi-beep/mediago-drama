@@ -11,16 +11,27 @@ import (
 )
 
 func (workflow *GenerationService) newGenerationProvider(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	return workflow.newGenerationProviderContext(context.Background(), route)
+}
+
+func (workflow *GenerationService) newGenerationProviderContext(ctx context.Context, route coregeneration.ModelRoute) (coregeneration.Provider, error) {
 	if route.Status != coregeneration.RouteStatusAvailable {
 		return nil, errors.New(route.StatusReason)
 	}
-	if err := workflow.requireGenerationRouteConfigured(route); err != nil {
+	if err := workflow.requireGenerationRouteConfiguredContext(ctx, route); err != nil {
 		return nil, err
 	}
-	if workflow.generationProviderFactory != nil {
+	if isMediaLinkRouteID(route.ID) && workflow.generationProviderFactory != nil {
 		return workflow.generationProviderFactory(route)
 	}
 
+	return workflow.newLegacyGenerationProvider(route)
+}
+
+func (workflow *GenerationService) newLegacyGenerationProvider(route coregeneration.ModelRoute) (coregeneration.Provider, error) {
+	if workflow.legacyProviderFactory != nil {
+		return workflow.legacyProviderFactory(route)
+	}
 	return runtime.NewProvider(runtime.Config{
 		Credentials:                   workflow.generationCredentialResolver(),
 		MultimodalTextProviderFactory: workflow.multimodalTextProviderFactory,
@@ -57,14 +68,54 @@ func (workflow *GenerationService) newGenerationProviderForStoredTask(
 	task generationTaskRecord,
 	found bool,
 ) (coregeneration.Provider, error) {
+	return workflow.newGenerationProviderForStoredTaskContext(context.Background(), id, task, found)
+}
+
+func (workflow *GenerationService) newGenerationProviderForStoredTaskContext(
+	ctx context.Context,
+	id string,
+	task generationTaskRecord,
+	found bool,
+) (coregeneration.Provider, error) {
 	route, err := RouteForStoredGenerationTask(id, task, found)
 	if err != nil {
 		return nil, err
 	}
-	return workflow.newGenerationProvider(route)
+	var provider coregeneration.Provider
+	if isAutoDLGenerationRouteID(route.ID) && workflow.generationProviderFactory != nil {
+		provider, err = workflow.generationProviderFactory(route)
+	} else {
+		provider, err = workflow.newGenerationProviderContext(ctx, route)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if isAutoDLGenerationRouteID(route.ID) {
+		bound, ok := provider.(interface {
+			ForRuntimeState(GenerationTaskRuntimeState) coregeneration.Provider
+		})
+		if !ok {
+			return nil, fmt.Errorf("AutoDL provider does not support persisted runtime state")
+		}
+		state := task.RuntimeState
+		state.LocalTaskID = task.ID
+		return bound.ForRuntimeState(state), nil
+	}
+	return provider, nil
 }
 
 func (workflow *GenerationService) requireGenerationRouteConfigured(route coregeneration.ModelRoute) error {
+	return workflow.requireGenerationRouteConfiguredContext(context.Background(), route)
+}
+
+func (workflow *GenerationService) requireGenerationRouteConfiguredContext(ctx context.Context, route coregeneration.ModelRoute) error {
+	if isMediaLinkRouteID(route.ID) {
+		ready, reason := workflow.mediaLinkRouteReadyContext(ctx, route.ID)
+		if ready {
+			return nil
+		}
+		return errors.New(reason)
+	}
 	if route.Provider == coregeneration.ProviderMediago &&
 		strings.TrimSpace(workflow.mediagoBaseURL) != "" &&
 		workflow.generationRouteCredentialsConfigured(route) {
@@ -87,6 +138,10 @@ func (workflow *GenerationService) requireGenerationRouteConfigured(route corege
 }
 
 func (workflow *GenerationService) generationRouteConfigured(route coregeneration.ModelRoute) bool {
+	if isMediaLinkRouteID(route.ID) {
+		ready, _ := workflow.mediaLinkRouteReady(route.ID)
+		return ready
+	}
 	return workflow.generationRouteConfiguredWithMediagoModels(route, nil, false)
 }
 

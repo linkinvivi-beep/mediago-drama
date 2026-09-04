@@ -150,6 +150,7 @@ vi.mock("@/domains/generation/components/MediaGenerationInputPanel", () => ({
 		error,
 		imageSpecControl,
 		modelControls,
+		onImportReferenceFiles,
 		previewReferenceAssets = [],
 		primaryParamControls,
 		promptEditor,
@@ -160,6 +161,7 @@ vi.mock("@/domains/generation/components/MediaGenerationInputPanel", () => ({
 		error?: string | null;
 		imageSpecControl?: React.ReactNode;
 		modelControls?: React.ReactNode;
+		onImportReferenceFiles?: (files: File[]) => Promise<unknown> | void;
 		previewReferenceAssets?: MediaAsset[];
 		primaryParamControls?: React.ReactNode;
 		promptEditor?: React.ReactNode;
@@ -173,6 +175,15 @@ vi.mock("@/domains/generation/components/MediaGenerationInputPanel", () => ({
 
 		return (
 			<div data-testid="generation-input-panel">
+				<button
+					type="button"
+					data-testid="input-reference-import"
+					onClick={() =>
+						void onImportReferenceFiles?.([new File(["input"], "input.png", { type: "image/png" })])
+					}
+				>
+					导入输入参考
+				</button>
 				<div data-testid="document-prompt-editor-class" data-class={promptEditorClassName} />
 				<div data-testid="reference-button-label">{referenceButtonLabel}</div>
 				{error ? <div role="alert">{error}</div> : null}
@@ -193,14 +204,27 @@ vi.mock("@/domains/generation/components/MediaGenerationWorkspaceDialogs", () =>
 	MediaGenerationWorkspaceDialogs: ({
 		onToggleInlineReference,
 		referenceShortcutGroups = [],
+		workspace,
 	}: {
 		onToggleInlineReference?: (asset: MediaAsset) => void;
 		referenceShortcutGroups?: Array<{ items: Array<{ asset: MediaAsset; title: string }> }>;
+		workspace?: { importReferenceFiles?: (files: File[]) => Promise<unknown> | void };
 	}) => {
 		const shortcut = referenceShortcutGroups[0]?.items[0];
 
 		return (
 			<div data-testid="generation-dialogs">
+				<button
+					type="button"
+					data-testid="dialog-reference-import"
+					onClick={() =>
+						void workspace?.importReferenceFiles?.([
+							new File(["dialog"], "dialog.png", { type: "image/png" }),
+						])
+					}
+				>
+					导入弹窗参考
+				</button>
 				{shortcut ? (
 					<button type="button" onClick={() => onToggleInlineReference?.(shortcut.asset)}>
 						选择快捷参考 {shortcut.title}
@@ -381,6 +405,7 @@ const workspaceDefaults = {
 	deletingEntryIds: [],
 	error: null,
 	hasConfiguredRoutesForKind: true,
+	importReferenceFiles: vi.fn(),
 	importMediaAssetsToHistory: vi.fn(),
 	isImportingMediaAssets: false,
 	isSubmitting: false,
@@ -395,6 +420,7 @@ const workspaceDefaults = {
 	promptInsertItems: [],
 	promptReferenceItems: [],
 	promptSourceRefs: [],
+	referenceImportProgress: null,
 	selectableReferenceKinds: new Set(["image"]),
 	selectedFamily: { id: "image-family", label: "图像模型" },
 	selectedParams: {},
@@ -757,6 +783,32 @@ describe("MediaGenerationWorkspace", () => {
 
 		expect(screen.getByRole("button", { name: "模型版本和供应商" })).toBeTruthy();
 		expect(screen.getByRole("button", { name: "打开模型文档" })).toBeTruthy();
+	});
+
+	it("passes the same reference importer to the input panel and reference dialog", () => {
+		const importReferenceFiles = vi.fn();
+		vi.mocked(useGenerationWorkspace).mockReturnValue({
+			...workspaceDefaults,
+			importReferenceFiles,
+		} as unknown as ReturnType<typeof useGenerationWorkspace>);
+
+		render(
+			<MediaGenerationWorkspace
+				historyScopeId="history-a"
+				initialPrompt="初始提示词"
+				kind="image"
+			/>,
+		);
+
+		fireEvent.click(screen.getByTestId("input-reference-import"));
+		fireEvent.click(screen.getByTestId("dialog-reference-import"));
+
+		expect(importReferenceFiles).toHaveBeenNthCalledWith(1, [
+			expect.objectContaining({ name: "input.png" }),
+		]);
+		expect(importReferenceFiles).toHaveBeenNthCalledWith(2, [
+			expect.objectContaining({ name: "dialog.png" }),
+		]);
 	});
 
 	it("labels video references as reference material in the input panel", () => {
@@ -1922,12 +1974,12 @@ describe("MediaGenerationWorkspace", () => {
 			title: "舔狗金 · 提示词生成",
 		});
 		const [request] = generationApiMocks.streamGenerationText.mock.calls[0];
-		expect(request.prompt).toContain("优化 prompt：\ncinematic lighting, detailed composition");
-		expect(request.prompt).toContain("用户的输入：\n原始角色提示词");
-		expect(request.prompt).toContain("请按“优化 prompt”的风格和质量要求改写“用户的输入”");
-		expect(request.prompt).toContain("只输出优化后的提示词正文");
-		expect(request.prompt).not.toContain("输出要求");
-		expect(request.prompt).not.toContain("赛璐珞");
+		expect(request.prompt).toBe("原始角色提示词");
+		expect(request.promptOptimization).toMatchObject({
+			referenceName: "电影质感",
+			referencePrompt: "cinematic lighting, detailed composition",
+			routeId: "text-route",
+		});
 		expect(request).toMatchObject({
 			capabilityId: "character",
 			conversationId: "project-a-text",
@@ -1938,12 +1990,10 @@ describe("MediaGenerationWorkspace", () => {
 			provider: "openai",
 			model: "text-model",
 			params: {
-				system_instruction: expect.stringContaining("只输出优化后的提示词正文"),
+				_mediago_prompt_optimization_target_kind: "image",
 			},
 		});
-		expect(String((request.params as Record<string, unknown>).system_instruction)).toContain(
-			"严格保持原有媒介与画风",
-		);
+		expect(request.params).not.toHaveProperty("system_instruction");
 		expect(setPrompt).toHaveBeenCalledWith("optimized");
 		expect(setPrompt).toHaveBeenCalledWith("optimized prompt");
 	});

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	coregeneration "github.com/mediago-dev/mediago-drama/packages/core/pkg/generation"
 	"github.com/mediago-dev/mediago-drama/services/server/internal/domain"
 	"github.com/mediago-dev/mediago-drama/services/server/internal/platform/timestamp"
 	"github.com/mediago-dev/mediago-drama/services/server/internal/repository"
@@ -249,7 +250,7 @@ func (service *GenerationTaskService) ListProjectSelectedAssets(projectID string
 	return assets, nil
 }
 
-// ListPending returns pending video generation tasks.
+// ListPending returns pending generation tasks that may need background recovery.
 func (service *GenerationTaskService) ListPending(limit int) ([]GenerationTaskRecord, error) {
 	if service.initErr != nil {
 		return nil, service.initErr
@@ -270,9 +271,15 @@ func (service *GenerationTaskService) ListPending(limit int) ([]GenerationTaskRe
 		return nil, err
 	}
 
-	// Image tasks are only polled once the inline generation handed them off — status
-	// "submitted" with a provider task id — never while they are still running inline.
-	imageModels, err := service.repo.ListPendingGenerationTasks("image", []string{"submitted"}, limit*2)
+	imageModels, err := service.repo.ListPendingGenerationTasks("image", []string{
+		"preparing",
+		"queued",
+		"submitting",
+		"submitted",
+		"running",
+		"importing",
+		"waiting_reconnect",
+	}, limit*2)
 	if err != nil {
 		return nil, err
 	}
@@ -283,6 +290,17 @@ func (service *GenerationTaskService) ListPending(limit int) ([]GenerationTaskRe
 
 	filtered := make([]GenerationTaskRecord, 0, min(limit, len(videoTasks)+len(imageTasks)))
 	now := time.Now().UTC()
+	// Expired image tasks without a provider id cannot make progress on their own.
+	// Reap them before ordinary provider polling so a busy video queue cannot
+	// leave an orphan image permanently visible as running.
+	for _, task := range imageTasks {
+		if len(filtered) >= limit {
+			return filtered, nil
+		}
+		if GenerationTaskProviderPollID(task) == "" && isExpiredBackgroundImageGeneration(task, now) {
+			filtered = append(filtered, task)
+		}
+	}
 	for _, task := range videoTasks {
 		if len(filtered) >= limit {
 			return filtered, nil
@@ -809,7 +827,7 @@ func (service *GenerationTaskService) updateAssetRecord(id string, assetIndex in
 
 // Upsert creates or updates a generation task.
 func (service *GenerationTaskService) Upsert(task GenerationTaskRecord) error {
-	_, err := service.upsertTask(task, false, true)
+	_, err := service.upsertTask(task, false, false, true)
 	return err
 }
 
@@ -819,7 +837,7 @@ func (service *GenerationTaskService) Upsert(task GenerationTaskRecord) error {
 // published immediately after this write, avoiding a premature untracked-task
 // event before the richer notification exists.
 func (service *GenerationTaskService) UpsertWithoutCompletionListener(task GenerationTaskRecord) error {
-	_, err := service.upsertTask(task, false, false)
+	_, err := service.upsertTask(task, false, false, false)
 	return err
 }
 
@@ -827,10 +845,80 @@ func (service *GenerationTaskService) UpsertWithoutCompletionListener(task Gener
 // workers (submit/poll/progress/handoff) use this so a task the user deleted mid-generation is
 // not resurrected by a late write from the in-flight goroutine.
 func (service *GenerationTaskService) UpsertExisting(task GenerationTaskRecord) (bool, error) {
-	return service.upsertTask(task, true, true)
+	return service.upsertTask(task, true, false, true)
 }
 
-func (service *GenerationTaskService) upsertTask(task GenerationTaskRecord, requireExisting bool, notifyCompletion bool) (bool, error) {
+// UpsertExistingActive writes only when the row still exists and its persisted
+// status remains active. Pollers use it to avoid overwriting a concurrent delete
+// or terminal transition with a stale provider response.
+func (service *GenerationTaskService) UpsertExistingActive(task GenerationTaskRecord) (bool, error) {
+	return service.upsertTask(task, true, true, true)
+}
+
+// FailExistingPreservingRecovery marks one active row failed while leaving the
+// latest provider task ID, runtime state, and cached progress assets untouched.
+func (service *GenerationTaskService) FailExistingPreservingRecovery(id string, response GenerationMessageResponse) (GenerationTaskRecord, bool, error) {
+	if service.initErr != nil {
+		return GenerationTaskRecord{}, false, service.initErr
+	}
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	updated, err := service.repo.FailGenerationTaskPreservingRecovery(
+		id,
+		response.Message,
+		generationTaskErrorFromResponse(response),
+		response.ErrorCode,
+		response.ErrorType,
+		response.Retryable,
+		timestamp.NowRFC3339Nano(),
+	)
+	if err != nil || !updated {
+		return GenerationTaskRecord{}, updated, err
+	}
+	model, err := service.repo.GetGenerationTask(id)
+	if err != nil {
+		return GenerationTaskRecord{}, false, err
+	}
+	task, err := generationTaskRecordFromModel(model)
+	if err != nil {
+		return GenerationTaskRecord{}, false, err
+	}
+	return task, true, nil
+}
+
+// ClaimFailedCodexRetry is an existing-row-only compare-and-swap claim. It
+// preserves non-Codex runtime fields and revisedPrompt while clearing stale
+// recovery identity before a new paid turn can launch.
+func (service *GenerationTaskService) ClaimFailedCodexRetry(id string, message string) (GenerationTaskRuntimeState, bool, error) {
+	if service.initErr != nil {
+		return GenerationTaskRuntimeState{}, false, service.initErr
+	}
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	model, err := service.repo.GetGenerationTask(id)
+	if repository.IsRecordNotFound(err) {
+		return GenerationTaskRuntimeState{}, false, nil
+	}
+	if err != nil {
+		return GenerationTaskRuntimeState{}, false, err
+	}
+	state := GenerationTaskRuntimeState{}
+	if err := decodeGenerationTaskRuntimeState(model.RuntimeStateJSON, &state); err != nil {
+		return GenerationTaskRuntimeState{}, false, err
+	}
+	state.CodexThreadID = ""
+	state.CodexTurnID = ""
+	state.CodexItemID = ""
+	state.SavedPath = ""
+	runtimeJSON, err := encodeGenerationTaskRuntimeState(state)
+	if err != nil {
+		return GenerationTaskRuntimeState{}, false, err
+	}
+	claimed, err := service.repo.ClaimFailedGenerationTask(id, coregeneration.RouteCodexImage, runtimeJSON, message, timestamp.NowRFC3339Nano())
+	return state, claimed, err
+}
+
+func (service *GenerationTaskService) upsertTask(task GenerationTaskRecord, requireExisting bool, requireActive bool, notifyCompletion bool) (bool, error) {
 	if service.initErr != nil {
 		return false, service.initErr
 	}
@@ -864,6 +952,10 @@ func (service *GenerationTaskService) upsertTask(task GenerationTaskRecord, requ
 	if err != nil {
 		return false, err
 	}
+	runtimeStateJSON, err := encodeGenerationTaskRuntimeState(task.RuntimeState)
+	if err != nil {
+		return false, err
+	}
 
 	startedTransition := false
 	completedTransition := false
@@ -894,6 +986,9 @@ func (service *GenerationTaskService) upsertTask(task GenerationTaskRecord, requ
 	if statusErr != nil && !repository.IsRecordNotFound(statusErr) {
 		return false, statusErr
 	}
+	if requireActive && !IsActiveGenerationStatus(previousStatus) {
+		return false, nil
+	}
 
 	if err := service.ensureTaskConversationLocked(task); err != nil {
 		return false, err
@@ -902,41 +997,42 @@ func (service *GenerationTaskService) upsertTask(task GenerationTaskRecord, requ
 		return false, err
 	}
 	if err := service.repo.UpsertGenerationTask(generationTaskModel{
-		ID:              task.ID,
-		BatchID:         strings.TrimSpace(task.BatchID),
-		BatchItemID:     strings.TrimSpace(task.BatchItemID),
-		BatchIndex:      task.BatchIndex,
-		ProviderTaskID:  task.ProviderTaskID,
-		ConversationID:  domain.StringPtr(task.ConversationID),
-		ProjectID:       domain.StringPtr(GenerationProjectIDForRequest(task.ProjectID, "")),
-		DocumentID:      domain.StringPtr(task.DocumentID),
-		SectionID:       domain.StringPtr(task.SectionID),
-		CapabilityID:    domain.StringPtr(task.CapabilityID),
-		ResourceType:    domain.StringPtr(task.ResourceType),
-		Kind:            task.Kind,
-		RouteID:         task.RouteID,
-		FamilyID:        task.FamilyID,
-		VersionID:       task.VersionID,
-		Provider:        task.Provider,
-		ModelID:         task.ModelID,
-		Model:           task.Model,
-		Prompt:          task.Prompt,
-		SourceRefsJSON:  string(sourceRefsJSON),
-		ParamsJSON:      string(paramsJSON),
-		Status:          strings.ToLower(strings.TrimSpace(task.Status)),
-		Message:         task.Message,
-		Text:            task.Text,
-		InputTokens:     task.Usage.InputTokens,
-		OutputTokens:    task.Usage.OutputTokens,
-		TotalTokens:     task.Usage.TotalTokens,
-		ReasoningTokens: task.Usage.ReasoningTokens,
-		CachedTokens:    task.Usage.CachedTokens,
-		Error:           task.Error,
-		ErrorCode:       task.ErrorCode,
-		ErrorType:       task.ErrorType,
-		Retryable:       task.Retryable,
-		CreatedAt:       domain.TimeFromString(task.CreatedAt),
-		UpdatedAt:       domain.TimeFromString(task.UpdatedAt),
+		ID:               task.ID,
+		BatchID:          strings.TrimSpace(task.BatchID),
+		BatchItemID:      strings.TrimSpace(task.BatchItemID),
+		BatchIndex:       task.BatchIndex,
+		ProviderTaskID:   task.ProviderTaskID,
+		ConversationID:   domain.StringPtr(task.ConversationID),
+		ProjectID:        domain.StringPtr(GenerationProjectIDForRequest(task.ProjectID, "")),
+		DocumentID:       domain.StringPtr(task.DocumentID),
+		SectionID:        domain.StringPtr(task.SectionID),
+		CapabilityID:     domain.StringPtr(task.CapabilityID),
+		ResourceType:     domain.StringPtr(task.ResourceType),
+		Kind:             task.Kind,
+		RouteID:          task.RouteID,
+		FamilyID:         task.FamilyID,
+		VersionID:        task.VersionID,
+		Provider:         task.Provider,
+		ModelID:          task.ModelID,
+		Model:            task.Model,
+		Prompt:           task.Prompt,
+		SourceRefsJSON:   string(sourceRefsJSON),
+		ParamsJSON:       string(paramsJSON),
+		RuntimeStateJSON: runtimeStateJSON,
+		Status:           strings.ToLower(strings.TrimSpace(task.Status)),
+		Message:          task.Message,
+		Text:             task.Text,
+		InputTokens:      task.Usage.InputTokens,
+		OutputTokens:     task.Usage.OutputTokens,
+		TotalTokens:      task.Usage.TotalTokens,
+		ReasoningTokens:  task.Usage.ReasoningTokens,
+		CachedTokens:     task.Usage.CachedTokens,
+		Error:            task.Error,
+		ErrorCode:        task.ErrorCode,
+		ErrorType:        task.ErrorType,
+		Retryable:        task.Retryable,
+		CreatedAt:        domain.TimeFromString(task.CreatedAt),
+		UpdatedAt:        domain.TimeFromString(task.UpdatedAt),
 	}); err != nil {
 		return false, err
 	}
@@ -1425,6 +1521,9 @@ func generationTaskRecordFromModel(model generationTaskModel) (GenerationTaskRec
 		return GenerationTaskRecord{}, err
 	}
 	if err := decodeGenerationTaskJSON(model.SourceRefsJSON, &task.SourceRefs); err != nil {
+		return GenerationTaskRecord{}, err
+	}
+	if err := decodeGenerationTaskRuntimeState(model.RuntimeStateJSON, &task.RuntimeState); err != nil {
 		return GenerationTaskRecord{}, err
 	}
 	task.ReferenceURLs, task.ReferenceAssetIDs = generationTaskReferencesFromModels(model.References)
@@ -1917,6 +2016,7 @@ func normalizeGenerationDeletedAssetSlots(slots []int) []int {
 func GenerationTaskForClient(task GenerationTaskRecord) GenerationTaskRecord {
 	task.AssetTitle = generationAssetTitleFromTask(task)
 	task.Params = generationParamsForClient(task.Params)
+	task.RuntimeState = generationTaskRuntimeStateForClient(task.RuntimeState)
 	deletedSlots := generationDeletedAssetSlotSet(task.DeletedAssetSlots)
 	if len(deletedSlots) == 0 {
 		task.Assets = generationAssetsWithTaskSlots(task.ID, task.Assets)
@@ -2072,5 +2172,23 @@ func decodeGenerationTaskJSON[T any](value string, target *T) error {
 		return fmt.Errorf("decoding generation task json: %w", err)
 	}
 
+	return nil
+}
+
+func encodeGenerationTaskRuntimeState(state GenerationTaskRuntimeState) (string, error) {
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		return "", fmt.Errorf("encoding generation task runtime state: %w", err)
+	}
+	return string(encoded), nil
+}
+
+func decodeGenerationTaskRuntimeState(value string, target *GenerationTaskRuntimeState) error {
+	if strings.TrimSpace(value) == "" {
+		value = "{}"
+	}
+	if err := json.Unmarshal([]byte(value), target); err != nil {
+		return fmt.Errorf("decoding generation task runtime state: %w", err)
+	}
 	return nil
 }

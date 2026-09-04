@@ -152,6 +152,19 @@ export interface CodexAccountStatus {
 	shared: boolean;
 }
 
+export interface CodexImagePreflight {
+	accountStatus: "loggedIn" | "notLoggedIn" | "unavailable" | string;
+	imageGeneration: boolean;
+	ready: boolean;
+	reason:
+		| "not_logged_in"
+		| "cli_unavailable"
+		| "capability_unavailable"
+		| "capability_disabled"
+		| "ready"
+		| string;
+}
+
 export interface CodexLoginAttempt {
 	loginId: string;
 	authUrl?: string;
@@ -185,6 +198,7 @@ export const modelPlatformsKey = "/settings/model-platforms";
 export const agentModelProfilesKey = "/settings/agent-model-profiles";
 export const codexRelaySettingsKey = "/settings/codex-relay";
 export const codexAccountKey = "/settings/codex-account";
+export const codexImagePreflightKey = "/settings/codex-image/preflight";
 export const jianyingDraftSettingsKey = "/settings/jianying-draft";
 
 export const getAPIKeys = async () => {
@@ -273,6 +287,11 @@ export const clearCodexRelayProfileAPIKey = async (profileID: string) => {
 
 export const getCodexAccount = async () => {
 	const response = await httpClient.get<CodexAccountStatus>(codexAccountKey);
+	return response.data;
+};
+
+export const getCodexImagePreflight = async () => {
+	const response = await httpClient.get<CodexImagePreflight>(codexImagePreflightKey);
 	return response.data;
 };
 

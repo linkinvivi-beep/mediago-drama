@@ -8,6 +8,8 @@ import {
 	type LucideIcon,
 } from "lucide-react";
 import type React from "react";
+import type { ReferenceImportProgress } from "@/domains/generation/lib/reference-file-import";
+import { useReferenceFileDropTarget } from "@/domains/generation/hooks/useReferenceFileDropTarget";
 import { Button } from "@/shared/components/ui/button";
 import { cn } from "@/shared/lib/utils";
 
@@ -22,15 +24,18 @@ export interface GenerationComposerPanelProps {
 	error?: React.ReactNode;
 	errorTone?: "error" | "warning";
 	fillHeight?: boolean;
+	isImportingReferences?: boolean;
 	isSubmitting: boolean;
 	layeredComposer?: React.ReactNode;
 	leftControls?: React.ReactNode;
 	onCopyPrompt?: () => void;
+	onImportReferenceFiles?: (files: File[]) => Promise<unknown> | void;
 	onOpenReferenceDialog?: () => void;
 	promptExtras?: React.ReactNode;
 	promptInput: React.ReactNode;
 	referenceButtonLabel?: string;
 	referencePreview?: React.ReactNode;
+	referenceImportProgress?: ReferenceImportProgress | null;
 	rightControls?: React.ReactNode;
 	submitLabel: string;
 	submitTone?: GenerationComposerSubmitTone;
@@ -45,20 +50,30 @@ export const GenerationComposerPanel: React.FC<GenerationComposerPanelProps> = (
 	error,
 	errorTone = "error",
 	fillHeight = false,
+	isImportingReferences = false,
 	isSubmitting,
 	layeredComposer,
 	leftControls,
 	onCopyPrompt,
+	onImportReferenceFiles,
 	onOpenReferenceDialog,
 	promptExtras,
 	promptInput,
 	referenceButtonLabel = "参考图",
 	referencePreview,
+	referenceImportProgress,
 	rightControls,
 	submitLabel,
 	submitTone = "text",
 }) => {
 	const SubmitIcon = submitToneIconByTone[submitTone];
+	const { dropTargetProps, isDraggingFiles } = useReferenceFileDropTarget({
+		disabled: !canSelectReference || !onImportReferenceFiles,
+		isImporting: isImportingReferences,
+		onImportFiles: async (files) => {
+			await onImportReferenceFiles?.(files);
+		},
+	});
 
 	return (
 		<section
@@ -69,12 +84,28 @@ export const GenerationComposerPanel: React.FC<GenerationComposerPanelProps> = (
 			)}
 		>
 			<div
+				data-testid="generation-composer-drop-target"
 				className={cn(
-					"gap-[var(--generation-composer-gap)] rounded-[var(--generation-popover-radius)] border border-input bg-card p-[var(--generation-composer-padding)] shadow-sm",
+					"relative gap-[var(--generation-composer-gap)] rounded-[var(--generation-popover-radius)] border border-input bg-card p-[var(--generation-composer-padding)] shadow-sm",
 					fillHeight ? "flex h-full min-h-0 flex-col overflow-hidden" : "grid",
 					cardClassName,
 				)}
+				{...dropTargetProps}
 			>
+				{isDraggingFiles || isImportingReferences ? (
+					<div className="absolute inset-0 z-20 flex items-center justify-center rounded-[var(--generation-popover-radius)] border-2 border-dashed border-primary bg-card/95 px-4 text-center">
+						<div>
+							<p className="text-sm font-medium text-foreground">
+								{isDraggingFiles
+									? "松开以加入素材库并设为参考素材"
+									: referenceImportProgress
+										? `正在导入 ${referenceImportProgress.processed}/${referenceImportProgress.total}`
+										: "正在导入参考素材"}
+							</p>
+							<p className="mt-1 text-xs text-muted-foreground">素材会永久保存在当前素材库</p>
+						</div>
+					</div>
+				) : null}
 				{promptExtras}
 				{layeredComposer ? (
 					<div className="flex min-w-0 items-start justify-between gap-3">

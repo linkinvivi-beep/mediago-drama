@@ -27,23 +27,25 @@ type Asset struct {
 
 // Request describes a media generation request.
 type Request struct {
-	Kind           Kind
-	RouteID        string
-	FamilyID       string
-	VersionID      string
-	Provider       string
-	ProjectID      string
-	ProjectName    string
-	ModelID        string
-	Model          string
-	Prompt         string
-	ReferenceURLs  []string
-	OutputFormat   string
-	ResponseFormat string
-	Watermark      *bool
-	Params         map[string]any
-	ParamsResolved bool
-	Options        map[string]any
+	Kind              Kind
+	RouteID           string
+	FamilyID          string
+	VersionID         string
+	Provider          string
+	InstanceProfileID string
+	WorkflowProfileID string
+	ProjectID         string
+	ProjectName       string
+	ModelID           string
+	Model             string
+	Prompt            string
+	ReferenceURLs     []string
+	OutputFormat      string
+	ResponseFormat    string
+	Watermark         *bool
+	Params            map[string]any
+	ParamsResolved    bool
+	Options           map[string]any
 }
 
 // Response describes generated media or an accepted async task.

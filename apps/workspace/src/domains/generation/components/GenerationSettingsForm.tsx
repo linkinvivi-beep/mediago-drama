@@ -25,6 +25,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/shared/components/ui/
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/shared/components/ui/select";
 import { cn } from "@/shared/lib/utils";
 import { GenerationBrandMark, generationFamilyBrand } from "./GenerationBrandMark";
+import { AutoDLWorkflowControls } from "./AutoDLWorkflowControls";
 import { displayGenerationLabelWithoutAlias } from "./generationDisplayLabels";
 import { GenerationModelRoutePicker } from "./GenerationModelRoutePicker";
 import { ImageGenerationSpecControl } from "./ImageGenerationSpecControl";
@@ -64,6 +65,8 @@ export const GenerationSettingsForm: React.FC<GenerationSettingsFormProps> = ({
 		controller.selectedPromptOptimizationItem?.id &&
 		(controller.selectedPromptOptimizationModel?.route || controller.codexAvailable),
 	);
+	const usesH3PromptAdapter =
+		controller.value.kind === "video" && controller.selectedRoute.id === "autodl.minimax-h3";
 	const primaryParamControls = primaryParamGroups.map((group) => {
 		const param = group.params[0];
 		if (!param) return null;
@@ -159,6 +162,8 @@ export const GenerationSettingsForm: React.FC<GenerationSettingsFormProps> = ({
 						</div>
 					)}
 				</section>
+
+				<AutoDLWorkflowControls controller={controller} disabled={effectiveDisabled} />
 
 				<section aria-label="参数设置" className={generationSettingsSectionClassName}>
 					<div className="flex min-w-0 items-center gap-2">
@@ -314,8 +319,19 @@ export const GenerationSettingsForm: React.FC<GenerationSettingsFormProps> = ({
 							<span>优化并生成时使用</span>
 						</label>
 					</div>
+					{usesH3PromptAdapter ? (
+						<div
+							aria-label="模型提示词适配"
+							className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md bg-muted/70 px-3 py-2"
+						>
+							<Badge variant="secondary">MiniMax H3 官方提示词规则（自动）</Badge>
+							<span className="text-xs text-muted-foreground">
+								开启优化后，会将 H3 模型规则与所选摄影风格同时应用。
+							</span>
+						</div>
+					) : null}
 					<div className="flex flex-wrap items-center gap-2">
-						<LabeledInlineControl label="提示词">
+						<LabeledInlineControl label={usesH3PromptAdapter ? "摄影风格" : "提示词"}>
 							<PromptPackSelect
 								ariaLabel="优化提示词"
 								disabled={
@@ -397,6 +413,7 @@ export const GenerationSettingsForm: React.FC<GenerationSettingsFormProps> = ({
 				entries={[]}
 				inputId={controller.referenceInputId}
 				isUploading={controller.isUploadingReference}
+				importProgress={controller.referenceImportProgress}
 				maxReferences={controller.maxReferenceImages}
 				mediaAssets={controller.imageReferenceAssets}
 				open={controller.referenceDialogOpen}
@@ -408,12 +425,12 @@ export const GenerationSettingsForm: React.FC<GenerationSettingsFormProps> = ({
 				title="选择参考图"
 				visibleKindFilters={imageReferenceKindFilters}
 				onOpenChange={controller.setReferenceDialogOpen}
+				onImportFiles={controller.importReferenceFiles}
 				onRefreshAssets={() => {
 					void controller.mutateMediaAssets();
 				}}
 				onRemoveReference={controller.toggleReferenceAsset}
 				onToggleReference={controller.toggleReferenceAsset}
-				onUpload={controller.uploadReferenceAsset}
 			/>
 		</>
 	);

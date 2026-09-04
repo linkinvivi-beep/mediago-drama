@@ -29,9 +29,9 @@ import (
 
 var defaultPromptPackPolicy = "marketplace"
 
-// @title MediaGo Drama API
+// @title MediaLink API
 // @version 0.0.0
-// @description MediaGo Drama local workspace server API for projects, assets, generation, settings, and agent workflows.
+// @description MediaLink local workspace server API for projects, assets, generation, settings, and agent workflows.
 // @BasePath /
 // @schemes http
 // @tag.name System

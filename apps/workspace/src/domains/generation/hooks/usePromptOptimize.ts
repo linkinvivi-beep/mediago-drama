@@ -3,7 +3,9 @@ import {
 	createGenerationConversation,
 	type GenerationFamily,
 	type GenerationContentSourceRef,
+	type GenerationMessageRequest,
 	type GenerationModelsResponse,
+	type GenerationReferenceBinding,
 	type GenerationRoute,
 	type GenerationVersion,
 	streamGenerationText,
@@ -37,20 +39,20 @@ export interface UsePromptOptimizeOptions {
 	conversationId?: string | null;
 	conversationScopeId?: string | null;
 	conversationTitle?: string | null;
+	documentContext?: GenerationMessageRequest["documentContext"] | null;
+	kind?: GenerationRoute["kind"];
 	onOptimized: (prompt: string) => void;
 	onSuccess?: () => void;
 	projectId?: string | null;
 	preferCodex?: boolean;
+	referenceAssetIds?: string[];
+	referenceBindings?: GenerationReferenceBinding[];
+	referenceUrls?: string[];
 	route?: GenerationRoute | null;
+	targetParams?: Record<string, unknown>;
+	targetRoute?: GenerationRoute | null;
+	targetWorkflowProfileId?: string;
 }
-
-const promptOptimizeSystemInstruction = [
-	"你是提示词优化助手，负责把“用户的输入”改写成一条可直接用于生成的高质量提示词。",
-	"以“优化 prompt”为风格基准，把其中的媒介、画风和质量要求融入改写结果。",
-	"保留“用户的输入”中的主体、动作、场景等核心内容，不要引入无关的新主体。",
-	"严格保持原有媒介与画风（如 2D 动漫、插画、写实摄影等），不得改成另一种风格方向。",
-	"只输出优化后的提示词正文，不要任何解释、标题、寒暄、标签、Markdown、代码块、JSON、思考过程或额外信息。",
-].join("\n");
 
 export const usePromptOptimize = ({
 	capabilityId,
@@ -58,10 +60,18 @@ export const usePromptOptimize = ({
 	conversationId,
 	conversationScopeId,
 	conversationTitle,
+	documentContext,
+	kind,
 	onSuccess,
 	preferCodex = false,
 	projectId,
+	referenceAssetIds = [],
+	referenceBindings = [],
+	referenceUrls = [],
 	route,
+	targetParams,
+	targetRoute,
+	targetWorkflowProfileId,
 	onOptimized,
 }: UsePromptOptimizeOptions) => {
 	const [isOptimizing, setIsOptimizing] = useState(false);
@@ -91,7 +101,6 @@ export const usePromptOptimize = ({
 			const normalizedProjectId = projectId?.trim() || undefined;
 
 			try {
-				const opaqueReference = !input.referencePrompt.trim() && Boolean(input.referenceId?.trim());
 				await ensurePromptOptimizeConversation({
 					conversationId,
 					conversationScopeId,
@@ -111,22 +120,23 @@ export const usePromptOptimize = ({
 						provider: textRoute?.provider,
 						modelId: textRoute?.legacyModelId ?? "",
 						model: textRoute?.model ?? "",
-						prompt: opaqueReference ? input.currentPrompt : buildPromptOptimizeUserPrompt(input),
-						promptOptimization: opaqueReference
-							? {
-									model: textRoute?.model ?? "",
-									referenceId: input.referenceId?.trim() || undefined,
-									referenceName: input.referenceName,
-									referencePrompt: input.referencePrompt,
-									routeId: textRoute?.id,
-								}
-							: undefined,
-						sourceRefs: input.sourceRefs,
-						params: {
-							system_instruction: promptOptimizeSystemInstruction,
+						workflowProfileId: targetWorkflowProfileId?.trim() || undefined,
+						prompt: input.currentPrompt,
+						promptOptimization: {
+							model: textRoute?.model ?? "",
+							referenceId: input.referenceId?.trim() || undefined,
+							referenceName: input.referenceName,
+							referencePrompt: input.referencePrompt,
+							routeId: textRoute?.id,
 						},
-						referenceUrls: [],
-						referenceAssetIds: [],
+						sourceRefs: input.sourceRefs,
+						params: promptOptimizationTargetParams(kind, targetRoute?.id, targetParams),
+						documentId: documentContext?.documentId?.trim() || undefined,
+						sectionId: documentContext?.sectionId?.trim() || undefined,
+						documentContext: documentContext ?? undefined,
+						referenceUrls,
+						referenceAssetIds,
+						referenceBindings,
 					},
 					{
 						signal: controller.signal,
@@ -172,10 +182,18 @@ export const usePromptOptimize = ({
 			conversationId,
 			conversationScopeId,
 			conversationTitle,
+			documentContext,
+			kind,
 			onOptimized,
 			onSuccess,
 			projectId,
 			preferCodex,
+			referenceAssetIds,
+			referenceBindings,
+			referenceUrls,
+			targetParams,
+			targetRoute?.id,
+			targetWorkflowProfileId,
 			textExecutor,
 			textRoute,
 		],
@@ -203,17 +221,23 @@ const resolveTextRoute = (catalog?: GenerationModelsResponse): GenerationRoute |
 	return null;
 };
 
-const buildPromptOptimizeUserPrompt = (input: PromptOptimizeInput) => {
-	const currentPrompt = input.currentPrompt.trim();
-	const referencePrompt = input.referencePrompt.trim();
-	return `优化 prompt：
-${referencePrompt}
-
-用户的输入：
-${currentPrompt}
-
-请按“优化 prompt”的风格和质量要求改写“用户的输入”，只输出优化后的提示词正文，不要任何解释或额外内容。`;
-};
+const promptOptimizationTargetParams = (
+	kind?: GenerationRoute["kind"],
+	routeId?: string,
+	params?: Record<string, unknown>,
+) => ({
+	_mediago_prompt_optimization_target_kind: kind ?? "",
+	_mediago_prompt_optimization_target_route: routeId?.trim() ?? "",
+	...(params?.duration !== undefined
+		? { _mediago_prompt_optimization_target_duration: params.duration }
+		: {}),
+	...(params?.aspectRatio !== undefined
+		? { _mediago_prompt_optimization_target_aspect_ratio: params.aspectRatio }
+		: {}),
+	...(params?.resolution !== undefined
+		? { _mediago_prompt_optimization_target_resolution: params.resolution }
+		: {}),
+});
 
 const cleanPromptOptimizeOutput = (value: string) => {
 	let text = stripThinkTags(value).trim();
