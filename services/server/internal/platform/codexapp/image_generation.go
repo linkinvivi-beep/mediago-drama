@@ -60,10 +60,12 @@ type ImageGenerationCheckpoint struct {
 
 // ImageGenerationResult is a completed, structured app-server image result.
 type ImageGenerationResult struct {
-	ThreadID string
-	TurnID   string
-	JobDir   string
-	Item     ImageGenerationThreadItem
+	ThreadID         string
+	TurnID           string
+	TurnStatus       string
+	TurnErrorMessage string
+	JobDir           string
+	Item             ImageGenerationThreadItem
 }
 
 // ImageGenerationSession adds typed image-generation behavior to a JSON-RPC client.
@@ -175,7 +177,7 @@ func (session *ImageGenerationSession) GenerateImage(
 			if completed == nil {
 				return ImageGenerationResult{}, invalidImageGenerationItemError(rejected)
 			}
-			return ImageGenerationResult{ThreadID: threadID, TurnID: turnID, JobDir: jobDir, Item: *completed}, nil
+			return ImageGenerationResult{ThreadID: threadID, TurnID: turnID, TurnStatus: turn.Status, TurnErrorMessage: turn.ErrorMessage, JobDir: jobDir, Item: *completed}, nil
 		}
 	}
 }
@@ -195,7 +197,11 @@ func (session *ImageGenerationSession) ReadImageResult(ctx context.Context, thre
 			ID    string `json:"id"`
 			Cwd   string `json:"cwd"`
 			Turns []struct {
-				ID    string            `json:"id"`
+				ID     string `json:"id"`
+				Status string `json:"status"`
+				Error  *struct {
+					Message string `json:"message"`
+				} `json:"error"`
 				Items []json.RawMessage `json:"items"`
 			} `json:"turns"`
 		} `json:"thread"`
@@ -210,20 +216,22 @@ func (session *ImageGenerationSession) ReadImageResult(ctx context.Context, thre
 		return ImageGenerationResult{}, fmt.Errorf("Codex image thread id mismatch")
 	}
 	result := ImageGenerationResult{ThreadID: threadID, JobDir: strings.TrimSpace(response.Thread.Cwd)}
-	for turnIndex := len(response.Thread.Turns) - 1; turnIndex >= 0; turnIndex-- {
-		turn := response.Thread.Turns[turnIndex]
-		if result.TurnID == "" {
-			result.TurnID = strings.TrimSpace(turn.ID)
+	if len(response.Thread.Turns) == 0 {
+		return result, nil
+	}
+	turn := response.Thread.Turns[len(response.Thread.Turns)-1]
+	result.TurnID = strings.TrimSpace(turn.ID)
+	result.TurnStatus = strings.TrimSpace(turn.Status)
+	if turn.Error != nil {
+		result.TurnErrorMessage = strings.TrimSpace(turn.Error.Message)
+	}
+	for itemIndex := len(turn.Items) - 1; itemIndex >= 0; itemIndex-- {
+		var item ImageGenerationThreadItem
+		if json.Unmarshal(turn.Items[itemIndex], &item) != nil || item.Type != "imageGeneration" {
+			continue
 		}
-		for itemIndex := len(turn.Items) - 1; itemIndex >= 0; itemIndex-- {
-			var item ImageGenerationThreadItem
-			if json.Unmarshal(turn.Items[itemIndex], &item) != nil || item.Type != "imageGeneration" {
-				continue
-			}
-			result.TurnID = strings.TrimSpace(turn.ID)
-			result.Item = item
-			return result, nil
-		}
+		result.Item = item
+		return result, nil
 	}
 	return result, nil
 }

@@ -124,6 +124,26 @@ func TestGenericPasswordStoreGetReturnsSecretWithoutOnlyTerminalNewline(t *testi
 	}
 }
 
+func TestGenericPasswordStoreExistsDoesNotRequestSecretValue(t *testing.T) {
+	runner := &fakeRunner{}
+	store := newGenericPasswordStore(runner)
+
+	exists, err := store.Exists(context.Background(), "app.medialink.autodl", "instance-1")
+	if err != nil {
+		t.Fatalf("Exists() error = %v", err)
+	}
+	if !exists {
+		t.Fatal("Exists() = false, want true")
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("runner calls = %d, want 1", len(runner.calls))
+	}
+	wantArgs := []string{"find-generic-password", "-s", "app.medialink.autodl", "-a", "instance-1"}
+	if !reflect.DeepEqual(runner.calls[0].args, wantArgs) {
+		t.Fatalf("runner args = %#v, want %#v", runner.calls[0].args, wantArgs)
+	}
+}
+
 func TestGenericPasswordStoreErrorsNeverExposeRunnerOutputOrSecret(t *testing.T) {
 	operations := []struct {
 		name string

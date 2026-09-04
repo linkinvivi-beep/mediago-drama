@@ -69,6 +69,28 @@ static OSStatus medialink_keychain_get(
 	return errSecSuccess;
 }
 
+static OSStatus medialink_keychain_exists(
+	const void *service, UInt32 serviceLength,
+	const void *account, UInt32 accountLength,
+	Boolean *existsOut
+) {
+	SecKeychainItemRef item = NULL;
+	OSStatus status = SecKeychainFindGenericPassword(
+		NULL, serviceLength, service, accountLength, account,
+		NULL, NULL, &item
+	);
+	if (status == errSecItemNotFound) {
+		*existsOut = false;
+		return errSecSuccess;
+	}
+	if (status != errSecSuccess) {
+		return status;
+	}
+	CFRelease(item);
+	*existsOut = true;
+	return errSecSuccess;
+}
+
 static OSStatus medialink_keychain_delete(
 	const void *service, UInt32 serviceLength,
 	const void *account, UInt32 accountLength
@@ -171,6 +193,29 @@ func (store *nativeGenericPasswordStore) Get(ctx context.Context, service, accou
 	bytes := C.GoBytes(secretData, C.int(secretLength))
 	defer clear(bytes)
 	return string(bytes), nil
+}
+
+func (store *nativeGenericPasswordStore) Exists(ctx context.Context, service, account string) (bool, error) {
+	if err := validateNativeCall(ctx, store, service, account); err != nil {
+		return false, err
+	}
+	serviceData := C.CBytes([]byte(service))
+	accountData := C.CBytes([]byte(account))
+	defer C.free(serviceData)
+	defer C.free(accountData)
+	var exists C.Boolean
+	status := C.medialink_keychain_exists(
+		serviceData, C.UInt32(len(service)),
+		accountData, C.UInt32(len(account)),
+		&exists,
+	)
+	if status != C.errSecSuccess {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		return false, fmt.Errorf("checking generic password: %w", ErrUnavailable)
+	}
+	return exists != 0, nil
 }
 
 func (store *nativeGenericPasswordStore) Delete(ctx context.Context, service, account string) error {

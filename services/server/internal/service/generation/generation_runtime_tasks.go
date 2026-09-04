@@ -918,6 +918,17 @@ func (workflow *GenerationService) PollGenerationTask(ctx context.Context, task 
 	}
 	pollID := GenerationTaskProviderPollID(task)
 	if pollID == "" {
+		if route.Kind == coregeneration.KindImage && isExpiredBackgroundImageGeneration(task, time.Now().UTC()) {
+			timeoutErr := backgroundImageGenerationTimeoutError()
+			messageResponse := FailedGenerationResponse(task.ID, timeoutErr)
+			failedTask, existed, saveErr := workflow.generationTasks.FailExistingPreservingRecovery(task.ID, messageResponse)
+			if saveErr != nil || !existed {
+				return
+			}
+			workflow.syncGenerationNotificationTask(failedTask)
+			_ = workflow.generationTasks.RecordAttempt(task.ID, "poll", messageResponse.Status, messageResponse.Message, timeoutErr)
+			return
+		}
 		_ = workflow.generationTasks.RecordAttempt(task.ID, "poll", task.Status, "后台状态检查等待供应商任务 ID。", nil)
 		return
 	}

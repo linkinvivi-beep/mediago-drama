@@ -290,6 +290,17 @@ func (service *GenerationTaskService) ListPending(limit int) ([]GenerationTaskRe
 
 	filtered := make([]GenerationTaskRecord, 0, min(limit, len(videoTasks)+len(imageTasks)))
 	now := time.Now().UTC()
+	// Expired image tasks without a provider id cannot make progress on their own.
+	// Reap them before ordinary provider polling so a busy video queue cannot
+	// leave an orphan image permanently visible as running.
+	for _, task := range imageTasks {
+		if len(filtered) >= limit {
+			return filtered, nil
+		}
+		if GenerationTaskProviderPollID(task) == "" && isExpiredBackgroundImageGeneration(task, now) {
+			filtered = append(filtered, task)
+		}
+	}
 	for _, task := range videoTasks {
 		if len(filtered) >= limit {
 			return filtered, nil

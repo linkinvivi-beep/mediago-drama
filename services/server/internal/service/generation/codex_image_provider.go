@@ -418,7 +418,14 @@ func (provider *CodexImageProvider) Get(ctx context.Context, id string) (coregen
 	applyCodexImageResult(&state, result)
 	if !codexImageItemCompleted(result.Item) {
 		if result.Item.Failure != nil || strings.EqualFold(result.Item.Status, "failed") {
-			return coregeneration.Response{}, codexImageFailure(result.Item)
+			return failedCodexImageRecoveryResponse(id, state, codexImageFailure(result.Item).Error()), nil
+		}
+		if codexImageTurnIsTerminal(result.TurnStatus) {
+			message := strings.TrimSpace(result.TurnErrorMessage)
+			if message == "" {
+				message = fmt.Sprintf("Codex image turn %s", strings.TrimSpace(result.TurnStatus))
+			}
+			return failedCodexImageRecoveryResponse(id, state, message), nil
 		}
 		return codexImageProgressResponse("", "waiting_reconnect", state), nil
 	}
@@ -427,6 +434,28 @@ func (provider *CodexImageProvider) Get(ctx context.Context, id string) (coregen
 		return coregeneration.Response{}, err
 	}
 	return provider.responseForResult("", result, jobDir, state)
+}
+
+func failedCodexImageRecoveryResponse(id string, state GenerationTaskRuntimeState, message string) coregeneration.Response {
+	return coregeneration.Response{
+		ID:     id,
+		Status: "failed",
+		Metadata: map[string]any{
+			"error":           strings.TrimSpace(message),
+			"failure_message": "Codex 生图已停止，请重试。",
+			"runtime_state":   state,
+			"retryable":       true,
+		},
+	}
+}
+
+func codexImageTurnIsTerminal(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "failed", "interrupted":
+		return true
+	default:
+		return false
+	}
 }
 
 func codexImageTaskID(request coregeneration.Request) (string, error) {

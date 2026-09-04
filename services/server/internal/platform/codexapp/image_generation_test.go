@@ -248,6 +248,50 @@ func TestReadImageResultReturnsNonterminalLatestTurn(t *testing.T) {
 	}
 }
 
+func TestReadImageResultPreservesTerminalTurnStatusAndError(t *testing.T) {
+	client := &recordingClient{callResult: json.RawMessage(`{
+		"thread": {
+			"id": "thread-interrupted",
+			"turns": [{
+				"id": "turn-interrupted",
+				"status": "interrupted",
+				"error": {"message": "generation was interrupted"},
+				"items": []
+			}]
+		}
+	}`)}
+
+	result, err := NewImageGenerationSession(client).ReadImageResult(context.Background(), "thread-interrupted")
+	if err != nil {
+		t.Fatalf("ReadImageResult() error = %v", err)
+	}
+	if result.TurnStatus != "interrupted" || result.TurnErrorMessage != "generation was interrupted" {
+		t.Fatalf("ReadImageResult() terminal turn = %#v", result)
+	}
+}
+
+func TestReadImageResultDoesNotRecoverImageFromOlderTurnAfterLatestInterrupted(t *testing.T) {
+	savedPath := filepath.Join(t.TempDir(), "older.png")
+	client := &recordingClient{callResult: json.RawMessage(`{
+		"thread": {
+			"id": "thread-retried",
+			"cwd": "` + filepath.Dir(savedPath) + `",
+			"turns": [
+				{"id":"turn-older","status":"completed","items":[{"id":"item-older","type":"imageGeneration","result":"success","status":"completed","failure":null,"savedPath":"` + savedPath + `"}]},
+				{"id":"turn-latest","status":"interrupted","error":{"message":"latest attempt stopped"},"items":[]}
+			]
+		}
+	}`)}
+
+	result, err := NewImageGenerationSession(client).ReadImageResult(context.Background(), "thread-retried")
+	if err != nil {
+		t.Fatalf("ReadImageResult() error = %v", err)
+	}
+	if result.TurnID != "turn-latest" || result.TurnStatus != "interrupted" || result.TurnErrorMessage != "latest attempt stopped" || result.Item.ID != "" {
+		t.Fatalf("ReadImageResult() = %#v, want latest interrupted turn without an older image", result)
+	}
+}
+
 func TestReadImageResultRejectsMismatchedThreadID(t *testing.T) {
 	client := &recordingClient{callResult: json.RawMessage(`{"thread":{"id":"thread-other","cwd":"/tmp/job","turns":[]}}`)}
 

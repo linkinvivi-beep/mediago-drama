@@ -187,6 +187,58 @@ func TestCodexImageProviderResultCases(t *testing.T) {
 	}
 }
 
+func TestCodexImageProviderStopsPollingInterruptedRecoveredTurn(t *testing.T) {
+	provider := NewCodexImageProvider(&codexImageSessionStub{
+		read: func(_ context.Context, threadID string) (codexapp.ImageGenerationResult, error) {
+			return codexapp.ImageGenerationResult{
+				ThreadID:   threadID,
+				TurnID:     "turn-interrupted",
+				TurnStatus: "interrupted",
+			}, nil
+		},
+	}, t.TempDir())
+
+	response, err := provider.Get(context.Background(), "codex.imagegen:thread-interrupted")
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if response.Status != "failed" {
+		t.Fatalf("Get() status = %q, want failed", response.Status)
+	}
+	if got, _ := response.Metadata["error"].(string); !strings.Contains(got, "interrupted") {
+		t.Fatalf("Get() error metadata = %q, want interrupted turn reason", got)
+	}
+}
+
+func TestCodexImageProviderConvertsRecoveredFailedItemToFailedResponse(t *testing.T) {
+	provider := NewCodexImageProvider(&codexImageSessionStub{
+		read: func(_ context.Context, threadID string) (codexapp.ImageGenerationResult, error) {
+			return codexapp.ImageGenerationResult{
+				ThreadID:   threadID,
+				TurnID:     "turn-failed",
+				TurnStatus: "failed",
+				Item: codexapp.ImageGenerationThreadItem{
+					ID:      "item-failed",
+					Type:    "imageGeneration",
+					Status:  "failed",
+					Failure: &codexapp.ImageGenerationFailure{Type: "rate_limit"},
+				},
+			}, nil
+		},
+	}, t.TempDir())
+
+	response, err := provider.Get(context.Background(), "codex.imagegen:thread-failed")
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if response.Status != "failed" {
+		t.Fatalf("Get() status = %q, want failed", response.Status)
+	}
+	if got, _ := response.Metadata["error"].(string); !strings.Contains(got, "rate_limit") {
+		t.Fatalf("Get() error metadata = %q, want failed item reason", got)
+	}
+}
+
 func TestCodexImageProviderImportsExactOfficialGeneratedImage(t *testing.T) {
 	codexHome := t.TempDir()
 	t.Setenv("CODEX_HOME", codexHome)

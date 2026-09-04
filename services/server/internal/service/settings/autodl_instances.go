@@ -37,6 +37,7 @@ var (
 type autoDLPasswordStore interface {
 	Set(context.Context, string, string, string) error
 	Get(context.Context, string, string) (string, error)
+	Exists(context.Context, string, string) (bool, error)
 	Delete(context.Context, string, string) error
 }
 
@@ -541,14 +542,11 @@ func probeAutoDLPassword(ctx context.Context, passwordStore autoDLPasswordStore,
 	if passwordStore == nil {
 		return false, nil
 	}
-	secret, err := passwordStore.Get(ctx, autoDLKeychainService, credentialRef)
-	if errors.Is(err, platformkeychain.ErrNotFound) {
-		return false, nil
-	}
+	hasPassword, err := passwordStore.Exists(ctx, autoDLKeychainService, credentialRef)
 	if err != nil {
 		return false, fmt.Errorf("checking AutoDL password: %w", err)
 	}
-	return len(secret) > 0, nil
+	return hasPassword, nil
 }
 
 func autoDLCompensationContext(ctx context.Context) (context.Context, context.CancelFunc) {

@@ -283,6 +283,33 @@ func TestGenerationTaskServiceListPendingImageRuntimeStatuses(t *testing.T) {
 	}
 }
 
+func TestGenerationTaskServiceListPendingPrioritizesExpiredImageWithoutProviderID(t *testing.T) {
+	service := NewGenerationTaskService(filepath.Join(t.TempDir(), "workspace.db"), nil)
+	if err := service.Upsert(GenerationTaskRecord{
+		ID: "video-pending", ProviderTaskID: "video:provider", Kind: "video", Status: "running", Prompt: "video",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Upsert(GenerationTaskRecord{
+		ID:        "image-orphan",
+		Kind:      "image",
+		RouteID:   "codex.imagegen",
+		Status:    "running",
+		Prompt:    "image",
+		CreatedAt: time.Now().UTC().Add(-maxBackgroundImageGenerationAge - time.Minute).Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pending, err := service.ListPending(1)
+	if err != nil {
+		t.Fatalf("ListPending() error = %v", err)
+	}
+	if len(pending) != 1 || pending[0].ID != "image-orphan" {
+		t.Fatalf("ListPending(1) = %#v, want expired image orphan first", pending)
+	}
+}
+
 func TestGenerationTaskForClientOmitsInternalParams(t *testing.T) {
 	task := GenerationTaskForClient(GenerationTaskRecord{
 		ID: "task-internal-params",

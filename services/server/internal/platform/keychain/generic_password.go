@@ -39,6 +39,7 @@ var (
 type GenericPasswordStore interface {
 	Set(ctx context.Context, service, account, secret string) error
 	Get(ctx context.Context, service, account string) (string, error)
+	Exists(ctx context.Context, service, account string) (bool, error)
 	Delete(ctx context.Context, service, account string) error
 }
 
@@ -101,6 +102,26 @@ func (store *genericPasswordStore) Get(ctx context.Context, service, account str
 		return "", fmt.Errorf("reading generic password: %w", ErrUnavailable)
 	}
 	return trimTerminalNewline(string(stdout)), nil
+}
+
+func (store *genericPasswordStore) Exists(ctx context.Context, service, account string) (bool, error) {
+	if err := validateCall(ctx, store, service, account); err != nil {
+		return false, err
+	}
+	args := []string{"find-generic-password", "-s", service, "-a", account}
+	stdout, stderr, err := store.runner.Run(ctx, securityExecutable, args, nil)
+	defer clear(stdout)
+	defer clear(stderr)
+	if err != nil {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return false, contextErr
+		}
+		if commandExitCode(err) == keychainItemNotFoundExitCode {
+			return false, nil
+		}
+		return false, fmt.Errorf("checking generic password: %w", ErrUnavailable)
+	}
+	return true, nil
 }
 
 func (store *genericPasswordStore) Delete(ctx context.Context, service, account string) error {

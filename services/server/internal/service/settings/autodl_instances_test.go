@@ -90,7 +90,7 @@ func TestAutoDLSaveInstanceRejectsInvalidLocalPort(t *testing.T) {
 	}
 }
 
-func TestAutoDLSettingsTreatsEmptyKeychainItemAsMissing(t *testing.T) {
+func TestAutoDLSettingsReportsLegacyEmptyKeychainItemPresentWithoutReadingIt(t *testing.T) {
 	service, _, passwords := newAutoDLSettingsForTest()
 	instance, err := service.SaveAutoDLInstance(context.Background(), AutoDLInstanceMutation{
 		Name: "GPU A", SSHCommand: "ssh root@gpu-a.example.com", ComfyPort: 6006,
@@ -104,8 +104,38 @@ func TestAutoDLSettingsTreatsEmptyKeychainItemAsMissing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(response.Instances) != 1 || response.Instances[0].HasPassword {
-		t.Fatalf("GetAutoDLSettings() = %#v, want empty Keychain item reported as missing", response)
+	if len(response.Instances) != 1 || !response.Instances[0].HasPassword {
+		t.Fatalf("GetAutoDLSettings() = %#v, want legacy empty Keychain item reported by presence", response)
+	}
+	if passwords.getCalls != 0 || passwords.existsCalls != 1 {
+		t.Fatalf("password checks = get:%d exists:%d, want presence-only lookup", passwords.getCalls, passwords.existsCalls)
+	}
+}
+
+func TestAutoDLSettingsChecksPasswordPresenceWithoutReadingSecret(t *testing.T) {
+	service, _, passwords := newAutoDLSettingsForTest()
+	_, err := service.SaveAutoDLInstance(context.Background(), AutoDLInstanceMutation{
+		Name: "GPU A", SSHCommand: "ssh root@gpu-a.example.com", Password: "secret-value", ComfyPort: 6006,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	passwords.mu.Lock()
+	passwords.getCalls = 0
+	passwords.existsCalls = 0
+	passwords.mu.Unlock()
+
+	response, err := service.GetAutoDLSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Instances) != 1 || !response.Instances[0].HasPassword {
+		t.Fatalf("GetAutoDLSettings() = %#v, want saved password presence", response)
+	}
+	passwords.mu.Lock()
+	defer passwords.mu.Unlock()
+	if passwords.getCalls != 0 || passwords.existsCalls != 1 {
+		t.Fatalf("password probes Get/Exists = %d/%d, want 0/1", passwords.getCalls, passwords.existsCalls)
 	}
 }
 
@@ -890,6 +920,8 @@ type keychainCall struct {
 type fakeGenericPasswordStore struct {
 	mu                   sync.Mutex
 	values               map[string]string
+	getCalls             int
+	existsCalls          int
 	deleteCalls          []keychainCall
 	getErr               error
 	setErr               error
@@ -919,6 +951,7 @@ func (store *fakeGenericPasswordStore) Set(ctx context.Context, service, account
 func (store *fakeGenericPasswordStore) Get(ctx context.Context, service, account string) (string, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	store.getCalls++
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -930,6 +963,20 @@ func (store *fakeGenericPasswordStore) Get(ctx context.Context, service, account
 		return "", platformkeychain.ErrNotFound
 	}
 	return secret, nil
+}
+
+func (store *fakeGenericPasswordStore) Exists(ctx context.Context, service, account string) (bool, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.existsCalls++
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if store.getErr != nil {
+		return false, store.getErr
+	}
+	_, ok := store.values[service+"\x00"+account]
+	return ok, nil
 }
 
 func (store *fakeGenericPasswordStore) Delete(ctx context.Context, service, account string) error {

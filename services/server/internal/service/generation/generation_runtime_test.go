@@ -4733,6 +4733,36 @@ func TestPollPendingGenerationTasksSkipsImageRecoveryWithoutProviderID(t *testin
 	}
 }
 
+func TestPollPendingGenerationTasksFailsExpiredImageWithoutProviderID(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "settings.db")
+	store := NewGenerationTaskService(dbPath, nil)
+	provider := &stubImageProvider{}
+	workflow := NewGenerationService(nil, store, nil)
+	workflow.SetMediaLinkProviders(
+		provider,
+		&mediaLinkTestProvider{name: "h3"},
+		func(context.Context, string) (bool, string) { return true, "" },
+	)
+	task := testCodexGenerationTask("generation-expired-no-id", "running")
+	task.CreatedAt = time.Now().UTC().Add(-maxBackgroundImageGenerationAge - time.Minute).Format(time.RFC3339Nano)
+	if err := store.Upsert(task); err != nil {
+		t.Fatal(err)
+	}
+
+	workflow.PollPendingGenerationTasks(context.Background(), 10)
+
+	stored, found, err := store.Get(task.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() found=%v error=%v", found, err)
+	}
+	if stored.Status != "failed" || !strings.Contains(stored.Error, "超时") {
+		t.Fatalf("expired orphan task = status %q error %q, want failed timeout", stored.Status, stored.Error)
+	}
+	if provider.generateCalls.Load() != 0 || provider.getCalls.Load() != 0 {
+		t.Fatalf("provider calls generate=%d get=%d, want none without a provider id", provider.generateCalls.Load(), provider.getCalls.Load())
+	}
+}
+
 func TestPollPendingGenerationTasksKeepsImageWithProviderIDPollable(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "settings.db")
 	repo, err := repository.NewGenerationTaskRepository(dbPath)
