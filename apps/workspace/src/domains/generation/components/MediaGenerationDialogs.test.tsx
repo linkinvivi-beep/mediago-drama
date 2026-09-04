@@ -168,6 +168,50 @@ describe("ReferenceSelectionDialog", () => {
 		expect(screen.queryByRole("tab", { name: /音频/ })).toBeNull();
 	});
 
+	it("hides media kinds that the current route cannot use as references", () => {
+		render(
+			<ReferenceSelectionDialog
+				disabled={false}
+				entries={[]}
+				inputId="reference-upload"
+				isUploading={false}
+				mediaAssets={[
+					mediaAsset(),
+					mediaAsset({
+						id: "video-1",
+						filename: "scene.mp4",
+						kind: "video",
+						mimeType: "video/mp4",
+						url: "/api/v1/media-assets/video-1/content",
+					}),
+					mediaAsset({
+						id: "audio-1",
+						filename: "audio.mp3",
+						kind: "audio",
+						mimeType: "audio/mpeg",
+						url: "/api/v1/media-assets/audio-1/content",
+					}),
+				]}
+				open
+				references={[]}
+				requiresReference={false}
+				selectableKinds={new Set(["image"])}
+				selectedAssetIds={[]}
+				onOpenChange={vi.fn()}
+				onRefreshAssets={vi.fn()}
+				onRemoveReference={vi.fn()}
+				onToggleReference={vi.fn()}
+				onImportFiles={vi.fn()}
+			/>,
+		);
+
+		expect(screen.getByText("still.png")).toBeTruthy();
+		expect(screen.queryByText("scene.mp4")).toBeNull();
+		expect(screen.queryByText("audio.mp3")).toBeNull();
+		expect(screen.queryByRole("tab", { name: /视频/ })).toBeNull();
+		expect(screen.queryByRole("tab", { name: /音频/ })).toBeNull();
+	});
+
 	it("imports multiple selected or dropped files in their original order", () => {
 		const onImportFiles = vi.fn();
 		render(
@@ -262,7 +306,7 @@ describe("ReferenceSelectionDialog", () => {
 				open
 				references={[]}
 				requiresReference={false}
-				selectableKinds={new Set(["image"])}
+				selectableKinds={new Set(["audio"])}
 				selectedAssetIds={[]}
 				onOpenChange={vi.fn()}
 				onRefreshAssets={vi.fn()}

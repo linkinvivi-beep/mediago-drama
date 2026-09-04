@@ -120,13 +120,16 @@ const useReferenceSelectionDialogController = ({
 	visibleKindFilters,
 }: ReferenceSelectionDialogProps): ReferenceSelectionDialogController => {
 	const kindFilters = useMemo(
-		() => normalizeReferenceKindFilters(visibleKindFilters),
-		[visibleKindFilters],
+		() => normalizeReferenceKindFilters(visibleKindFilters, selectableKinds),
+		[selectableKinds, visibleKindFilters],
 	);
 	const [kindFilter, setKindFilter] = useState<ReferenceKindFilter>(kindFilters[0] ?? "all");
 	const options = useMemo(
-		() => buildGeneratedReferenceOptions(entries, mediaAssets),
-		[entries, mediaAssets],
+		() =>
+			buildGeneratedReferenceOptions(entries, mediaAssets).filter((option) =>
+				selectableKinds.has(option.kind),
+			),
+		[entries, mediaAssets, selectableKinds],
 	);
 	const optionCounts = useMemo(
 		() => ({
@@ -152,12 +155,14 @@ const useReferenceSelectionDialogController = ({
 			shortcutGroups
 				.map((group) => ({
 					...group,
-					items: group.items.filter((item) =>
-						kindFilter === "all" ? true : item.asset.kind === kindFilter,
+					items: group.items.filter(
+						(item) =>
+							selectableKinds.has(item.asset.kind) &&
+							(kindFilter === "all" || item.asset.kind === kindFilter),
 					),
 				}))
 				.filter((group) => group.items.length > 0),
-		[kindFilter, shortcutGroups],
+		[kindFilter, selectableKinds, shortcutGroups],
 	);
 
 	useEffect(() => {
@@ -367,8 +372,25 @@ const referenceKindTabs: Array<{ label: string; value: ReferenceKindFilter }> = 
 
 const defaultReferenceKindFilters = referenceKindTabs.map((tab) => tab.value);
 
-const normalizeReferenceKindFilters = (filters: ReferenceKindFilter[] | undefined) =>
-	filters?.length ? filters : defaultReferenceKindFilters;
+const normalizeReferenceKindFilters = (
+	filters: ReferenceKindFilter[] | undefined,
+	selectableKinds: Set<MediaAsset["kind"]>,
+) => {
+	const supportedFilters = defaultReferenceKindFilters.filter((filter) => {
+		if (filter === "all") {
+			return (
+				defaultReferenceKindFilters.filter(
+					(candidate) => candidate !== "all" && selectableKinds.has(candidate),
+				).length > 1
+			);
+		}
+		return selectableKinds.has(filter);
+	});
+	if (!filters?.length) return supportedFilters;
+
+	const visibleSupportedFilters = filters.filter((filter) => supportedFilters.includes(filter));
+	return visibleSupportedFilters.length > 0 ? visibleSupportedFilters : supportedFilters;
+};
 
 const referenceKindFilterLabel = (value: ReferenceKindFilter) => {
 	if (value === "video") return "视频";
