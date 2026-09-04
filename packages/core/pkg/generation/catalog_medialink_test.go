@@ -131,6 +131,23 @@ func TestMediaLinkH3CanonicalOptions(t *testing.T) {
 	if !reflect.DeepEqual(duration, wantDuration) {
 		t.Fatalf("duration options = %v, want %v", duration, wantDuration)
 	}
+
+	resolution := mustParam(t, route, string(ParamResolution))
+	wantResolutionValues := []string{"768p", "1080p"}
+	if got := routeParamValues(resolution); !reflect.DeepEqual(got, wantResolutionValues) {
+		t.Fatalf("resolution options = %v, want %v", got, wantResolutionValues)
+	}
+	if resolution.Default != "1080p" {
+		t.Fatalf("resolution default = %#v, want 1080p", resolution.Default)
+	}
+	wantResolutionLabels := []string{"768p（1344×768）", "1080p（1920×1080）"}
+	gotResolutionLabels := make([]string, 0, len(resolution.Options))
+	for _, option := range resolution.Options {
+		gotResolutionLabels = append(gotResolutionLabels, option.Label)
+	}
+	if !reflect.DeepEqual(gotResolutionLabels, wantResolutionLabels) {
+		t.Fatalf("resolution labels = %v, want %v", gotResolutionLabels, wantResolutionLabels)
+	}
 }
 
 func TestMediaLinkProvidersAreDirectAndCredentialFree(t *testing.T) {

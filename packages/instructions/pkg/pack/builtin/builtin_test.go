@@ -20,7 +20,7 @@ func TestBuiltinPackParses(t *testing.T) {
 	if bundle.Manifest.ID != "builtin" ||
 		bundle.Manifest.Name != "默认技能包" ||
 		counts[pack.KindSkill] != 9 ||
-		counts[pack.KindPrompt] != 10 {
+		counts[pack.KindPrompt] != 18 {
 		t.Fatalf("builtin manifest=%#v counts=%#v", bundle.Manifest, counts)
 	}
 	foundNovelWriter := false
@@ -58,6 +58,59 @@ func TestBuiltinPackParses(t *testing.T) {
 	}
 	if !foundAutoMentionResolver {
 		t.Fatal("builtin skills missing auto-mention-resolver")
+	}
+}
+
+func TestBuiltinVideoPhotographyStyles(t *testing.T) {
+	bundle, err := Builtin(context.Background())
+	if err != nil {
+		t.Fatalf("Builtin() error = %v", err)
+	}
+
+	foundCategory := false
+	for _, category := range bundle.Categories {
+		if category.ID == "video-style" && category.Label == "视频摄影风格" {
+			foundCategory = true
+			break
+		}
+	}
+	if !foundCategory {
+		t.Fatalf("builtin categories = %#v, want video-style", bundle.Categories)
+	}
+
+	want := map[string]bool{
+		"video-film-realism":            false,
+		"video-hong-kong-neon-romance": false,
+		"video-cool-crime":              false,
+		"video-naturalist-handheld":     false,
+		"video-neo-noir":                false,
+		"video-dream-soft-focus":        false,
+		"video-symmetrical-deadpan":     false,
+		"video-poetic-road-movie":       false,
+	}
+	for _, entry := range bundle.Entries {
+		if entry.Kind != pack.KindPrompt || entry.Metadata["category"] != "video-style" {
+			continue
+		}
+		if _, ok := want[entry.Slug]; !ok {
+			t.Fatalf("unexpected video photography style %q", entry.Slug)
+		}
+		if entry.Metadata["type"] != "video" {
+			t.Fatalf("%s type = %#v, want video", entry.Slug, entry.Metadata["type"])
+		}
+		want[entry.Slug] = true
+		if entry.Slug == "video-hong-kong-neon-romance" {
+			for _, fragment := range []string{"香港都市爱情电影", "霓虹", "雨夜玻璃反射", "浅景深", "抽帧拖影"} {
+				if !strings.Contains(entry.Body, fragment) {
+					t.Fatalf("Hong Kong neon style missing %q:\n%s", fragment, entry.Body)
+				}
+			}
+		}
+	}
+	for slug, found := range want {
+		if !found {
+			t.Fatalf("missing video photography style %q", slug)
+		}
 	}
 }
 

@@ -175,8 +175,8 @@ func autoDLH3Params() RouteParamConfig {
 			{Label: "1:1", Value: "1:1"},
 		}),
 		selectRouteParam(ParamResolution, "1080p", []ParamOption{
-			{Label: "720p", Value: "720p"},
-			{Label: "1080p", Value: "1080p"},
+			{Label: "768p（1344×768）", Value: "768p"},
+			{Label: "1080p（1920×1080）", Value: "1080p"},
 		}),
 		optionalNumberRouteParam(ParamSeed, -1, 2147483647),
 	})

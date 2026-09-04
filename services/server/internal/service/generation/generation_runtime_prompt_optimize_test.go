@@ -47,7 +47,7 @@ func TestH3PromptOptimizationInstructionExtendsGenericVideoContract(t *testing.T
 	params := map[string]any{
 		promptOptimizationTargetDurationParam:    "8",
 		promptOptimizationTargetAspectRatioParam: "16:9",
-		promptOptimizationTargetResolutionParam:  "720p",
+		promptOptimizationTargetResolutionParam:  "768p",
 	}
 	instruction := promptOptimizationSystemInstructionForTarget(
 		coregeneration.KindVideo,
@@ -58,9 +58,15 @@ func TestH3PromptOptimizationInstructionExtendsGenericVideoContract(t *testing.T
 	for _, fragment := range []string{
 		"一个独立、连贯、可生成的单镜头",
 		"这是用于 MiniMax H3 工作流的视频生成提示词",
+		"逐一写明参考图1、参考图2",
+		"完整覆盖目标时长",
+		"不得留白或重叠",
+		"上一段结束状态必须成为下一段起始状态",
+		"镜头内的微动作节拍",
+		"对白、口型、动作和声音同步",
 		"时长 8 秒",
 		"画幅 16:9",
-		"分辨率 720p",
+		"分辨率 768p",
 		"不要输出 --ar",
 	} {
 		if !strings.Contains(instruction, fragment) {

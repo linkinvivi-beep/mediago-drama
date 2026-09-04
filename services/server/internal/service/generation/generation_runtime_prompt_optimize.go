@@ -37,8 +37,10 @@ const videoPromptOptimizationSystemInstructionText = promptOptimizationSystemIns
 const h3PromptOptimizationSystemInstructionText = videoPromptOptimizationSystemInstructionText + `
 这是用于 MiniMax H3 工作流的视频生成提示词。把输入整理为一个 4-15 秒内可完成的连贯镜头，不要拆成镜头列表。
 必须保持人物身份、外貌、服装、场景空间关系和道具连续性，不得擅自替换、合并或新增；严格保持参考图顺序及各自角色。
-按时间推进写清起始状态、主体动作与节奏、镜头景别和运动、光线色彩、环境变化以及明确的结束状态。
-用户明确提供对白、声音或字幕时才保留；未提供时不要新增。不得编造输入中没有的人物关系、事件或关键视觉事实。
+有多张参考图时，逐一写明参考图1、参考图2及后续图片在本镜头中的已知职责；用户未声明职责时只按顺序引用，不要擅自把它们解释为人物、服装、场景或首尾帧。
+先建立完整覆盖目标时长的主时间线，再在每个时间段内写清镜头内的微动作节拍；时间段不得留白或重叠，上一段结束状态必须成为下一段起始状态。
+按时间推进写清起始状态、主体动作与节奏、镜头景别和运动、光线色彩、环境变化以及明确的结束状态。只有一个主要叙事动作和一种主要镜头运动，微动作只服务于该主动作。
+用户明确提供对白、声音或字幕时才保留，并写清对白、口型、动作和声音同步；未提供时不要新增。不得编造输入中没有的人物关系、事件或关键视觉事实。
 只加入与当前镜头直接相关的负面约束，用于防止身份漂移、肢体或道具变形、空间和动作连续性断裂；不要堆砌通用负面词。
 如果输入已经是完整且符合上述约束的 H3 提示词，只做必要修正，不进行破坏性重写。
 画幅和分辨率由工作流参数控制，不要输出 --ar 或其他命令行画幅参数。`
@@ -581,17 +583,17 @@ func (workflow *GenerationService) createPromptOptimizationHistoryTask(
 	}
 
 	textPayload := generationMessageRequest{
-		Kind:               string(coregeneration.KindText),
-		ConversationID:     conversationID,
-		ScopeID:            scopeID,
-		ProjectID:          projectID,
-		DocumentID:         generationPayload.DocumentID,
-		SectionID:          generationPayload.SectionID,
-		CapabilityID:       firstNonEmpty(optimization.CapabilityID, generationPayload.CapabilityID),
-		TextExecutor:       optimization.Executor,
-		RouteID:            optimization.RouteID,
-		Model:              optimization.Model,
-		Prompt:             generationPayload.Prompt,
+		Kind:           string(coregeneration.KindText),
+		ConversationID: conversationID,
+		ScopeID:        scopeID,
+		ProjectID:      projectID,
+		DocumentID:     generationPayload.DocumentID,
+		SectionID:      generationPayload.SectionID,
+		CapabilityID:   firstNonEmpty(optimization.CapabilityID, generationPayload.CapabilityID),
+		TextExecutor:   optimization.Executor,
+		RouteID:        optimization.RouteID,
+		Model:          optimization.Model,
+		Prompt:         generationPayload.Prompt,
 		Params: promptOptimizationParamsForGeneration(
 			optimization.Params,
 			generationPayload.Params,
@@ -897,7 +899,7 @@ func validatedH3PromptOptimizationAspectRatio(raw any) string {
 func validatedH3PromptOptimizationResolution(raw any) string {
 	value := strings.ToLower(strings.TrimSpace(fmt.Sprint(raw)))
 	switch value {
-	case "720p", "1080p":
+	case "768p", "1080p":
 		return value
 	default:
 		return ""

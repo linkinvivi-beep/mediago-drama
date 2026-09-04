@@ -49,7 +49,7 @@ Codex imagegen is a separate, explicit route and uses the signed-in Codex capabi
 `resolution` vocabularies are isolated by kind dictionaries:
 
 - Image routes may use `1K`, `2K`, `3K`, and `4K`.
-- Video routes may use `480p`, `720p`, and `1080p`.
+- Video routes may use `480p`, `720p`, and `1080p`; the AutoDL MiniMax H3 route uses its workflow-native `768p` and `1080p` tiers.
 
 Provider-specific spellings, such as lowercase `2k`, must be normalized in the route translation layer with `Move.Values`. Expanding either vocabulary is an explicit protocol decision and must update the corresponding kind dictionary; catalog conformance checks route options against that dictionary.
 

@@ -214,22 +214,29 @@ func autoDLH3FrameCount(durationSeconds int) int {
 func autoDLH3Dimensions(params map[string]any) (int, int, bool) {
 	ratio := strings.TrimSpace(fmt.Sprint(params[string(coregeneration.ParamAspectRatio)]))
 	resolution := strings.ToLower(strings.TrimSpace(fmt.Sprint(params[string(coregeneration.ParamResolution)])))
-	shortEdge := 0
 	switch resolution {
-	case "720p":
-		shortEdge = 720
+	case "768p":
+		switch ratio {
+		case "16:9":
+			return 1344, 768, true
+		case "9:16":
+			return 768, 1344, true
+		case "1:1":
+			return 768, 768, true
+		default:
+			return 0, 0, false
+		}
 	case "1080p":
-		shortEdge = 1080
-	default:
-		return 0, 0, false
-	}
-	switch ratio {
-	case "16:9":
-		return shortEdge * 16 / 9, shortEdge, true
-	case "9:16":
-		return shortEdge, shortEdge * 16 / 9, true
-	case "1:1":
-		return shortEdge, shortEdge, true
+		switch ratio {
+		case "16:9":
+			return 1920, 1080, true
+		case "9:16":
+			return 1080, 1920, true
+		case "1:1":
+			return 1080, 1080, true
+		default:
+			return 0, 0, false
+		}
 	default:
 		return 0, 0, false
 	}

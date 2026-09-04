@@ -22,6 +22,7 @@ var videoParamRegistry = map[ParamID]CanonicalParamSpec{
 		Options: []ParamOption{
 			{Label: "480p", Value: "480p"},
 			{Label: "720p", Value: "720p"},
+			{Label: "768p", Value: "768p"},
 			{Label: "1080p", Value: "1080p"},
 			{Label: "4K", Value: "4k"},
 		},

@@ -48,6 +48,20 @@ const promptItems: PromptInsertItem[] = [
 		name: "电影感优化",
 		prompt: "增强镜头语言与光影层次",
 	},
+	{
+		categoryLabel: "其他",
+		id: "pack-image-only",
+		name: "图片专用",
+		prompt: "图片专用提示词",
+		type: "image",
+	},
+	{
+		categoryLabel: "视频摄影风格",
+		id: "pack-video-only",
+		name: "视频专用",
+		prompt: "视频专用摄影风格",
+		type: "video",
+	},
 ];
 
 const imageAsset: MediaAsset = {
@@ -109,6 +123,27 @@ describe("useGenerationSettingsForm", () => {
 			"pack-style",
 			"pack-camera",
 		]);
+	});
+
+	it("filters prompt presets by media kind while preserving shared styles", async () => {
+		const image = renderHook(() => useGenerationSettingsForm({ kind: "image", persist: false }));
+		await waitFor(() => expect(image.result.current.isReady).toBe(true));
+		expect(image.result.current.promptInsertItems.map((item) => item.id)).toEqual(
+			expect.arrayContaining(["pack-style", "pack-image-only"]),
+		);
+		expect(image.result.current.promptInsertItems.map((item) => item.id)).not.toContain(
+			"pack-video-only",
+		);
+		image.unmount();
+
+		const video = renderHook(() => useGenerationSettingsForm({ kind: "video", persist: false }));
+		await waitFor(() => expect(video.result.current.isReady).toBe(true));
+		expect(video.result.current.promptInsertItems.map((item) => item.id)).toEqual(
+			expect.arrayContaining(["pack-style", "pack-video-only"]),
+		);
+		expect(video.result.current.promptInsertItems.map((item) => item.id)).not.toContain(
+			"pack-image-only",
+		);
 	});
 
 	it("explicit_task_defaults_win_over_saved_preferences", async () => {
@@ -610,6 +645,7 @@ const workspaceValue = () => ({
 const catalog: GenerationModelsResponse = {
 	families: [
 		{ id: "family-image", kind: "image", label: "图片模型" },
+		{ id: "family-h3", kind: "video", label: "MiniMax H3" },
 		{ id: "family-text", kind: "text", label: "文本模型" },
 	],
 	versions: [
@@ -620,6 +656,14 @@ const catalog: GenerationModelsResponse = {
 			id: "version-image",
 			kind: "image",
 			label: "图片 V1",
+		},
+		{
+			canonicalModel: "MiniMax-H3",
+			capabilities: { async: true, supportsReferenceUrls: true },
+			familyId: "family-h3",
+			id: "version-h3",
+			kind: "video",
+			label: "MiniMax H3",
 		},
 		{
 			canonicalModel: "text-model",
@@ -634,6 +678,22 @@ const catalog: GenerationModelsResponse = {
 		imageRoute("route-reference", "参考图路由", true),
 		imageRoute("route-second", "任务默认路由", true),
 		imageRoute("route-no-reference", "无参考图路由", false),
+		{
+			adapter: "autodl.comfy.h3.video",
+			async: true,
+			configured: true,
+			docUrl: "",
+			familyId: "family-h3",
+			id: "autodl.minimax-h3",
+			kind: "video",
+			label: "AutoDL · MiniMax H3",
+			model: "MiniMax-H3",
+			params: [],
+			provider: "autodl",
+			status: "available",
+			supportsReferenceUrls: true,
+			versionId: "version-h3",
+		},
 		{
 			adapter: "test.text",
 			async: false,
@@ -652,7 +712,10 @@ const catalog: GenerationModelsResponse = {
 		},
 	],
 	models: [],
-	providers: [{ id: "openai", label: "OpenAI", providerType: "official" }],
+	providers: [
+		{ id: "openai", label: "OpenAI", providerType: "official" },
+		{ id: "autodl", label: "AutoDL", providerType: "custom" },
+	],
 };
 
 function imageRoute(id: string, label: string, supportsReferenceUrls: boolean): GenerationRoute {

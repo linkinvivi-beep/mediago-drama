@@ -131,10 +131,12 @@ export const useGenerationSettingsForm = ({
 		uploadIdPrefix,
 		useRawPrompt: true,
 	});
+	const promptReferenceItems = useMemo(
+		() => workspace.promptReferenceItems.filter((item) => !item.type || item.type === kind),
+		[kind, workspace.promptReferenceItems],
+	);
 	const promptItemsLoaded = workspace.hasLoadedPromptInsertItems;
-	const promptItemsForNormalization = promptItemsLoaded
-		? workspace.promptReferenceItems
-		: undefined;
+	const promptItemsForNormalization = promptItemsLoaded ? promptReferenceItems : undefined;
 	const [value, setValue] = useState<GenerationSettingsValue>(() =>
 		emptyGenerationSettingsValue(kind),
 	);
@@ -224,14 +226,14 @@ export const useGenerationSettingsForm = ({
 				usesContextValue
 					? promptSupplementDraftItemIdsFromValue(defaultValue)
 					: (storedSettings?.promptSupplementItemIds ?? []),
-				workspace.promptReferenceItems,
+				promptReferenceItems,
 				promptItemsLoaded,
 			);
 			const optimizationDraftItemId = resolvePromptOptimizationDraftItemId(
 				usesContextValue
 					? recordNestedString(defaultValue, "promptOptimization", "referenceId")
 					: (storedSettings?.promptOptimizeItemId ?? ""),
-				workspace.promptReferenceItems,
+				promptReferenceItems,
 				promptItemsLoaded,
 			);
 			const optimizationDraftRouteId = resolvePromptOptimizationDraftRouteId(
@@ -244,7 +246,7 @@ export const useGenerationSettingsForm = ({
 			const optimizationEnabled = usesContextValue
 				? recordNestedBoolean(defaultValue, "promptOptimization", "enabled")
 				: storedSettings?.usePromptOptimization === true;
-			const optimizationDraftItem = workspace.promptReferenceItems.find(
+			const optimizationDraftItem = promptReferenceItems.find(
 				(item) => item.id === optimizationDraftItemId,
 			);
 			const optimizationDraftModel = optimizationOptions.find(
@@ -267,7 +269,7 @@ export const useGenerationSettingsForm = ({
 					? promptOptimizationValue(optimizationDraftItem, optimizationDraftModel, codexAvailable)
 					: { enabled: false },
 				promptSupplements: supplementEnabled
-					? promptSupplementValues(supplementDraftItemIds, workspace.promptReferenceItems)
+					? promptSupplementValues(supplementDraftItemIds, promptReferenceItems)
 					: [],
 			};
 			initializedKeyRef.current = initializationKey;
@@ -279,14 +281,14 @@ export const useGenerationSettingsForm = ({
 		const current = valueRef.current;
 		const supplementDraftItemIds = normalizePromptSupplementDraftItemIds(
 			promptSupplementDraftItemIdsRef.current,
-			workspace.promptReferenceItems,
+			promptReferenceItems,
 			promptItemsLoaded,
 		);
 		const optimizationDraftItemId = promptOptimizationDraftItemClearedRef.current
 			? null
 			: resolvePromptOptimizationDraftItemId(
 					promptOptimizationDraftItemIdRef.current ?? "",
-					workspace.promptReferenceItems,
+					promptReferenceItems,
 					promptItemsLoaded,
 				);
 		const optimizationDraftRouteId = promptOptimizationDraftRouteClearedRef.current
@@ -308,7 +310,7 @@ export const useGenerationSettingsForm = ({
 			promptOptimizationDraftRouteIdRef.current = optimizationDraftRouteId;
 			setPromptOptimizationDraftRouteId(optimizationDraftRouteId);
 		}
-		const optimizationDraftItem = workspace.promptReferenceItems.find(
+		const optimizationDraftItem = promptReferenceItems.find(
 			(item) => item.id === optimizationDraftItemId,
 		);
 		const optimizationDraftModel = optimizationOptions.find(
@@ -326,7 +328,7 @@ export const useGenerationSettingsForm = ({
 				? promptOptimizationValue(optimizationDraftItem, optimizationDraftModel, codexAvailable)
 				: { enabled: false },
 			promptSupplements: promptSupplementEnabledRef.current
-				? promptSupplementValues(supplementDraftItemIds, workspace.promptReferenceItems)
+				? promptSupplementValues(supplementDraftItemIds, promptReferenceItems)
 				: [],
 		};
 		commitValue(next);
@@ -344,7 +346,7 @@ export const useGenerationSettingsForm = ({
 		workspace.hasLiveCatalog,
 		workspace.hasSettledGenerationPreferences,
 		workspace.hasSettledPromptInsertItems,
-		workspace.promptReferenceItems,
+		promptReferenceItems,
 	]);
 
 	const selectedRoute = useMemo(
@@ -565,14 +567,13 @@ export const useGenerationSettingsForm = ({
 		promptOptimizationModelOptions.find((option) => option.id === promptOptimizationDraftRouteId) ??
 		null;
 	const selectedPromptOptimizationItem =
-		workspace.promptReferenceItems.find((item) => item.id === promptOptimizationDraftItemId) ??
-		null;
+		promptReferenceItems.find((item) => item.id === promptOptimizationDraftItemId) ?? null;
 	const selectedPromptSupplementItems = useMemo(
 		() =>
 			promptSupplementDraftItemIds
-				.map((id) => workspace.promptReferenceItems.find((item) => item.id === id))
+				.map((id) => promptReferenceItems.find((item) => item.id === id))
 				.filter((item): item is PromptInsertItem => Boolean(item)),
-		[promptSupplementDraftItemIds, workspace.promptReferenceItems],
+		[promptReferenceItems, promptSupplementDraftItemIds],
 	);
 
 	const setPromptSupplementEnabled = useCallback(
@@ -582,18 +583,15 @@ export const useGenerationSettingsForm = ({
 			commitValue({
 				...valueRef.current,
 				promptSupplements: enabled
-					? promptSupplementValues(
-							promptSupplementDraftItemIdsRef.current,
-							workspace.promptReferenceItems,
-						)
+					? promptSupplementValues(promptSupplementDraftItemIdsRef.current, promptReferenceItems)
 					: [],
 			});
 		},
-		[commitValue, workspace.promptReferenceItems],
+		[commitValue, promptReferenceItems],
 	);
 	const togglePromptSupplementItem = useCallback(
 		(id: string) => {
-			const item = workspace.promptReferenceItems.find((candidate) => candidate.id === id);
+			const item = promptReferenceItems.find((candidate) => candidate.id === id);
 			if (!item) return;
 			const selected = promptSupplementDraftItemIdsRef.current.includes(item.id);
 			const nextDraftItemIds = selected
@@ -605,10 +603,10 @@ export const useGenerationSettingsForm = ({
 			setPromptSupplementEnabledState(true);
 			commitValue({
 				...valueRef.current,
-				promptSupplements: promptSupplementValues(nextDraftItemIds, workspace.promptReferenceItems),
+				promptSupplements: promptSupplementValues(nextDraftItemIds, promptReferenceItems),
 			});
 		},
-		[commitValue, workspace.promptReferenceItems],
+		[commitValue, promptReferenceItems],
 	);
 
 	const setPromptOptimizationEnabled = useCallback(
@@ -621,7 +619,7 @@ export const useGenerationSettingsForm = ({
 				? null
 				: resolvePromptOptimizationDraftItemId(
 						promptOptimizationDraftItemIdRef.current ?? "",
-						workspace.promptReferenceItems,
+						promptReferenceItems,
 						promptItemsLoaded,
 					);
 			const routeId = promptOptimizationDraftRouteClearedRef.current
@@ -635,7 +633,7 @@ export const useGenerationSettingsForm = ({
 			setPromptOptimizationDraftItemId(itemId);
 			promptOptimizationDraftRouteIdRef.current = routeId;
 			setPromptOptimizationDraftRouteId(routeId);
-			const item = workspace.promptReferenceItems.find((candidate) => candidate.id === itemId);
+			const item = promptReferenceItems.find((candidate) => candidate.id === itemId);
 			const model = promptOptimizationModelOptions.find((option) => option.id === routeId);
 			commitValue({
 				...valueRef.current,
@@ -648,7 +646,7 @@ export const useGenerationSettingsForm = ({
 			promptItemsLoaded,
 			preferredPromptOptimizationModel,
 			promptOptimizationModelOptions,
-			workspace.promptReferenceItems,
+			promptReferenceItems,
 		],
 	);
 	const setPromptOptimizationItemId = useCallback(
@@ -658,7 +656,7 @@ export const useGenerationSettingsForm = ({
 			setPromptOptimizationDraftItemId(id);
 			if (!valueRef.current.promptOptimization.enabled) return;
 			const item = id
-				? (workspace.promptReferenceItems.find((candidate) => candidate.id === id) ?? null)
+				? (promptReferenceItems.find((candidate) => candidate.id === id) ?? null)
 				: null;
 			const model =
 				promptOptimizationModelOptions.find(
@@ -669,7 +667,7 @@ export const useGenerationSettingsForm = ({
 				promptOptimization: promptOptimizationValue(item, model, codexAvailable),
 			});
 		},
-		[commitValue, codexAvailable, promptOptimizationModelOptions, workspace.promptReferenceItems],
+		[commitValue, codexAvailable, promptOptimizationModelOptions, promptReferenceItems],
 	);
 	const setPromptOptimizationRouteId = useCallback(
 		(id: string) => {
@@ -678,7 +676,7 @@ export const useGenerationSettingsForm = ({
 			setPromptOptimizationDraftRouteId(id);
 			if (!valueRef.current.promptOptimization.enabled) return;
 			const item =
-				workspace.promptReferenceItems.find(
+				promptReferenceItems.find(
 					(candidate) => candidate.id === promptOptimizationDraftItemIdRef.current,
 				) ?? null;
 			const model = promptOptimizationModelOptions.find((option) => option.id === id) ?? null;
@@ -687,7 +685,7 @@ export const useGenerationSettingsForm = ({
 				promptOptimization: promptOptimizationValue(item, model, codexAvailable),
 			});
 		},
-		[commitValue, codexAvailable, promptOptimizationModelOptions, workspace.promptReferenceItems],
+		[commitValue, codexAvailable, promptOptimizationModelOptions, promptReferenceItems],
 	);
 
 	const supportsReferenceImages =
@@ -888,7 +886,7 @@ export const useGenerationSettingsForm = ({
 		isValid,
 		maxReferenceImages,
 		mutateMediaAssets: workspace.mutateMediaAssets,
-		promptInsertItems: workspace.promptReferenceItems,
+		promptInsertItems: promptReferenceItems,
 		promptOptimizationModelOptions,
 		promptSupplementEnabled,
 		referenceDialogOpen,
