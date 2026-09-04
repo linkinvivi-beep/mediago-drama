@@ -118,6 +118,18 @@ export const useGenerationModelSelection = ({
 		() => configuredRoutes.filter((routeItem) => routeItem.kind === kind),
 		[configuredRoutes, kind],
 	);
+	const fallbackRouteForKind = useMemo(
+		() =>
+			preferredRoute(
+				catalog.routes.filter(
+					(routeItem) => routeItem.kind === kind && routeItem.familyId === defaultFamilyIds[kind],
+				),
+			) ??
+			preferredRoute(catalog.routes.filter((routeItem) => routeItem.kind === kind)) ??
+			fallbackCatalog.routes.find((routeItem) => routeItem.kind === kind) ??
+			fallbackCatalog.routes[0],
+		[catalog.routes, kind],
+	);
 	const visibleFamilies = useMemo(
 		() =>
 			catalog.families.filter(
@@ -145,6 +157,8 @@ export const useGenerationModelSelection = ({
 	const selectedFamily =
 		visibleFamilies.find((family) => family.id === selectedFamilyIds[kind]) ??
 		visibleFamilies[0] ??
+		catalog.families.find((family) => family.id === fallbackRouteForKind.familyId) ??
+		fallbackCatalog.families.find((family) => family.kind === kind) ??
 		fallbackCatalog.families[0];
 	const visibleVersions = useMemo(
 		() =>
@@ -179,6 +193,8 @@ export const useGenerationModelSelection = ({
 			(versionItem) => versionItem.id === selectedVersionIds[selectedFamily.id],
 		) ??
 		visibleVersions[0] ??
+		catalog.versions.find((versionItem) => versionItem.id === fallbackRouteForKind.versionId) ??
+		fallbackCatalog.versions.find((versionItem) => versionItem.kind === kind) ??
 		fallbackCatalog.versions[0];
 	const visibleRoutes = useMemo(
 		() => configuredRoutes.filter((routeItem) => routeItem.versionId === selectedVersion.id),
@@ -202,7 +218,7 @@ export const useGenerationModelSelection = ({
 	const selectedRoute =
 		visibleRoutes.find((routeItem) => routeItem.id === selectedRouteIds[selectedVersion.id]) ??
 		preferredRoute(visibleRoutes) ??
-		fallbackCatalog.routes[0];
+		fallbackRouteForKind;
 	const hasConfiguredRoutesForKind = configuredRoutesForKind.length > 0;
 	const selectedParams = useMemo(
 		() => declaredRouteParamValues(selectedRoute.params, routeParams[selectedRoute.id]),
