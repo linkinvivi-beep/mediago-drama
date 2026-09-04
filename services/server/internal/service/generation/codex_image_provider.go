@@ -52,9 +52,10 @@ type CodexImageSession interface {
 
 // CodexImageProvider executes all Codex image turns through one strict FIFO gate.
 type CodexImageProvider struct {
-	session CodexImageSession
-	root    string
-	queue   *codexImageFIFO
+	session                  CodexImageSession
+	root                     string
+	codexGeneratedImagesRoot string
+	queue                    *codexImageFIFO
 }
 
 type managedCodexImageSession struct {
@@ -136,11 +137,29 @@ func (queue *codexImageFIFO) release() {
 // NewCodexImageProvider creates one application-scoped Codex image provider.
 // dataRoot is the MediaLink-owned user-data directory, not an arbitrary output path.
 func NewCodexImageProvider(session CodexImageSession, dataRoot string) *CodexImageProvider {
+	codexGeneratedImagesRoot, _ := effectiveCodexGeneratedImagesRoot()
 	return &CodexImageProvider{
-		session: session,
-		root:    filepath.Join(filepath.Clean(strings.TrimSpace(dataRoot)), "generation", "codex-image"),
-		queue:   newCodexImageFIFO(),
+		session:                  session,
+		root:                     filepath.Join(filepath.Clean(strings.TrimSpace(dataRoot)), "generation", "codex-image"),
+		codexGeneratedImagesRoot: codexGeneratedImagesRoot,
+		queue:                    newCodexImageFIFO(),
 	}
+}
+
+func effectiveCodexGeneratedImagesRoot() (string, error) {
+	codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	if codexHome == "" {
+		userHome, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolving Codex home: %w", err)
+		}
+		codexHome = filepath.Join(userHome, ".codex")
+	}
+	codexHome = filepath.Clean(codexHome)
+	if codexHome == "." || !filepath.IsAbs(codexHome) {
+		return "", fmt.Errorf("Codex home must be absolute")
+	}
+	return filepath.Join(codexHome, "generated_images"), nil
 }
 
 // NewManagedCodexImageProvider creates the application singleton. Its app-server
@@ -650,7 +669,7 @@ func (provider *CodexImageProvider) responseForResult(model string, result codex
 	if !codexImageItemCompleted(result.Item) {
 		return codexImageProgressResponse(model, "waiting_reconnect", state), nil
 	}
-	_, mimeType, data, err := readValidatedCodexImage(*result.Item.SavedPath, allowedRoot, maxCodexImageOutputBytes, "Codex image job directory")
+	mimeType, data, err := provider.readResult(result, allowedRoot)
 	if err != nil {
 		return coregeneration.Response{}, err
 	}
@@ -667,6 +686,49 @@ func (provider *CodexImageProvider) responseForResult(model string, result codex
 		}},
 		Metadata: map[string]any{"runtime_state": state},
 	}, nil
+}
+
+func (provider *CodexImageProvider) readResult(result codexapp.ImageGenerationResult, jobDir string) (string, []byte, error) {
+	savedPath := strings.TrimSpace(*result.Item.SavedPath)
+	_, mimeType, data, err := readValidatedCodexImage(savedPath, jobDir, maxCodexImageOutputBytes, "Codex image job directory")
+	if err == nil {
+		return mimeType, data, nil
+	}
+	if officialErr := validateOfficialCodexImagePath(savedPath, provider.codexGeneratedImagesRoot, result.ThreadID, result.Item.ID); officialErr != nil {
+		return "", nil, err
+	}
+	_, mimeType, data, err = readValidatedCodexImage(savedPath, provider.codexGeneratedImagesRoot, maxCodexImageOutputBytes, "Codex generated image directory")
+	return mimeType, data, err
+}
+
+func validateOfficialCodexImagePath(path string, generatedImagesRoot string, threadID string, itemID string) error {
+	threadID = strings.TrimSpace(threadID)
+	itemID = strings.TrimSpace(itemID)
+	if !safeCodexImageTaskID.MatchString(threadID) || threadID == "." || threadID == ".." {
+		return fmt.Errorf("Codex image result has unsafe thread ID")
+	}
+	if !safeCodexImageTaskID.MatchString(itemID) || itemID == "." || itemID == ".." {
+		return fmt.Errorf("Codex image result has unsafe item ID")
+	}
+	root := filepath.Clean(strings.TrimSpace(generatedImagesRoot))
+	path = filepath.Clean(strings.TrimSpace(path))
+	if root == "." || !filepath.IsAbs(root) || path == "." || !filepath.IsAbs(path) {
+		return fmt.Errorf("Codex generated image path must be absolute")
+	}
+	extension := filepath.Ext(path)
+	if extension != strings.ToLower(extension) {
+		return fmt.Errorf("Codex generated image extension must be lowercase")
+	}
+	switch extension {
+	case ".png", ".jpg", ".jpeg", ".gif":
+	default:
+		return fmt.Errorf("Codex generated image extension %q is unsupported", extension)
+	}
+	expected := filepath.Join(root, threadID, itemID+extension)
+	if path != expected {
+		return fmt.Errorf("Codex generated image path does not match its structured result")
+	}
+	return nil
 }
 
 func codexImageProgressResponse(model string, status string, state GenerationTaskRuntimeState) coregeneration.Response {

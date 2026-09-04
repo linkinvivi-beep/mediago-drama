@@ -187,6 +187,110 @@ func TestCodexImageProviderResultCases(t *testing.T) {
 	}
 }
 
+func TestCodexImageProviderImportsExactOfficialGeneratedImage(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	savedPath := writeTestPNG(t, filepath.Join(codexHome, "generated_images", "thread-official"), "item-official.png")
+	stub := &codexImageSessionStub{
+		capabilities: codexapp.ModelProviderCapabilities{ImageGeneration: true},
+		generate: func(context.Context, codexapp.ImageGenerationRequest, func(codexapp.ImageGenerationCheckpoint)) (codexapp.ImageGenerationResult, error) {
+			return completedCodexImageResult("thread-official", "turn-official", "item-official", savedPath), nil
+		},
+	}
+
+	response, err := NewCodexImageProvider(stub, t.TempDir()).Generate(context.Background(), codexImageRequest("task-official"))
+	if err != nil || response.Status != "completed" || len(response.Assets) != 1 {
+		t.Fatalf("Generate() = %#v, %v", response, err)
+	}
+}
+
+func TestCodexImageProviderRejectsInvalidOfficialGeneratedImagePath(t *testing.T) {
+	tests := []struct {
+		name     string
+		threadID string
+		itemID   string
+		arrange  func(t *testing.T, codexHome string) string
+	}{
+		{
+			name: "wrong thread", threadID: "thread-good", itemID: "item-good",
+			arrange: func(t *testing.T, codexHome string) string {
+				return writeTestPNG(t, filepath.Join(codexHome, "generated_images", "thread-other"), "item-good.png")
+			},
+		},
+		{
+			name: "wrong item", threadID: "thread-good", itemID: "item-good",
+			arrange: func(t *testing.T, codexHome string) string {
+				return writeTestPNG(t, filepath.Join(codexHome, "generated_images", "thread-good"), "item-other.png")
+			},
+		},
+		{
+			name: "unsupported extension", threadID: "thread-good", itemID: "item-good",
+			arrange: func(t *testing.T, codexHome string) string {
+				return writeTestPNG(t, filepath.Join(codexHome, "generated_images", "thread-good"), "item-good.webp")
+			},
+		},
+		{
+			name: "outside root", threadID: "thread-good", itemID: "item-good",
+			arrange: func(t *testing.T, codexHome string) string {
+				return writeTestPNG(t, filepath.Join(codexHome, "outside"), "item-good.png")
+			},
+		},
+		{
+			name: "symlinked file", threadID: "thread-good", itemID: "item-good",
+			arrange: func(t *testing.T, codexHome string) string {
+				outside := writeTestPNG(t, t.TempDir(), "outside.png")
+				dir := filepath.Join(codexHome, "generated_images", "thread-good")
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				path := filepath.Join(dir, "item-good.png")
+				if err := os.Symlink(outside, path); err != nil {
+					t.Fatal(err)
+				}
+				return path
+			},
+		},
+		{
+			name: "symlinked parent", threadID: "thread-good", itemID: "item-good",
+			arrange: func(t *testing.T, codexHome string) string {
+				outsideDir := t.TempDir()
+				_ = writeTestPNG(t, outsideDir, "item-good.png")
+				generatedImages := filepath.Join(codexHome, "generated_images")
+				if err := os.MkdirAll(generatedImages, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				threadDir := filepath.Join(generatedImages, "thread-good")
+				if err := os.Symlink(outsideDir, threadDir); err != nil {
+					t.Fatal(err)
+				}
+				return filepath.Join(threadDir, "item-good.png")
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			codexHome := t.TempDir()
+			t.Setenv("CODEX_HOME", codexHome)
+			savedPath := test.arrange(t, codexHome)
+			stub := &codexImageSessionStub{
+				capabilities: codexapp.ModelProviderCapabilities{ImageGeneration: true},
+				generate: func(context.Context, codexapp.ImageGenerationRequest, func(codexapp.ImageGenerationCheckpoint)) (codexapp.ImageGenerationResult, error) {
+					return completedCodexImageResult(test.threadID, "turn-good", test.itemID, savedPath), nil
+				},
+			}
+
+			response, err := NewCodexImageProvider(stub, t.TempDir()).Generate(context.Background(), codexImageRequest("task-invalid"))
+			if err == nil {
+				t.Fatalf("Generate() = %#v, want invalid official path error", response)
+			}
+			if len(response.Assets) != 0 {
+				t.Fatalf("Generate() assets = %#v, want none", response.Assets)
+			}
+		})
+	}
+}
+
 func TestCodexImageProviderOutputCannotBeSwappedBeforeAssetImport(t *testing.T) {
 	root := t.TempDir()
 	jobDir := filepath.Join(root, "generation", "codex-image", "task-swap", "attempt-0123456789abcdef0123456789abcdef")
